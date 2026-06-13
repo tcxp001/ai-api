@@ -227,7 +227,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th style="width:140px">Name</th><th style="width:280px">Base URL</th><th style="width:90px">模型</th><th style="width:130px">状态</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
+              <thead><tr><th style="width:140px">Name</th><th style="width:320px">Base URL</th><th style="width:90px">模型</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
@@ -381,54 +381,9 @@
     const firstModel = (p) => modelNames(p)[0] || '';
     const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
     const DEFAULT_MONITOR_PROMPT = '在吗？';
-    const DEFAULT_PROXY_BASE = 'http://127.0.0.1:18006';
     function providerByName(name) {
       const key = String(name || '').toLowerCase();
       return (state.providers || []).find(p => String(p.name || '').toLowerCase() === key) || null;
-    }
-    function activeProxyBase() {
-      const items = state.aiproxy?.items || [];
-      const preferred = items.find(item => item.httpAlive && item.url) || items.find(item => item.url) || null;
-      return String(preferred?.url || DEFAULT_PROXY_BASE).replace(/\/$/, '');
-    }
-
-    function providerLocalUrl(provider) {
-      return `${activeProxyBase()}/${encodeURIComponent(provider?.name || '')}/v1`;
-    }
-
-    function providerHealthSummary(provider) {
-      const models = modelNames(provider);
-      const providerName = provider?.name || '';
-      const statusMap = state.status?.providers || {};
-      const entries = (models.length ? models : ['']).map(model => {
-        const key = healthResultKey(providerName, model);
-        return state.healthResults[key] || statusMap[key] || null;
-      }).filter(Boolean);
-      if (!entries.length) return { label: '未测', kind: 'muted', checkedAt: '', detail: '' };
-      const alive = entries.filter(item => item.alive).length;
-      const latest = entries.slice().sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')))[0] || {};
-      const failed = entries.slice().reverse().find(item => item && !item.alive) || null;
-      const detail = healthDetailText(failed || latest) || healthDetailText(latest) || '';
-      const checkedAt = latest.checkedAt || '';
-      if (alive === entries.length) return { label: `可用 ${alive}/${entries.length}`, kind: 'ok', checkedAt, detail };
-      if (alive > 0) return { label: `部分 ${alive}/${entries.length}`, kind: 'warn', checkedAt, detail };
-      return { label: `失败 0/${entries.length}`, kind: 'fail', checkedAt, detail };
-    }
-
-    async function copyText(text, message = '已复制') {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const area = document.createElement('textarea');
-        area.value = text;
-        area.style.position = 'fixed';
-        area.style.opacity = '0';
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand('copy');
-        area.remove();
-      }
-      $('serverState').textContent = message;
     }
     function modelMeta(provider, model) {
       const models = provider?.models || provider?.model;
@@ -565,19 +520,16 @@
     function renderProviders() {
       $('providerRows').innerHTML = state.providers.map((p, i) => {
         const models = modelNames(p);
-        const health = providerHealthSummary(p);
-        const healthTitle = [health.detail, health.checkedAt ? `检测：${health.checkedAt}` : ''].filter(Boolean).join('\n');
         return `
         <tr>
           <td class="truncate">${esc(p.name)}${p.enabled === false ? ' <span class="status muted">停用</span>' : ''}</td>
           <td class="truncate" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
           <td title="${esc(models.join(', '))}">${esc(models.length || 0)}</td>
-          <td title="${esc(healthTitle)}">${statusPill(null, health.label, health.kind)}<div class="subtle">${esc(shortDateTime(health.checkedAt))}</div></td>
           <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
           <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
           <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="7"><div class="empty">暂无 provider</div></td></tr>`;
+      }).join('') || `<tr><td colspan="6"><div class="empty">暂无 provider</div></td></tr>`;
       renderProviderEditor();
     }
 
