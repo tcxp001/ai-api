@@ -575,7 +575,7 @@
           <td title="${esc(healthTitle)}">${statusPill(null, health.label, health.kind)}<div class="subtle">${esc(shortDateTime(health.checkedAt))}</div></td>
           <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
           <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
-          <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
+          <td><div class="row-tools"><button data-health-provider="${i}" type="button">测活</button><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
         </tr>`;
       }).join('') || `<tr><td colspan="7"><div class="empty">暂无 provider</div></td></tr>`;
       renderProviderEditor();
@@ -790,6 +790,17 @@
         });
       });
       return rows;
+    }
+
+    function providerHealthTargets(provider) {
+      const providerName = provider?.name || '';
+      const models = modelNames(provider);
+      return models.map(model => ({
+        provider: providerName,
+        providerName,
+        model,
+        key: healthResultKey(providerName, model)
+      }));
     }
 
     function currentHealthSelection() {
@@ -1037,6 +1048,7 @@
           if (!run.cancelled) {
             done += 1;
             renderHealth();
+            renderProviders();
             renderHealthRunButton();
             $('serverState').textContent = `测活中 ${done}/${targets.length}`;
           }
@@ -1055,6 +1067,7 @@
           state.healthRun = null;
           state.healthRunning = {};
           renderHealth();
+          renderProviders();
           renderHealthRunButton();
           $('serverState').textContent = run.cancelled ? `测活已取消 ${done}/${targets.length}` : `测活完成 ${done}/${targets.length}`;
         }
@@ -1228,6 +1241,13 @@
           window.location.reload();
         } else if (target.id === 'addProviderBtn') {
           beginProviderDraft({ name: `provider-${state.providers.length + 1}`, base_url: 'https://example.com/v1', api_key: '', api_mode: 'codex_responses', models: {}, headers: {}, remove_headers: [], enabled: true });
+        } else if (target.hasAttribute('data-health-provider')) {
+          const provider = state.providers[Number(target.dataset.healthProvider)];
+          if (!provider?.name) throw new Error('Provider 名称缺失');
+          if (provider.enabled === false) throw new Error('请先启用该 Provider 再测活');
+          const targets = providerHealthTargets(provider);
+          if (!targets.length) throw new Error('该 Provider 没有模型，请先添加模型');
+          await runHealth(targets);
         } else if (target.hasAttribute('data-edit-provider')) {
           const index = Number(target.dataset.editProvider);
           const provider = state.providers[index];
