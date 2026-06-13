@@ -219,8 +219,11 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     provider.pop("url", None)
     if "api_key" not in provider and "key" in provider:
         provider["api_key"] = provider.pop("key")
-    mode = str(provider.get("api_mode") or "").strip()
-    provider["api_mode"] = mode or "codex_responses"
+    mode = str(provider.get("api_mode") or "").strip() or "codex_responses"
+    mode = {"responses": "codex_responses", "chat": "chat_completions"}.get(mode, mode)
+    if mode not in {"codex_responses", "chat_completions", "custom_endpoint"}:
+        raise ValueError(f"{label} api_mode must be codex_responses, chat_completions or custom_endpoint")
+    provider["api_mode"] = mode
     custom_endpoint = str(provider.get("custom_endpoint") or provider.get("endpoint") or "").strip()
     if provider["api_mode"] == "custom_endpoint":
         if not custom_endpoint:
@@ -251,7 +254,7 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     elif isinstance(models, list):
         provider["models"] = {str(item): {} for item in models if str(item).strip()}
     elif isinstance(models, dict):
-        provider["models"] = models
+        provider["models"] = {str(name).strip(): (meta if isinstance(meta, dict) else {}) for name, meta in models.items() if str(name).strip()}
     else:
         provider["models"] = {}
     return provider
@@ -1568,6 +1571,60 @@ def restart_aiproxy_services_for_config(config_path: Path) -> dict[str, Any]:
     return {"matched": len(items), "items": items}
 
 
+def summarize_restart_after_config_write(result: dict[str, Any]) -> dict[str, Any]:
+    manual = result.get("manualProxy") if isinstance(result.get("manualProxy"), dict) else {}
+    services = result.get("aiproxyServices") if isinstance(result.get("aiproxyServices"), dict) else {}
+    matched = 0
+    restarted = 0
+    skipped = 0
+    errors: list[str] = []
+
+    if manual.get("error"):
+        errors.append(str(manual.get("error")))
+    matched += int(manual.get("matched") or 0)
+    restarted += len(manual.get("started") or [])
+    for item in manual.get("errors") or []:
+        errors.append(str(item.get("error") or item))
+
+    if services.get("error"):
+        errors.append(str(services.get("error")))
+    matched += int(services.get("matched") or 0)
+    for item in services.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        service = str(item.get("service") or item.get("id") or "AIProxy")
+        if item.get("error"):
+            errors.append(f"{service}: {item.get('error')}")
+        elif item.get("restarted") is True:
+            restarted += 1
+        elif item.get("skipped"):
+            skipped += 1
+        elif item.get("returnCode") not in (None, 0):
+            errors.append(f"{service}: systemctl restart 返回 {item.get('returnCode')}")
+
+    ok = not errors
+    applied = restarted > 0
+    if errors:
+        message = "AIProxy 自动重启失败，请到 AIProxy 页查看"
+    elif applied:
+        message = "AIProxy 已自动重启，配置已生效"
+    elif matched:
+        message = "AIProxy 当前未运行，配置已保存，启动后生效" if skipped else "未执行 AIProxy 重启，请到 AIProxy 页确认状态"
+    else:
+        message = "未发现正在运行的 AIProxy，配置已保存，启动后生效"
+
+    result.update({
+        "ok": ok,
+        "applied": applied,
+        "matched": matched,
+        "restarted": restarted,
+        "skipped": skipped,
+        "errors": errors,
+        "message": message,
+    })
+    return result
+
+
 def restart_after_config_write() -> dict[str, Any]:
     config_path = active_config_file()
     result: dict[str, Any] = {"configPath": str(config_path)}
@@ -1579,7 +1636,7 @@ def restart_after_config_write() -> dict[str, Any]:
         result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path)
     except Exception as exc:
         result["aiproxyServices"] = {"error": f"{type(exc).__name__}: {exc}"}
-    return result
+    return summarize_restart_after_config_write(result)
 
 
 def is_cloudflare_challenge(response: requests.Response) -> bool:
@@ -2039,7 +2096,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 before_providers = load_provider_list()
                 backup, warnings = save_provider_list(providers, str(payload.get("format") or "auto"))
                 after_providers = load_provider_list()
-                app_sync = auto_sync_app_configs(before_providers, after_providers)
+                try:
+                    app_sync = auto_sync_app_configs(before_providers, after_providers)
+                    app_sync.setdefault("ok", True)
+                except Exception as exc:
+                    app_sync = {"ok": False, "needed": True, "error": f"{type(exc).__name__}: {exc}"}
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "warnings": warnings, "appSync": app_sync, "restart": restart})
                 return

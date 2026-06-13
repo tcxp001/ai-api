@@ -713,6 +713,33 @@
       return item;
     }
 
+    function validateProviderBeforeSave(provider, currentIndex = -1) {
+      const name = String(provider?.name || '').trim();
+      const baseUrl = String(provider?.base_url || '').trim();
+      if (!name) throw new Error('Provider 名称必填');
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) throw new Error('Provider 名称只能使用字母、数字、点号、下划线、连字符，并且必须以字母或数字开头');
+      if (!baseUrl) throw new Error('Base URL 必填');
+      let parsedUrl;
+      try { parsedUrl = new URL(baseUrl); } catch (_) { throw new Error('Base URL 必须是有效 URL'); }
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('Base URL 必须以 http:// 或 https:// 开头');
+      if (provider.api_mode === 'custom_endpoint' && !String(provider.custom_endpoint || '').startsWith('/')) throw new Error('自定义 Endpoint 必须以 / 开头');
+      const duplicate = state.providers.find((item, index) => index !== currentIndex && !item.__draft && String(item.name || '').trim().toLowerCase() === name.toLowerCase());
+      if (duplicate) throw new Error(`Provider 名称重复：${name}`);
+    }
+
+    function providerSaveWarnings(provider) {
+      const warnings = [];
+      if (!String(provider?.api_key || provider?.key || '').trim()) warnings.push('API Key 为空；仅在上游不需要鉴权时才建议保存');
+      if (!Object.keys(provider?.models || {}).length) warnings.push('模型列表为空；Codex/Hermes 可能无法选择模型');
+      return warnings;
+    }
+
+    function confirmProviderWarnings(provider) {
+      const warnings = providerSaveWarnings(provider);
+      if (!warnings.length) return true;
+      return confirm(`当前 Provider 有 ${warnings.length} 条提示：\n- ${warnings.join('\n- ')}\n\n仍然保存？`);
+    }
+
     function healthDetailText(status) {
       const text = String(status?.compact || status?.detail || '').trim();
       if (!text || text === '-' || text === '➖') return '';
@@ -875,12 +902,29 @@
       return state.monitor;
     }
 
+    function appSyncText(appSync) {
+      if (!appSync) return '应用配置未同步';
+      if (appSync.ok === false) return `应用配置同步失败：${appSync.error || '请到应用配置页重试'}`;
+      if (appSync.needed === false) return '应用配置无变化';
+      const parts = [];
+      if (appSync.codex) parts.push(`Codex ${appSync.codex.providers || 0}`);
+      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers || 0}`);
+      return parts.length ? `应用配置已同步（${parts.join('，')}）` : '应用配置已同步';
+    }
+
+    function saveResultMessage(data) {
+      const parts = ['配置已保存'];
+      parts.push(data.backup ? '已备份' : '无旧配置备份');
+      parts.push(appSyncText(data.appSync));
+      if (data.restart?.message) parts.push(data.restart.message);
+      if (data.warnings?.length) parts.push(`提示 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}`);
+      return parts.join('；');
+    }
+
     async function persistProviders() {
       const providers = state.providers.filter(provider => !provider.__draft).map(providerForPersist);
       const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ providers }) });
-      const warningText = data.warnings?.length ? `，警告 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}` : '';
-      const restartText = data.restart?.ok === false ? '，AIProxy 重启失败，请到 AIProxy 页查看' : '';
-      state.lastSaveMessage = `配置已保存${warningText}${restartText}`;
+      state.lastSaveMessage = saveResultMessage(data);
       $('serverState').textContent = state.lastSaveMessage;
       return data;
     }
@@ -889,7 +933,8 @@
       if (state.tab === 'config') {
         if (state.selectedProvider >= 0) {
           const provider = collectProviderEditor();
-          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
+          validateProviderBeforeSave(provider, state.selectedProvider);
+          if (!confirmProviderWarnings(provider)) return;
           state.providers[state.selectedProvider] = provider;
         }
         await persistProviders();
@@ -1204,7 +1249,8 @@
           await loadAll();
         } else if (target.id === 'applyProviderBtn') {
           const provider = collectProviderEditor();
-          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
+          validateProviderBeforeSave(provider, state.selectedProvider);
+          if (!confirmProviderWarnings(provider)) return;
           if (state.selectedProvider < 0) {
             state.providers.unshift(provider);
           } else {
