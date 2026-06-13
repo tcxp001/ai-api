@@ -1713,10 +1713,10 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
 
 
 HEALTH_UA_LABELS = {
-    "空字符串": "空UA",
+    "空字符串": "Empty UA",
     "Chrome电脑": "Chrome",
 }
-HEALTH_UA_ORDER = ["Codex", "空UA", "Curl", "Chrome"]
+HEALTH_UA_ORDER = ["Codex", "Empty UA", "Curl", "Chrome"]
 
 
 def health_ua_profiles() -> list[tuple[str, Any]]:
@@ -1739,16 +1739,16 @@ def health_configured_ua_label(headers: dict[str, Any], remove_headers: list[Any
     if str(originator or "") == "codex_cli_rs":
         return "Codex"
     if ua is None:
-        return "自定义"
+        return "Custom"
 
     ua_text = str(ua)
     if ua_text == "":
-        return "空UA"
+        return "Empty UA"
     if ua_text == "curl/8.0":
         return "Curl"
     if "Mozilla/5.0" in ua_text:
         return "Chrome"
-    return "自定义"
+    return "Custom"
 
 
 HEALTH_ENDPOINT_CANDIDATES = [
@@ -1883,6 +1883,10 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             "endpointLabel": endpoint_label,
         }
 
+    profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
+    result["uaProfiles"] = [label for label, _ in profiles]
+    result["uaProfileCount"] = len(profiles)
+
     if not base_url or not api_key or not model:
         detail = "缺 base_url/api_key/model"
         result.update({
@@ -1890,11 +1894,11 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             "detail": detail,
             "compact": api_checks.compact_result("❌ 失败", detail, include_latency=True),
             "endpointLabel": "-",
-            "uaResults": [failed_ua_result(ua_label, detail)],
+            "uaMode": "all" if all_ua else "configured",
+            "uaResults": [failed_ua_result(label, detail) for label, _ in profiles],
         })
         return attach_health_diagnosis(result)
 
-    profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
     inner_workers = api_checks.provider_inner_max_workers(name)
 
     def check_one(endpoint_label: str, endpoint: str, variant: str, ua_label: str, user_agent: Any) -> dict[str, Any]:
@@ -2246,7 +2250,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     result_groups = [future.result() for future in futures]
                 results = [result for group in result_groups for result in group]
                 status = merge_status("providers", results, "resultKey") if results else load_status()
-                self.send_json(200, {"results": results, "status": status, "allUa": all_ua})
+                self.send_json(200, {"results": results, "status": status, "allUa": all_ua, "uaProfiles": [label for label, _ in health_ua_profiles()] if all_ua else []})
                 return
             if split.path == "/api/providers/models":
                 provider = payload.get("provider")

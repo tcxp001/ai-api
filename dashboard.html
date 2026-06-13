@@ -101,7 +101,7 @@
     }
     .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     table { width: 100%; min-width: 980px; border-collapse: collapse; table-layout: fixed; background: #fff; }
-    .health-table { min-width: 1700px; }
+    .health-table { min-width: 1650px; }
     .monitor-table { width: 100%; min-width: 0; table-layout: fixed; }
     .monitor-table th, .monitor-table td { white-space: nowrap; }
     .monitor-table th:nth-child(1), .monitor-table td:nth-child(1) { width: 8%; }
@@ -120,7 +120,7 @@
     .health-check input:checked + .health-check-box { border-color: var(--accent); background: var(--accent); }
     .health-check input:checked + .health-check-box::after { content: ""; display: block; width: 4px; height: 8px; margin: 2px 0 0 5px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
     .health-check input:focus-visible + .health-check-box { box-shadow: 0 0 0 3px rgba(8,127,123,.18); }
-    .health-result-cell { white-space: nowrap; overflow: visible; }
+    .health-result-cell { white-space: normal; overflow: visible; line-height: 1.25; }
     .health-result-cell .status { white-space: nowrap; line-height: 1.25; }
     th, td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: 13px; }
     th { background: var(--surface-2); color: #3a464c; font-weight: 700; }
@@ -227,7 +227,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th style="width:140px">Name</th><th style="width:320px">Base URL</th><th style="width:90px">模型</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
+              <thead><tr><th style="width:140px">Provider</th><th style="width:320px">Base URL</th><th style="width:90px">Model</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
@@ -250,14 +250,14 @@
           <div class="field">
             <label for="headerPreset">User-Agent</label>
             <select id="headerPreset">
-              <option value="default">默认，不修改UA</option>
-              <option value="empty">空UA</option>
+              <option value="default">Default</option>
+              <option value="empty">Empty UA</option>
               <option value="curl">Curl</option>
               <option value="chrome">Chrome</option>
               <option value="codex">Codex</option>
-              <option value="custom">自定义</option>
+              <option value="custom">Custom</option>
             </select>
-            <input id="headerCustomUa" placeholder="填写自定义 User-Agent" hidden>
+            <input id="headerCustomUa" placeholder="Custom User-Agent" hidden>
           </div>
           <div class="actions">
             <button id="applyProviderBtn" class="primary" type="button">保存</button>
@@ -271,7 +271,7 @@
         <div class="panel-head">
           <div>
             <h2>Provider 测活</h2>
-            <div class="subtle">选择 Provider/模型后测试；UA矩阵会分别测试 Codex、空UA、Curl、Chrome。</div>
+            <div class="subtle">选择 Provider/Model 后测试；UA matrix 会分别测试 Codex、Empty UA、Curl、Chrome。</div>
           </div>
           <div class="actions">
             <label class="check-toggle"><input id="healthAllUa" type="checkbox">UA矩阵</label>
@@ -282,7 +282,7 @@
         </div>
         <div class="table-wrap">
           <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:150px">诊断</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
+            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:110px">Reasoning</th><th style="width:90px">Status</th><th style="width:115px">Codex</th><th style="width:115px">Empty UA</th><th style="width:115px">Curl</th><th style="width:115px">Chrome</th><th style="width:130px">Custom</th><th style="width:170px">Checked At</th></tr></thead>
             <tbody id="healthRows"></tbody>
           </table>
         </div>
@@ -332,7 +332,7 @@
         </div>
         <div class="table-wrap">
           <table class="monitor-table">
-            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>状态</th><th class="detail-col">详情</th><th>检测时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>Status</th><th class="detail-col">Details</th><th>Checked At</th><th>Actions</th></tr></thead>
             <tbody id="chainRows"></tbody>
           </table>
         </div>
@@ -398,12 +398,14 @@
       }
       return {};
     }
-    function chainReasoningText(chain) {
-      const provider = providerByName(chain?.providerId);
-      const meta = modelMeta(provider, chain?.model);
+    function providerReasoningText(provider, model) {
+      const meta = modelMeta(provider, model);
       const effort = meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning || '';
-      if (effort && typeof effort === 'object') return effort.effort || '默认';
-      return String(effort || '').trim() || '默认';
+      if (effort && typeof effort === 'object') return String(effort.effort || '').trim() || '-';
+      return String(effort || '').trim() || '-';
+    }
+    function chainReasoningText(chain) {
+      return providerReasoningText(providerByName(chain?.providerId), chain?.model);
     }
     function providerEndpointText(provider) {
       const mode = String(provider?.api_mode || '').trim();
@@ -414,18 +416,18 @@
     function providerUserAgentText(provider) {
       const headers = provider?.headers || {};
       const remove = new Set((provider?.remove_headers || []).map(v => String(v || '').toLowerCase()));
-      if (remove.has('user-agent')) return '移除';
+      if (remove.has('user-agent')) return 'Removed';
       const key = Object.keys(headers).find(k => String(k).toLowerCase() === 'user-agent');
-      if (key === undefined) return '默认';
+      if (key === undefined) return 'Default';
       const value = headers[key];
-      if (value === '') return '空UA';
-      if (value === null || value === undefined) return '默认';
+      if (value === '') return 'Empty UA';
+      if (value === null || value === undefined) return 'Default';
       const ua = String(value);
       const lower = ua.toLowerCase();
       if (lower.includes('codex_cli_rs') || String(headers.Originator || headers.originator || '').toLowerCase() === 'codex_cli_rs') return 'Codex';
       if (lower.startsWith('curl/') || lower === 'curl') return 'Curl';
       if (lower.includes('chrome/') || lower.includes('chromium/') || lower.includes('applewebkit/')) return 'Chrome';
-      return '自定义';
+      return 'Custom';
     }
     function collectMonitorPrompts() {
       const prompts = { ...(state.monitorPrompts || {}) };
@@ -560,15 +562,15 @@
       const remove = provider?.remove_headers || [];
       const ua = headers['User-Agent'];
       if (headers.Originator === 'codex_cli_rs') return 'Codex';
-      if (ua === '') return '空UA';
+      if (ua === '') return 'Empty UA';
       if (ua === 'curl/8.0') return 'Curl';
       if (String(ua || '').includes('Mozilla/5.0')) return 'Chrome';
       if (ua) return ua;
-      return '默认';
+      return 'Default';
     }
 
     function endpointLabel(value, provider = {}) {
-      if (value === 'custom_endpoint') return provider.custom_endpoint || '自定义';
+      if (value === 'custom_endpoint') return provider.custom_endpoint || 'Custom';
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
@@ -763,7 +765,7 @@
       return hiddenFragments.some(fragment => text.includes(fragment)) ? '' : text;
     }
 
-    const HEALTH_UA_COLUMNS = ['Codex', '空UA', 'Curl', 'Chrome', '自定义'];
+    const HEALTH_UA_COLUMNS = ['Codex', 'Empty UA', 'Curl', 'Chrome', 'Custom'];
 
     function healthResultKey(providerName, model) {
       return `${providerName}::${model || ''}`;
@@ -803,19 +805,34 @@
 
     function healthUaResultMap(status) {
       const resultMap = {};
+      const diagnosis = status?.diagnosis || {};
+      const diagnosisLabel = status?.diagnosisLabel || diagnosis.label || '';
+      const diagnosisTitle = [
+        diagnosis.summary || status?.diagnosisSummary,
+        diagnosis.suggestion || status?.diagnosisSuggestion
+      ].filter(Boolean).join('；');
       const addResult = (item) => {
         if (!item || !item.ua) return;
-        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : '自定义';
-        const text = String(item.compact || healthDetailText(item) || item.status || '').trim();
-        if (!text) return;
+        const normalizedUa = item.ua === '空UA' || item.ua === '空字符串' ? 'Empty UA' : item.ua === '自定义' ? 'Custom' : item.ua;
+        const label = HEALTH_UA_COLUMNS.includes(normalizedUa) ? normalizedUa : 'Custom';
+        const rawText = String(item.compact || healthDetailText(item) || item.status || '').trim();
+        if (!rawText) return;
+        const displayText = item.alive === true ? '可用' : (status?.alive ? 'UA不兼容' : diagnosisLabel || '失败');
         resultMap[label] = {
-          text,
-          title: [item.endpointLabel, item.ua, item.detail || item.status || text].filter(Boolean).join(': '),
+          text: displayText,
+          title: [item.endpointLabel, item.ua, item.detail || item.status || rawText, diagnosisTitle].filter(Boolean).join('；'),
           alive: item.alive
         };
       };
       if (Array.isArray(status?.uaResults)) status.uaResults.forEach(addResult);
       else if (status?.ua) addResult(status);
+
+      const expectedProfiles = Array.isArray(status?.uaProfiles) ? status.uaProfiles : [];
+      expectedProfiles.forEach(label => {
+        const normalized = label === '空UA' || label === '空字符串' ? 'Empty UA' : label === '自定义' ? 'Custom' : label;
+        if (!HEALTH_UA_COLUMNS.includes(normalized) || resultMap[normalized]) return;
+        resultMap[normalized] = { text: '未返回', title: 'UA matrix did not return this UA result', alive: false };
+      });
       return resultMap;
     }
 
@@ -834,27 +851,6 @@
     function healthEndpointText(status) {
       if (status?.endpointLabel) return status.endpointLabel;
       return '';
-    }
-
-    function healthDiagnosisText(status, running) {
-      if (running) return '测试中';
-      if (!status?.checkedAt) return '-';
-      return status.diagnosisLabel || status.diagnosis?.label || (status.alive ? '可用' : '失败');
-    }
-
-    function healthDiagnosisTitle(status) {
-      const diagnosis = status?.diagnosis || {};
-      return [
-        diagnosis.summary || status?.diagnosisSummary,
-        diagnosis.suggestion || status?.diagnosisSuggestion,
-        status?.detail
-      ].filter(Boolean).join('；');
-    }
-
-    function healthDiagnosisKind(status, running) {
-      if (running || !status?.checkedAt) return 'muted';
-      if (status.alive) return status.diagnosis?.category === 'ua_partial' ? 'pending' : 'ok';
-      return 'fail';
     }
 
     function hasReasoningEffort(value) {
@@ -892,20 +888,18 @@
         const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
         const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
         const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
+        const reasoningText = providerReasoningText(p, row.model);
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
-        const diagnosisText = healthDiagnosisText(s, running);
-        const diagnosisTitle = running ? '测试中' : healthDiagnosisTitle(s);
-        const diagnosisKind = healthDiagnosisKind(s, running);
         const uaResultMap = running ? {} : healthUaResultMap(s);
         const uaCells = HEALTH_UA_COLUMNS.map(label => healthUaCell(uaResultMap, label)).join('');
         return `<tr>
           <td><label class="health-check" title="选择"><input type="checkbox" data-health-select="1" data-health-key="${esc(row.key)}" data-health-provider="${esc(row.providerName)}" data-health-model="${esc(row.model)}"${checked}><span class="health-check-box" aria-hidden="true"></span></label></td>
           <td class="truncate">${esc(row.providerName)}</td>
           <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
-          <td>${statusCell}</td>
-          <td class="truncate" title="${esc(diagnosisTitle)}"><span class="status ${diagnosisKind}">${esc(diagnosisText)}</span></td>
           <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
+          <td class="truncate" title="${esc(reasoningText)}">${esc(reasoningText)}</td>
+          <td>${statusCell}</td>
           ${uaCells}
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
         </tr>`;
@@ -1055,6 +1049,7 @@
         } catch (err) {
           if (run.cancelled || err?.name === 'AbortError') return;
           const message = err?.message || String(err);
+          const failedUaProfiles = allUa ? HEALTH_UA_COLUMNS.slice(0, 4) : ['Custom'];
           state.healthResults[target.key] = {
             resultKey: target.key,
             providerId: target.provider,
@@ -1066,8 +1061,12 @@
             detail: message,
             compact: message,
             endpointLabel: '-',
-            ua: '自定义',
-            uaResults: [{ ua: '自定义', alive: false, status: '失败', detail: message, compact: message }]
+            ua: failedUaProfiles[0] || 'Custom',
+            uaProfiles: failedUaProfiles,
+            uaProfileCount: failedUaProfiles.length,
+            diagnosis: { category: 'request_error', label: '请求失败', summary: message, suggestion: '请稍后重试，或刷新页面查看服务状态' },
+            diagnosisLabel: '请求失败',
+            uaResults: failedUaProfiles.map(ua => ({ ua, alive: false, status: '失败', detail: message, compact: message }))
           };
         } finally {
           run.controllers.delete(controller);
