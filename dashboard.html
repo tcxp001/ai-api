@@ -282,7 +282,7 @@
         </div>
         <div class="table-wrap">
           <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:110px">Reasoning</th><th style="width:90px">Status</th><th style="width:115px">Codex</th><th style="width:115px">Empty UA</th><th style="width:115px">Curl</th><th style="width:115px">Chrome</th><th style="width:130px">Custom</th><th style="width:170px">Checked At</th></tr></thead>
+            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:110px">Reasoning</th><th style="width:90px">Status</th><th style="width:115px">Codex</th><th style="width:115px">Empty UA</th><th style="width:115px">Curl</th><th style="width:115px">Chrome</th><th style="width:130px">Custom</th><th style="width:170px">Last Test</th></tr></thead>
             <tbody id="healthRows"></tbody>
           </table>
         </div>
@@ -332,7 +332,7 @@
         </div>
         <div class="table-wrap">
           <table class="monitor-table">
-            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>Status</th><th class="detail-col">Details</th><th>Checked At</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>Status</th><th class="detail-col">Details</th><th>Last Test</th><th>Actions</th></tr></thead>
             <tbody id="chainRows"></tbody>
           </table>
         </div>
@@ -872,9 +872,7 @@
     function healthConfiguredEndpointLabel(provider, model) {
       const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
       if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
-      const meta = modelMeta(provider, model);
-      if (hasReasoningEffort(meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning)) return 'reasoning';
-      return 'responses';
+      return providerReasoningText(provider, model) === '-' ? 'responses' : 'reasoning';
     }
 
     function renderHealth() {
