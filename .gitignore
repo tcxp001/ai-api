@@ -29,3 +29,8 @@ venv/
 dashboard-restart.log
 
 # Git should only track sanitized examples, never real provider configs
+
+# Public repository docs policy: keep only root README and docs/OPEN_SOURCE.md tracked.
+docs/*
+!docs/
+!docs/OPEN_SOURCE.md

@@ -40,7 +40,7 @@ UA_PROFILES = {
     2: ("Curl", "curl/8.0"),
     3: ("Chrome电脑", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
     4: ("空字符串", ""),
-    5: ("Codex", {"Originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color"}),
+    5: ("Codex", {"Originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.139.0 (Ubuntu 24.04 LTS; x86_64) xterm-256color"}),
 }
 UA_ORDER = ["Python默认UA", "Curl", "Chrome电脑", "空字符串", "Codex"]
 TEST_UAS = {name: value for name, value in UA_PROFILES.values()}
