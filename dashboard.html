@@ -239,7 +239,7 @@
           <div class="field"><label for="providerName">Name</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
-          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="anthropic_messages">Anthropic /messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label>Model</label>
             <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
@@ -410,6 +410,7 @@
     function providerEndpointText(provider) {
       const mode = String(provider?.api_mode || '').trim();
       if (mode === 'chat_completions') return 'chat';
+      if (mode === 'anthropic_messages') return 'messages';
       if (mode === 'custom_endpoint') return provider?.custom_endpoint || provider?.endpoint || 'custom';
       return 'responses';
     }
@@ -572,6 +573,7 @@
     function endpointLabel(value, provider = {}) {
       if (value === 'custom_endpoint') return provider.custom_endpoint || 'Custom';
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
+      if (value === 'anthropic_messages') return 'Anthropic /messages';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
     }

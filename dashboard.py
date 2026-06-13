@@ -221,8 +221,8 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
         provider["api_key"] = provider.pop("key")
     mode = str(provider.get("api_mode") or "").strip() or "codex_responses"
     mode = {"responses": "codex_responses", "chat": "chat_completions"}.get(mode, mode)
-    if mode not in {"codex_responses", "chat_completions", "custom_endpoint"}:
-        raise ValueError(f"{label} api_mode must be codex_responses, chat_completions or custom_endpoint")
+    if mode not in {"codex_responses", "chat_completions", "anthropic_messages", "custom_endpoint"}:
+        raise ValueError(f"{label} api_mode must be codex_responses, chat_completions, anthropic_messages or custom_endpoint")
     provider["api_mode"] = mode
     custom_endpoint = str(provider.get("custom_endpoint") or provider.get("endpoint") or "").strip()
     if provider["api_mode"] == "custom_endpoint":
@@ -430,7 +430,9 @@ def provider_by_name() -> dict[str, dict[str, Any]]:
 
 def provider_api_mode(provider: dict[str, Any]) -> str:
     mode = str(provider.get("api_mode") or "").strip().lower()
-    if mode == "custom_endpoint":
+    if mode in {"custom_endpoint", "anthropic_messages"}:
+        # Codex/Hermes still talk to local AIProxy through OpenAI Responses;
+        # anthropic_messages is only the upstream wire mode used by AIProxy.
         return "codex_responses"
     return mode or "codex_responses"
 
@@ -444,6 +446,8 @@ def provider_endpoint(provider: dict[str, Any]) -> str:
         return endpoint or "/responses"
     if mode == "chat_completions":
         return "/chat/completions"
+    if mode == "anthropic_messages":
+        return "/messages"
     return "/responses"
 
 
