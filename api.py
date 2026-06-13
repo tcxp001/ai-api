@@ -79,6 +79,7 @@ ENDPOINT_VARIANTS = [
     ("/chat/completions", "basic", "chat"),
     ("/responses", "basic", "responses"),
     ("/responses", "reasoning", "reasoning"),
+    ("/messages", "basic", "messages"),
 ]
 
 
@@ -241,6 +242,10 @@ def is_chat_endpoint(endpoint):
     return endpoint_path(endpoint).endswith("/chat/completions")
 
 
+def is_messages_endpoint(endpoint):
+    return endpoint_path(endpoint).endswith("/messages")
+
+
 def build_payload(model, endpoint, variant="basic"):
     if is_responses_endpoint(endpoint):
         payload = {
@@ -253,6 +258,13 @@ def build_payload(model, endpoint, variant="basic"):
         if variant == "reasoning":
             payload["reasoning"] = {"effort": "high", "summary": "auto"}
         return payload
+
+    if is_messages_endpoint(endpoint):
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": "在吗？"}],
+            "max_tokens": MAX_OUTPUT_TOKENS,
+        }
 
     return {
         "model": model,
@@ -289,6 +301,11 @@ def validate_success_response(response, endpoint):
         if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
             return True, ""
         return False, "responses格式异常"
+    if is_messages_endpoint(endpoint):
+        content = payload.get("content")
+        if isinstance(content, list) or payload.get("stop_reason") or payload.get("type") == "message":
+            return True, ""
+        return False, "messages格式异常"
     return True, ""
 
 
@@ -310,6 +327,8 @@ def format_http_error(status_code, response):
         return f"{status_code} 模型未定价/未启用"
     if "invalid url" in lower_body and "/responses" in lower_body:
         return f"{status_code} 不支持responses"
+    if "invalid url" in lower_body and "/messages" in lower_body:
+        return f"{status_code} 不支持messages"
     if "insufficient account balance" in lower_body or "bad_response_status_code" in lower_body:
         return f"{status_code} 上游拒绝"
 
@@ -337,9 +356,13 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
         with requests.Session() as session:
             session.headers.clear()
             session.trust_env = trust_env_proxy
+            headers = build_headers(api_key, user_agent, provider_headers, remove_headers)
+            if is_messages_endpoint(endpoint):
+                headers.setdefault("x-api-key", api_key)
+                headers.setdefault("anthropic-version", "2023-06-01")
             response = session.post(
                 url,
-                headers=build_headers(api_key, user_agent, provider_headers, remove_headers),
+                headers=headers,
                 json=build_payload(model, endpoint, variant),
                 timeout=request_timeout,
             )

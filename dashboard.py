@@ -1764,6 +1764,7 @@ HEALTH_ENDPOINT_CANDIDATES = [
     ("reasoning", "/responses", "reasoning"),
     ("responses", "/responses", "basic"),
     ("chat", "/chat/completions", "basic"),
+    ("messages", "/messages", "basic"),
 ]
 
 
@@ -1818,8 +1819,8 @@ def diagnose_health_result(result: dict[str, Any]) -> dict[str, str]:
     if "无模型通道" in joined or "模型未定价" in joined or "未启用" in joined or "model_cooldown" in lower or "渠道冷却" in joined:
         return health_diagnosis("model", "模型不可用", "当前模型在该 Provider 上没有可用通道", "获取模型列表并选择已启用模型，或换用同模型的其他 Provider")
 
-    if "不支持responses" in joined or "responses格式异常" in joined or "chat格式异常" in joined:
-        return health_diagnosis("endpoint", "Endpoint 不匹配", "上游接口模式与当前模型/Endpoint 不兼容", "切换 API 模式，或在测活结果中选择成功的 responses/chat 路径")
+    if "不支持responses" in joined or "不支持messages" in joined or "responses格式异常" in joined or "chat格式异常" in joined or "messages格式异常" in joined:
+        return health_diagnosis("endpoint", "Endpoint 不匹配", "上游接口模式与当前模型/Endpoint 不兼容", "切换 API 模式，或在测活结果中选择成功的 responses/chat/messages 路径")
 
     if "返回html" in joined.lower() or "cloudflare" in lower or "waf" in lower or "just a moment" in lower:
         return health_diagnosis("waf", "WAF/HTML", "上游返回 HTML 或 WAF/Cloudflare 挑战", "尝试更换 UA/Header 预设；如果仍失败，通常需要换 Provider")

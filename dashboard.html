@@ -239,7 +239,7 @@
           <div class="field"><label for="providerName">Name</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
-          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="anthropic_messages">Anthropic /messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="chat_completions">OpenAI: /chat/completions</option><option value="codex_responses">OpenAI: /responses</option><option value="anthropic_messages">Anthropic: /message</option><option value="custom_endpoint">Custom</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label>Model</label>
             <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
@@ -573,7 +573,7 @@
     function endpointLabel(value, provider = {}) {
       if (value === 'custom_endpoint') return provider.custom_endpoint || 'Custom';
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
-      if (value === 'anthropic_messages') return 'Anthropic /messages';
+      if (value === 'anthropic_messages') return 'Anthropic /message';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
     }
@@ -873,6 +873,7 @@
 
     function healthConfiguredEndpointLabel(provider, model) {
       const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
+      if (endpoint.includes('/messages') || endpoint.includes('anthropic') || endpoint === 'messages') return 'messages';
       if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
       return providerReasoningText(provider, model) === '-' ? 'responses' : 'reasoning';
     }
@@ -887,7 +888,7 @@
         const running = !!(state.healthRunning || {})[row.key];
         const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
         const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
-        const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
+        const endpointTitle = running ? 'reasoning -> responses -> chat -> messages' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
         const reasoningText = providerReasoningText(p, row.model);
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
