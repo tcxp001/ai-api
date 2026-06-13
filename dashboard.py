@@ -1762,6 +1762,86 @@ def health_result_key(provider_id: str, model: str) -> str:
     return f"{provider_id}::{model}"
 
 
+def health_failure_details(result: dict[str, Any]) -> list[str]:
+    details: list[str] = []
+    for attempt in result.get("endpointTrace") or []:
+        for item in attempt.get("uaResults") or []:
+            detail = str(item.get("detail") or item.get("compact") or item.get("status") or "").strip()
+            if detail:
+                details.append(detail)
+    for item in result.get("uaResults") or []:
+        detail = str(item.get("detail") or item.get("compact") or item.get("status") or "").strip()
+        if detail:
+            details.append(detail)
+    detail = str(result.get("detail") or result.get("compact") or "").strip()
+    if detail:
+        details.append(detail)
+    return details
+
+
+def health_diagnosis(category: str, label: str, summary: str, suggestion: str = "") -> dict[str, str]:
+    return {"category": category, "label": label, "summary": summary, "suggestion": suggestion}
+
+
+def diagnose_health_result(result: dict[str, Any]) -> dict[str, str]:
+    details = health_failure_details(result)
+    joined = " | ".join(details)
+    lower = joined.lower()
+
+    if result.get("alive"):
+        failed_ua = [item for item in result.get("uaResults") or [] if item.get("alive") is False]
+        if failed_ua:
+            return health_diagnosis("ua_partial", "部分 UA 失败", "当前可用，但部分 UA 不兼容", "如客户端失败，优先使用本次成功的 UA/Headers 预设")
+        return health_diagnosis("ok", "可用", "当前 Provider/模型可用", "")
+
+    if "缺 base_url/api_key/model" in joined:
+        return health_diagnosis("config", "配置不完整", "缺少 Base URL、API Key 或模型", "回到 Provider 维护页补齐必填配置后再测")
+
+    if "key无效" in joined.lower() or "invalid api key" in lower or "invalid token" in lower or re.search(r"\b401\b", joined):
+        return health_diagnosis("auth", "Key 问题", "上游拒绝鉴权或 API Key 无效", "检查 API Key 是否填错、过期，或是否需要额外 Header")
+
+    if "客户端未授权" in joined or "unauthorized client" in lower or "unauthorized_client" in lower:
+        return health_diagnosis("ua_auth", "客户端未授权", "上游可能限制客户端 UA/Headers", "在测活页开启 UA 矩阵，选择可用的 UA/Header 预设后保存")
+
+    if "额度不足" in joined or "quota" in lower or "balance" in lower:
+        return health_diagnosis("quota", "额度不足", "账号额度或余额不足", "更换 Provider、补充额度，或等待公益服额度恢复")
+
+    if "无模型通道" in joined or "模型未定价" in joined or "未启用" in joined or "model_cooldown" in lower or "渠道冷却" in joined:
+        return health_diagnosis("model", "模型不可用", "当前模型在该 Provider 上没有可用通道", "获取模型列表并选择已启用模型，或换用同模型的其他 Provider")
+
+    if "不支持responses" in joined or "responses格式异常" in joined or "chat格式异常" in joined:
+        return health_diagnosis("endpoint", "Endpoint 不匹配", "上游接口模式与当前模型/Endpoint 不兼容", "切换 API 模式，或在测活结果中选择成功的 responses/chat 路径")
+
+    if "返回html" in joined.lower() or "cloudflare" in lower or "waf" in lower or "just a moment" in lower:
+        return health_diagnosis("waf", "WAF/HTML", "上游返回 HTML 或 WAF/Cloudflare 挑战", "尝试更换 UA/Header 预设；如果仍失败，通常需要换 Provider")
+
+    if "超时" in joined or "timeout" in lower or "connectionerror" in lower or "proxyerror" in lower or "nameresolution" in lower or "sslerror" in lower:
+        return health_diagnosis("network", "网络/超时", "连接、DNS、TLS 或上游响应超时", "检查 Base URL、网络连通性、代理环境，或稍后重试")
+
+    if "非json" in joined.lower() or "格式异常" in joined or "返回错误" in joined:
+        return health_diagnosis("format", "返回格式异常", "上游返回内容不是预期的 OpenAI 兼容格式", "确认 Base URL 是否填到 /v1，或切换 API 模式后再测")
+
+    if re.search(r"\b404\b", joined):
+        return health_diagnosis("not_found", "路径/模型不存在", "上游返回 404，可能是 Base URL、Endpoint 或模型名不匹配", "确认 Base URL 是否包含 /v1，并检查模型名和 API 模式")
+
+    if re.search(r"\b429\b", joined):
+        return health_diagnosis("rate_limit", "限流", "上游返回 429 限流", "稍后重试，或切换其他 Provider")
+
+    if re.search(r"\b5\d\d\b", joined):
+        return health_diagnosis("upstream", "上游错误", "上游服务返回 5xx 错误", "稍后重试，或切换其他 Provider")
+
+    return health_diagnosis("unknown", "失败", "测活失败，原因未归类", "查看单元格详情，按 Key、模型、Endpoint、UA/Header 顺序排查")
+
+
+def attach_health_diagnosis(result: dict[str, Any]) -> dict[str, Any]:
+    diagnosis = diagnose_health_result(result)
+    result["diagnosis"] = diagnosis
+    result["diagnosisLabel"] = diagnosis.get("label", "")
+    result["diagnosisSummary"] = diagnosis.get("summary", "")
+    result["diagnosisSuggestion"] = diagnosis.get("suggestion", "")
+    return result
+
+
 def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool = False) -> dict[str, Any]:
     name = str(provider.get("name") or "")
     model = str(model or "").strip()
@@ -1812,7 +1892,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             "endpointLabel": "-",
             "uaResults": [failed_ua_result(ua_label, detail)],
         })
-        return result
+        return attach_health_diagnosis(result)
 
     profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
     inner_workers = api_checks.provider_inner_max_workers(name)
@@ -1877,7 +1957,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
                 "uaMode": "all" if all_ua else "configured",
                 "uaResults": ua_results,
             })
-            return result
+            return attach_health_diagnosis(result)
 
     final_results = list((last_attempt or {}).get("uaResults") or [])
     primary = final_results[0] if final_results else failed_ua_result(ua_label, "测活失败")
@@ -1898,7 +1978,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
         "uaMode": "all" if all_ua else "configured",
         "uaResults": final_results,
     })
-    return result
+    return attach_health_diagnosis(result)
 
 
 def run_provider_check(provider: dict[str, Any], all_ua: bool = False, models: list[str] | None = None) -> list[dict[str, Any]]:

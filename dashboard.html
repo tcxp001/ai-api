@@ -282,7 +282,7 @@
         </div>
         <div class="table-wrap">
           <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
+            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:150px">诊断</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
             <tbody id="healthRows"></tbody>
           </table>
         </div>
@@ -365,6 +365,11 @@
     };
 
     const $ = (id) => document.getElementById(id);
+    const validTabs = new Set(['config', 'health', 'aiproxy']);
+    const tabFromLocation = () => {
+      const raw = decodeURIComponent(String(window.location.hash || '').replace(/^#/, '')).trim();
+      return validTabs.has(raw) ? raw : 'config';
+    };
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const modelNames = (p) => {
       const m = p.models || p.model;
@@ -476,7 +481,18 @@
       $('serverState').textContent = saveMessage || `已读取 ${state.providers.length} 个 provider${serviceSummary}`;
     }
 
+    function activateTab(tab, updateUrl = true) {
+      const nextTab = validTabs.has(tab) ? tab : 'config';
+      state.tab = nextTab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === nextTab));
+      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === nextTab));
+      if (updateUrl && window.location.hash !== `#${nextTab}`) {
+        history.pushState(null, '', `#${nextTab}`);
+      }
+    }
+
     function render() {
+      activateTab(state.tab, false);
       renderProviders();
       renderHealth();
       renderMonitor();
@@ -820,6 +836,27 @@
       return '';
     }
 
+    function healthDiagnosisText(status, running) {
+      if (running) return '测试中';
+      if (!status?.checkedAt) return '-';
+      return status.diagnosisLabel || status.diagnosis?.label || (status.alive ? '可用' : '失败');
+    }
+
+    function healthDiagnosisTitle(status) {
+      const diagnosis = status?.diagnosis || {};
+      return [
+        diagnosis.summary || status?.diagnosisSummary,
+        diagnosis.suggestion || status?.diagnosisSuggestion,
+        status?.detail
+      ].filter(Boolean).join('；');
+    }
+
+    function healthDiagnosisKind(status, running) {
+      if (running || !status?.checkedAt) return 'muted';
+      if (status.alive) return status.diagnosis?.category === 'ua_partial' ? 'pending' : 'ok';
+      return 'fail';
+    }
+
     function hasReasoningEffort(value) {
       if (value === true) return true;
       const text = String(value ?? '').trim().toLowerCase();
@@ -857,6 +894,9 @@
         const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
+        const diagnosisText = healthDiagnosisText(s, running);
+        const diagnosisTitle = running ? '测试中' : healthDiagnosisTitle(s);
+        const diagnosisKind = healthDiagnosisKind(s, running);
         const uaResultMap = running ? {} : healthUaResultMap(s);
         const uaCells = HEALTH_UA_COLUMNS.map(label => healthUaCell(uaResultMap, label)).join('');
         return `<tr>
@@ -864,11 +904,12 @@
           <td class="truncate">${esc(row.providerName)}</td>
           <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
           <td>${statusCell}</td>
+          <td class="truncate" title="${esc(diagnosisTitle)}"><span class="status ${diagnosisKind}">${esc(diagnosisText)}</span></td>
           <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
           ${uaCells}
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="11"><div class="empty">暂无可测 Provider。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
+      }).join('') || `<tr><td colspan="12"><div class="empty">暂无可测 Provider。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
     }
 
     function renderMonitor() {
@@ -1220,9 +1261,7 @@
       if (!target) return;
       try {
         if (target.classList.contains('tab')) {
-          state.tab = target.dataset.tab;
-          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === target));
-          document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === state.tab));
+          activateTab(target.dataset.tab, true);
         } else if (target.id === 'reloadBtn') {
           window.location.reload();
         } else if (target.id === 'addProviderBtn') {
@@ -1353,6 +1392,13 @@
       render();
       event.target.value = '';
     });
+
+    window.addEventListener('hashchange', () => {
+      activateTab(tabFromLocation(), false);
+    });
+
+    state.tab = tabFromLocation();
+    activateTab(state.tab, false);
 
     loadAll().catch(err => {
       $('serverState').textContent = err.message;
