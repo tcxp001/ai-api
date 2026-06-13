@@ -271,13 +271,13 @@
         <div class="panel-head">
           <div>
             <h2>Provider 测活</h2>
-            <div class="subtle">按配置模型逐个测试。</div>
+            <div class="subtle">选择 Provider/模型后测试；UA矩阵会分别测试 Codex、空UA、Curl、Chrome。</div>
           </div>
           <div class="actions">
-            <label class="check-toggle"><input id="healthAllUa" type="checkbox">测所有UA</label>
+            <label class="check-toggle"><input id="healthAllUa" type="checkbox">UA矩阵</label>
             <button id="selectAllHealthBtn" type="button">全部选中</button>
             <button id="clearAllHealthBtn" type="button">全部取消</button>
-            <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
+            <button id="runSelectedHealthBtn" class="primary" type="button">测试选中</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -841,7 +841,7 @@
           ${uaCells}
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="11"><div class="empty">暂无 provider</div></td></tr>`;
+      }).join('') || `<tr><td colspan="11"><div class="empty">暂无可测 Provider。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
     }
 
     function renderMonitor() {
