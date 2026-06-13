@@ -867,11 +867,16 @@ def merge_discovered_chains(configured: list[dict[str, Any]], providers: list[di
 
 
 def app_config_preview(providers: list[dict[str, Any]], proxy_base: str = "http://127.0.0.1:18006") -> dict[str, Any]:
-    names = [str(provider.get("name") or "").strip() for provider in providers if provider.get("name")]
+    enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True) and str(provider.get("name") or "").strip()]
+    projection = app_sync_projection(enabled, proxy_base)
+    names = [str(provider.get("name") or "").strip() for provider in enabled]
     return {
         "codex": {"target": str(CODEX_CONFIG), "exists": CODEX_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "hermes": {"target": str(HERMES_CONFIG), "exists": HERMES_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "providers": names,
+        "projection": projection,
+        "needsSync": app_configs_need_proxy_sync(enabled, proxy_base),
+        "proxyBase": proxy_base,
         "discoveredChains": parse_codex_chains() + parse_hermes_chains(),
     }
 
@@ -1992,6 +1997,82 @@ def run_provider_check(provider: dict[str, Any], all_ua: bool = False, models: l
         model_names = [""]
     return [run_provider_model_check(provider, model, all_ua) for model in model_names]
 
+def parse_sse_response_failure(response: requests.Response, max_lines: int = 240) -> tuple[bool, str, bool]:
+    """Return (failed, detail, completed) for an OpenAI Responses SSE stream."""
+    current_event = ""
+    data_lines: list[str] = []
+    lines_seen = 0
+    completed = False
+
+    def inspect_event(event: str, data: str) -> tuple[bool, str, bool]:
+        event = event.strip()
+        data = data.strip()
+        if not event and not data:
+            return False, "", False
+        if event == "response.completed" or '"type":"response.completed"' in data.replace(" ", ""):
+            return False, "", True
+        if event == "response.failed" or '"type":"response.failed"' in data.replace(" ", ""):
+            detail = data
+            try:
+                payload = json.loads(data)
+                response_obj = payload.get("response") if isinstance(payload, dict) else None
+                error = (response_obj or {}).get("error") if isinstance(response_obj, dict) else payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(error, dict):
+                    detail = f"{error.get('code') or 'error'}: {error.get('message') or ''}".strip()
+            except Exception:
+                pass
+            return True, detail[:220] or "response.failed", False
+        if '"error"' in data:
+            try:
+                payload = json.loads(data)
+                error = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(error, dict):
+                    return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220], False
+            except Exception:
+                pass
+        return False, "", False
+
+    for raw_line in response.iter_lines(decode_unicode=True):
+        lines_seen += 1
+        line = raw_line or ""
+        if line.startswith("event:"):
+            current_event = line.split(":", 1)[1].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].strip())
+        elif line == "":
+            failed, detail, done = inspect_event(current_event, "\n".join(data_lines))
+            if failed or done:
+                return failed, detail, done
+            current_event = ""
+            data_lines = []
+        if lines_seen >= max_lines:
+            break
+
+    if data_lines:
+        failed, detail, done = inspect_event(current_event, "\n".join(data_lines))
+        if failed or done:
+            return failed, detail, done
+    return False, "", completed
+
+
+def response_json_failure(response: requests.Response) -> tuple[bool, str]:
+    try:
+        payload = response.json()
+    except Exception:
+        return False, ""
+    if not isinstance(payload, dict):
+        return False, ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220]
+    if payload.get("status") == "failed":
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220]
+        return True, "response status failed"
+    return False, ""
+
+
 def check_proxy(proxy: dict[str, Any]) -> dict[str, Any]:
     url = str(proxy.get("url") or "").rstrip("/")
     started = time.time()
@@ -2046,24 +2127,71 @@ def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], promp
     url = f"{proxy_url}/{provider_id}/v1/responses"
     payload = {
         "model": model,
-        "input": [{"role": "user", "content": prompt}],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
         "store": False,
+        "stream": True,
         "max_output_tokens": 8,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=(5, 20))
+        resp = requests.post(url, json=payload, timeout=(5, 30), stream=True)
+        used_endpoint = "responses"
         if resp.status_code in {404, 405, 501}:
+            resp.close()
             url = f"{proxy_url}/{provider_id}/v1/chat/completions"
             payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
             resp = requests.post(url, json=payload, timeout=(5, 20))
+            used_endpoint = "chat"
         result["latencyMs"] = int((time.time() - started) * 1000)
-        result["alive"] = resp.status_code == 200
-        result["detail"] = f"HTTP {resp.status_code}" if resp.status_code == 200 else f"HTTP {resp.status_code}: {' '.join((resp.text or '').split())[:160]}"
+        content_type = str(resp.headers.get("content-type") or "").lower()
+        if resp.status_code == 200 and "text/event-stream" in content_type:
+            failed, detail, completed = parse_sse_response_failure(resp)
+            result["alive"] = completed and not failed
+            result["detail"] = "HTTP 200 response.completed" if result["alive"] else f"HTTP 200 SSE failed: {detail or 'no response.completed'}"
+        elif resp.status_code == 200:
+            failed, detail = response_json_failure(resp)
+            result["alive"] = not failed
+            result["detail"] = f"HTTP 200 {used_endpoint}" if result["alive"] else f"HTTP 200 failed: {detail}"
+        else:
+            result["alive"] = False
+            result["detail"] = f"HTTP {resp.status_code}: {' '.join((resp.text or '').split())[:220]}"
+        resp.close()
     except Exception as exc:
         result["latencyMs"] = int((time.time() - started) * 1000)
         result["detail"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     result["health"] = classify_health(bool(result.get("alive")), result.get("latencyMs"))
     return result
+
+
+def check_chain_repeated(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], prompt: str = DEFAULT_MONITOR_PROMPT, runs: int = 1) -> dict[str, Any]:
+    runs = max(1, min(int(runs or 1), 5))
+    if runs == 1:
+        result = check_chain(chain, proxies, prompt)
+        result["runs"] = 1
+        result["successCount"] = 1 if result.get("alive") else 0
+        return result
+
+    started = time.time()
+    attempts = []
+    for index in range(runs):
+        item = check_chain(chain, proxies, prompt)
+        item["attempt"] = index + 1
+        attempts.append(item)
+
+    success_count = sum(1 for item in attempts if item.get("alive"))
+    base = dict(attempts[-1] if attempts else {})
+    base["checkedAt"] = now_iso()
+    base["latencyMs"] = int((time.time() - started) * 1000)
+    base["runs"] = runs
+    base["successCount"] = success_count
+    base["attempts"] = attempts
+    base["alive"] = success_count == runs
+    if base["alive"]:
+        base["detail"] = f"{success_count}/{runs} success"
+    else:
+        failures = [f"#{item.get('attempt')}: {item.get('detail') or 'failed'}" for item in attempts if not item.get("alive")]
+        base["detail"] = f"{success_count}/{runs} success; " + "; ".join(failures)[:260]
+    base["health"] = classify_health(bool(base.get("alive")), base.get("latencyMs"))
+    return base
 
 
 def load_status() -> dict[str, Any]:
@@ -2270,14 +2398,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 prompt_default = str(payload.get("prompt") or DEFAULT_MONITOR_PROMPT)
                 prompt_map_raw = payload.get("prompts") or {}
                 prompt_map = prompt_map_raw if isinstance(prompt_map_raw, dict) else {}
+                runs = max(1, min(int(payload.get("runs") or 1), 5))
                 proxy_map = {str(p.get("id")): p for p in monitor["proxies"]}
                 proxy_ids = {str(c.get("proxyId")) for c in chains if c.get("proxyId")}
                 proxies = [p for p in monitor["proxies"] if p.get("enabled", True) and (chain_id_filter is None or str(p.get("id")) in proxy_ids)]
                 proxy_results = [check_proxy(proxy) for proxy in proxies]
-                chain_results = [check_chain(chain, proxy_map, str(prompt_map.get(str(chain.get("id"))) or prompt_default)) for chain in chains]
+                chain_results = [check_chain_repeated(chain, proxy_map, str(prompt_map.get(str(chain.get("id"))) or prompt_default), runs) for chain in chains]
                 merge_status("proxies", proxy_results, "proxyId")
                 status = merge_status("chains", chain_results, "chainId")
-                self.send_json(200, {"proxyResults": proxy_results, "chainResults": chain_results, "status": status, "requestedChainIds": sorted(chain_id_filter) if chain_id_filter is not None else None})
+                self.send_json(200, {"proxyResults": proxy_results, "chainResults": chain_results, "status": status, "runs": runs, "requestedChainIds": sorted(chain_id_filter) if chain_id_filter is not None else None})
                 return
             if split.path == "/api/backups/restore":
                 name = str(payload.get("name") or "").strip()

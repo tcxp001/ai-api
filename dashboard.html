@@ -327,7 +327,7 @@
             <div class="subtle">验证本地 AIProxy 到 Provider/Model 的完整调用链路；停用或没有模型的 Provider 不会显示。</div>
           </div>
           <div class="actions">
-            <button id="runMonitorBtn" class="primary" type="button">检查全部</button>
+            <button id="runMonitorBtn" class="primary" type="button">Check All</button><button id="runMonitor3xBtn" type="button">Check All 3x</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -926,7 +926,7 @@
           <td>${statusCell}</td>
           <td class="truncate detail-col" title="${esc(detailText)}">${esc(detailText)}</td>
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
-          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" type="button">测试</button></div></td>
+          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" data-monitor-runs="1" type="button">Test</button><button data-test-chain="${i}" data-monitor-runs="3" type="button">3x</button></div></td>
         </tr>`;
       }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
     }
@@ -937,11 +937,11 @@
 
     function appSyncText(appSync) {
       if (!appSync) return '应用配置未同步';
-      if (appSync.ok === false) return `应用配置同步失败：${appSync.error || '请到应用配置页重试'}`;
+      if (appSync.ok === false) return `Codex/Hermes 同步失败：${appSync.error || '请重试保存或检查配置文件权限'}`;
       if (appSync.needed === false) return '应用配置无变化';
       const parts = [];
-      if (appSync.codex) parts.push(`Codex ${appSync.codex.providers || 0}`);
-      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers || 0}`);
+      if (appSync.codex) parts.push(`Codex ${appSync.codex.providers || 0} providers / ${(appSync.codex.profiles || []).length} profiles`);
+      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers || 0} providers`);
       return parts.length ? `应用配置已同步（${parts.join('，')}）` : '应用配置已同步';
     }
 
@@ -1098,7 +1098,8 @@
       }
     }
 
-    async function runMonitor(chainIds = null, promptOverrides = null) {
+    async function runMonitor(chainIds = null, promptOverrides = null, runs = 1) {
+      runs = Math.max(1, Math.min(Number(runs || 1), 5));
       const ids = Array.isArray(chainIds) && chainIds.length ? chainIds : (state.monitor.chains || []).map(c => c.id).filter(Boolean);
       if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护页启用 Provider 并配置模型');
       const currentPrompts = collectMonitorPrompts();
@@ -1106,17 +1107,18 @@
       state.monitorPrompts = currentPrompts;
       state.monitorRunning = Object.fromEntries(ids.map(id => [id, true]));
       renderMonitor();
-      $('serverState').textContent = ids.length === 1 ? `链路检查中：${ids[0]}` : `全部链路检查中：0/${ids.length}（可能较慢）`;
+      const runLabel = runs > 1 ? `${runs}x ` : '';
+      $('serverState').textContent = ids.length === 1 ? `${runLabel}链路检查中：${ids[0]}` : `${runLabel}全部链路检查中：0/${ids.length}（可能较慢）`;
       try {
         const prompts = Object.fromEntries(ids.map(id => [id, (state.monitorPrompts || {})[id] || DEFAULT_MONITOR_PROMPT]));
-        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts } : { prompts };
+        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts, runs } : { prompts, runs };
         const data = await api('/api/monitor/check', { method: 'POST', body: JSON.stringify(body) });
         state.status = data.status;
         const results = data.chainResults || [];
         const ok = results.filter(item => item.alive).length;
         $('serverState').textContent = ids.length === 1
-          ? `链路检查完成：${results[0]?.alive ? '可用' : '失败'}`
-          : `全部链路检查完成：${ok}/${results.length} 可用`;
+          ? `${runLabel}链路检查完成：${results[0]?.alive ? '可用' : '失败'}${runs > 1 && results[0] ? `（${results[0].successCount || 0}/${results[0].runs || runs}）` : ''}`
+          : `${runLabel}全部链路检查完成：${ok}/${results.length} 稳定可用`;
       } finally {
         state.monitorRunning = {};
         render();
@@ -1342,9 +1344,11 @@
           const chain = state.monitor.chains[Number(target.dataset.testChain)];
           if (!chain?.id) throw new Error('链路 ID 缺失，请刷新页面');
           const input = target.closest('tr')?.querySelector('[data-chain-prompt]');
-          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT });
+          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT }, Number(target.dataset.monitorRuns || 1));
         } else if (target.id === 'runMonitorBtn') {
-          await runMonitor();
+          await runMonitor(null, null, 1);
+        } else if (target.id === 'runMonitor3xBtn') {
+          await runMonitor(null, null, 3);
         } else if (target.id === 'createAiproxyPageBtn') {
           openAiproxyEditor();
         } else if (target.id === 'cancelAiproxyEditorBtn') {
