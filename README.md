@@ -24,7 +24,7 @@
 | `proxy.py` | 本地 AIProxy |
 | `api.py` | Provider 测活逻辑 |
 | `config.example.yaml` | 脱敏示例配置 |
-| `docs/OPEN_SOURCE.md` | 开源与公开仓库规则 |
+| `OPEN_SOURCE.md` | 开源与公开仓库规则 |
 
 真实配置文件 `config.yaml` 不应提交到公开仓库。
 
@@ -125,4 +125,4 @@ systemctl restart ai-api-dashboard.service
 
 - 本项目使用 MIT License。
 - 公开仓库只保留脱敏示例，不提交真实 Provider 域名、API Key、运行状态和内部工作文档。
-- 详细规则见 [`docs/OPEN_SOURCE.md`](docs/OPEN_SOURCE.md)。
+- 详细规则见 [`OPEN_SOURCE.md`](OPEN_SOURCE.md)。
