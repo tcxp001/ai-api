@@ -294,7 +294,7 @@
         <div class="panel-head">
           <div>
             <h2>AIProxy 服务状态</h2>
-            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
+            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应、配置路径，以及启动/停止/重启。</div>
           </div>
           <div class="actions">
             <button id="createAiproxyPageBtn" class="primary" type="button">创建服务</button>
@@ -323,8 +323,8 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <h2>经 AIProxy 调用测试</h2>
-            <div class="subtle">自动列出当前启用的 Provider 和模型；停用或没有模型的 Provider 不会显示。每行「测试」会通过本地 AIProxy 真实调用该 Provider/Model。</div>
+            <h2>AIProxy 端到端测试</h2>
+            <div class="subtle">验证本地 AIProxy 到 Provider/Model 的完整调用链路；停用或没有模型的 Provider 不会显示。</div>
           </div>
           <div class="actions">
             <button id="runMonitorBtn" class="primary" type="button">检查全部</button>
@@ -868,7 +868,7 @@
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
           <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" type="button">测试</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护中启用 Provider，并给 Provider 配置至少一个模型。</div></td></tr>`;
+      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
     }
 
     function collectMonitor() {
@@ -1017,7 +1017,7 @@
 
     async function runMonitor(chainIds = null, promptOverrides = null) {
       const ids = Array.isArray(chainIds) && chainIds.length ? chainIds : (state.monitor.chains || []).map(c => c.id).filter(Boolean);
-      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护中启用 Provider 并配置模型');
+      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护页启用 Provider 并配置模型');
       const currentPrompts = collectMonitorPrompts();
       if (promptOverrides && typeof promptOverrides === 'object') Object.assign(currentPrompts, promptOverrides);
       state.monitorPrompts = currentPrompts;
