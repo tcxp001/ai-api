@@ -47,7 +47,7 @@ PyYAML
 首次使用时复制样例配置：
 
 ```bash
-cd /mnt/project/ai-api
+cd /mnt/ai-api
 cp config.example.yaml config.yaml
 ```
 
@@ -56,7 +56,7 @@ cp config.example.yaml config.yaml
 ## 启动 Web 管理台
 
 ```bash
-cd /mnt/project/ai-api
+cd /mnt/ai-api
 python3 dashboard.py --host 127.0.0.1 --port 18080
 ```
 
@@ -79,11 +79,37 @@ python3 dashboard.py --host 0.0.0.0 --port 18080 --public-host <你的局域网I
 直接命令行启动：
 
 ```bash
-cd /mnt/project/ai-api
+cd /mnt/ai-api
 python3 proxy.py --config config.yaml --listen 127.0.0.1 --port 18006
 ```
 
 也可以在 Web 管理台的 **AIProxy 服务** 页面创建/启动 systemd 服务。
+
+
+## systemd 服务管理
+
+当前正式部署建议使用两个 systemd 服务：
+
+| 服务 | 作用 | 典型路径 |
+|---|---|---|
+| `aiproxy.service` | 本地 AIProxy | `/mnt/ai-api/proxy.py --config /mnt/ai-api/config.yaml` |
+| `ai-api-dashboard.service` | Web 管理台 | `/mnt/ai-api/dashboard.py --host 0.0.0.0 --port 18080` |
+
+常用命令：
+
+```bash
+systemctl status aiproxy.service --no-pager
+systemctl restart aiproxy.service
+systemctl status ai-api-dashboard.service --no-pager
+systemctl restart ai-api-dashboard.service
+```
+
+服务路径迁移后要确认 unit 中的 `WorkingDirectory`、`ExecStart`、`--config` 都指向 `/mnt/ai-api`。
+
+```
+systemctl cat aiproxy.service
+systemctl cat ai-api-dashboard.service
+```
 
 ## Provider 本地 URL
 
@@ -122,14 +148,7 @@ model = gpt-5.5
 
 这样真实上游的 API Key、Headers、User-Agent 都由 AIProxy 从 `config.yaml` 注入，Codex/Hermes 不需要直接持有公益服 Key。
 
-Web 管理台会逐步提供：
-
-- 复制 Provider 本地 URL
-- 复制 Codex 配置片段
-- 复制 Hermes 配置片段
-- 一键同步 Codex/Hermes 配置
-- 同步前自动备份
-- 同步后测试
+后续 Codex/Hermes 配置能力会围绕完整闭环设计：自动生成配置、同步前备份、同步后测试。不会要求用户手动复制本地代理 URL。
 
 ## Provider 配置字段说明
 

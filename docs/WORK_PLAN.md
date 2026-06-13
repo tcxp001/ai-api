@@ -14,7 +14,7 @@ V1 的目标不是做大而全平台，而是完成这条主路径：
 新增公益服 Provider
 -> 配置 Base URL / Key / UA / Headers / Models
 -> 测活与诊断
--> 生成本地 Provider URL
+-> 自动生成本地 Provider URL（供配置生成内部使用）
 -> 一键同步或复制 Codex/Hermes 配置
 -> 通过 AIProxy 测试可用
 ```
@@ -30,7 +30,7 @@ V1 完成标准：
 | 阶段 | 名称 | 目标 |
 |---|---|---|
 | Phase 1 | 现有功能稳定化 | 先把 Provider 管理、测活、AIProxy、Codex/Hermes 同步这些已有能力梳理清楚、减少混乱 |
-| Phase 2 | Provider 体验增强 | 提升新增、编辑、模型、UA/Header、复制 URL 的日常体验 |
+| Phase 2 | Provider 体验增强 | 提升新增、编辑、模型、UA/Header 的日常维护体验 |
 | Phase 3 | 测活诊断闭环 | 让用户快速知道哪个 Provider 能用、为什么不能用、怎么修 |
 | Phase 4 | Codex/Hermes 配置闭环 | 让配置生成、同步、备份、测试形成完整闭环 |
 | Phase 5 | AIProxy 使用闭环 | 让本地代理状态、启动、重启、经代理测试更可靠 |
@@ -101,7 +101,7 @@ Phase 1 重点是：
   - 启动 dashboard
   - 启动 AIProxy
   - 配置文件位置
-  - Provider URL 格式
+  - Provider 本地 URL 生成规则（供配置生成使用）
   - Codex/Hermes 基本使用方式
 
 验收标准：
@@ -175,8 +175,7 @@ Provider 保存时校验：
 哪些 Provider 启用了
 哪些可用
 最近哪里失败了
-本地 URL 是什么
-能否一键复制和测试
+Provider 配置摘要是否清楚
 ```
 
 ### 3.2 任务清单
@@ -192,29 +191,10 @@ Provider 行展示：
 - 最近健康状态
 - 最近错误
 - 最近检测时间
-- 本地 URL
 
 验收标准：
 
 - 不点编辑也能判断 Provider 是否值得使用。
-
-#### 任务 2：一键复制本地 URL
-
-每个 Provider 提供：
-
-```text
-复制本地 URL
-```
-
-格式：
-
-```text
-http://127.0.0.1:18006/{provider}/v1
-```
-
-验收标准：
-
-- 用户不用手拼 URL。
 
 #### 任务 3：UA/Header 预设
 
@@ -512,7 +492,6 @@ deepseek-v4-pro：4 个 Provider 支持
 - 调整优先级
 - 启用/停用成员
 - 设置策略：fallback / round_robin
-- 复制组 URL
 
 验收标准：
 
@@ -631,18 +610,17 @@ http://127.0.0.1:18006/group/gpt-5.5-pool/v1
 1. README 和配置字段说明
 2. Provider 保存校验
 3. Provider 列表状态增强
-4. 一键复制 Provider URL
-5. UA/Header 预设优化
-6. 测活错误分类和修复建议
-7. 经 AIProxy 测试链路优化
-8. Codex 配置复制/同步/备份/测试闭环
-9. Hermes 配置复制/同步/备份/测试闭环
-10. AIProxy 状态和重启体验增强
-11. 同模型自动发现
-12. 模型组管理页面
-13. `/group/{group}/v1` 代理入口
-14. fallback
-15. round_robin
+4. UA/Header 预设优化
+5. 测活错误分类和修复建议
+6. 经 AIProxy 测试链路优化
+7. Codex 配置生成/同步/备份/测试闭环
+8. Hermes 配置生成/同步/备份/测试闭环
+9. AIProxy 状态和重启体验增强
+10. 同模型自动发现
+11. 模型组管理页面
+12. `/group/{group}/v1` 代理入口
+13. fallback
+14. round_robin
 ```
 
 ---
@@ -658,7 +636,6 @@ http://127.0.0.1:18006/group/gpt-5.5-pool/v1
 -> 选择 UA/Header
 -> 获取模型
 -> 测活
--> 复制本地 URL
 -> 同步到 Codex
 -> 同步到 Hermes
 -> 经 AIProxy 测试成功

@@ -18,7 +18,7 @@
 添加公益服
 -> 配好 Header / UA / 模型
 -> 测活和诊断
--> 生成本地 Provider URL
+-> 自动生成本地 Provider URL（供配置生成内部使用）
 -> 同步或复制 Codex/Hermes 配置
 -> 通过本地 AIProxy 使用
 -> 多个同模型 Provider 可组成模型组做 fallback/round_robin
@@ -82,8 +82,8 @@ http://127.0.0.1:18006
 用户选择一个 Provider 后，可以：
 
 ```text
-复制本地 URL
-复制 Codex 配置片段
+自动生成本地 Provider URL
+生成 Codex 配置片段
 复制 Hermes 配置片段
 一键同步 Codex/Hermes 配置
 同步前自动备份
@@ -286,7 +286,6 @@ Provider 页面应支持：
 - 启用/停用
 - 获取模型
 - 单 Provider 测活
-- 复制本地 URL
 - 复制 Codex/Hermes 配置
 - 同步到 Codex/Hermes
 
@@ -565,14 +564,14 @@ provider-d / glm-5.1
 - 状态展示
 - 最近错误
 - 最近检测时间
-- 本地 URL
+- 本地 URL 由系统自动生成，供配置生成使用
 - 新增/编辑/删除
 - 启用/停用
 - 获取模型
 - 测活
-- 复制本地 URL
-- 复制 Codex 配置
-- 复制 Hermes 配置
+- 自动生成本地 URL（供配置片段/同步使用）
+- 生成 Codex 配置
+- 生成 Hermes 配置
 - 同步到 Codex/Hermes
 
 ### 8.2 模型组页面
@@ -586,7 +585,6 @@ P1/P1.5 阶段做。
 - 编辑成员
 - 调整优先级
 - 设置 `fallback` / `round_robin`
-- 复制模型组 URL
 - 测试模型组
 - 生成 Codex/Hermes 配置
 
@@ -695,18 +693,15 @@ P1/P1.5 阶段做。
 
 这些功能优先级高，因为小但体验提升明显。
 
-1. 一键复制 Provider 本地 URL
-2. 一键复制模型组本地 URL
-3. 一键复制 Codex 配置片段
-4. 一键复制 Hermes 配置片段
-5. 一键同步 Codex 并自动备份
-6. 一键同步 Hermes 并自动备份
-7. 同步后立即测试
-8. Header/UA 预设
-9. 获取模型后勾选加入
-10. Provider 列表显示最近错误
-11. 测活错误显示修复建议
-12. AIProxy 一键重启
+1. 生成 Codex 配置片段
+2. 生成 Hermes 配置片段
+3. 一键同步 Codex 并自动备份
+4. 一键同步 Hermes 并自动备份
+5. 同步后立即测试
+6. Header/UA 预设
+7. 获取模型后勾选加入
+8. 测活错误显示修复建议
+9. AIProxy 一键重启
 
 ## 11. 当前结论
 
