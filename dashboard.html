@@ -1,0 +1,1367 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ai-api 公益服管理</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7f6;
+      --surface: #ffffff;
+      --surface-2: #eef3f1;
+      --text: #172026;
+      --muted: #66727b;
+      --border: #d6dfda;
+      --accent: #087f7b;
+      --accent-dark: #05615e;
+      --danger: #b7323d;
+      --warning: #9a6500;
+      --success: #237342;
+      --code: #101418;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    button, input, textarea, select { font: inherit; }
+    button {
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: #aab8b3; background: #fbfcfc; }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    .primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+    .primary:hover:not(:disabled) { border-color: var(--accent-dark); background: var(--accent-dark); }
+    button.danger { border-color: var(--danger); background: var(--danger); color: #fff; }
+    button.danger:hover:not(:disabled) { border-color: #902631; background: #902631; }
+    .danger { color: var(--danger); }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.9);
+      backdrop-filter: blur(16px);
+    }
+    .wrap { width: min(1760px, calc(100% - 28px)); margin: 0 auto; }
+    .topbar { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    h1 { margin: 0; font-size: 21px; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
+    .subtle { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .check-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 13px; font-weight: 650; white-space: nowrap; }
+    .check-toggle input { width: auto; min-height: 0; padding: 0; }
+    main { padding: 18px 0 42px; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .tab { background: transparent; }
+    .tab.active { border-color: var(--accent); background: rgba(8,127,123,.1); color: var(--accent-dark); }
+    .view { display: none; }
+    .view.active { display: grid; gap: 14px; }
+    .panel {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 2px 8px rgba(19, 28, 32, .04);
+    }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 12px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .stat { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+    .stat strong { display: block; margin-top: 6px; font-size: 26px; line-height: 1.1; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; align-items: start; }
+    .span-3 { grid-column: span 3; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+    .field { display: grid; gap: 6px; }
+    .provider-edit-spaced { margin-top: 6px; }
+    label { color: #344047; font-size: 13px; font-weight: 650; }
+    input, textarea, select {
+      width: 100%;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid #cbd5d1;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      outline: none;
+    }
+    textarea { min-height: 92px; resize: vertical; line-height: 1.45; }
+    input:focus, textarea:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(8,127,123,.14);
+    }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; min-width: 980px; border-collapse: collapse; table-layout: fixed; background: #fff; }
+    .health-table { min-width: 1700px; }
+    .monitor-table { width: 100%; min-width: 0; table-layout: fixed; }
+    .monitor-table th, .monitor-table td { white-space: nowrap; }
+    .monitor-table th:nth-child(1), .monitor-table td:nth-child(1) { width: 8%; }
+    .monitor-table th:nth-child(2), .monitor-table td:nth-child(2) { width: 10%; }
+    .monitor-table th:nth-child(3), .monitor-table td:nth-child(3) { width: 8%; }
+    .monitor-table th:nth-child(4), .monitor-table td:nth-child(4) { width: 6%; }
+    .monitor-table th:nth-child(5), .monitor-table td:nth-child(5) { width: 6%; }
+    .monitor-table th:nth-child(6), .monitor-table td:nth-child(6) { width: 6%; }
+    .monitor-table th:nth-child(8), .monitor-table td:nth-child(8) { width: 6%; }
+    .monitor-table th:nth-child(9), .monitor-table td:nth-child(9) { width: 8%; }
+    .monitor-table .detail-col { width: 42%; min-width: 0; white-space: nowrap; }
+    .monitor-table .chain-prompt { width: 76px; }
+    .health-check { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; cursor: pointer; }
+    .health-check input { position: absolute; width: 1px; min-height: 0; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
+    .health-check-box { width: 16px; height: 16px; border: 1px solid #a8b5b2; border-radius: 4px; background: #fff; box-shadow: inset 0 1px 1px rgba(19, 28, 32, .04); }
+    .health-check input:checked + .health-check-box { border-color: var(--accent); background: var(--accent); }
+    .health-check input:checked + .health-check-box::after { content: ""; display: block; width: 4px; height: 8px; margin: 2px 0 0 5px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+    .health-check input:focus-visible + .health-check-box { box-shadow: 0 0 0 3px rgba(8,127,123,.18); }
+    .health-result-cell { white-space: nowrap; overflow: visible; }
+    .health-result-cell .status { white-space: nowrap; line-height: 1.25; }
+    th, td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: 13px; }
+    th { background: var(--surface-2); color: #3a464c; font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .ok { border-color: rgba(35,115,66,.25); background: rgba(35,115,66,.08); color: var(--success); }
+    .fail { border-color: rgba(183,50,61,.25); background: rgba(183,50,61,.08); color: var(--danger); }
+    .warn { border-color: rgba(154,101,0,.28); background: rgba(154,101,0,.08); color: var(--warning); }
+    .pending { border-color: rgba(37,99,235,.28); background: rgba(37,99,235,.08); color: #2563eb; }
+    .muted { border-color: rgba(102,114,123,.25); background: rgba(102,114,123,.08); color: var(--muted); }
+    .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(460px, 520px); gap: 14px; align-items: start; }
+    .editor { display: grid; gap: 12px; min-width: 0; overflow: hidden; }
+    .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
+    .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
+    pre { margin: 0; padding: 12px; border-radius: 6px; background: var(--code); color: #ecf2ef; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .row-tools { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+    .row-tools button { min-height: 30px; padding: 0 8px; font-size: 12px; }
+    .chain-prompt { width: 120px; min-height: 30px; padding: 4px 8px; font-size: 12px; }
+    .row-tools button.danger { border-color: rgba(183,50,61,.45); background: rgba(183,50,61,.06); color: var(--danger); }
+    .row-tools button.danger:hover:not(:disabled) { border-color: var(--danger); background: rgba(183,50,61,.1); }
+    .mini-table { display: grid; gap: 8px; min-width: 0; }
+    .mini-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 104px 32px; gap: 6px; align-items: center; min-width: 0; }
+    .header-row { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) 32px; }
+    .mini-row > * { min-width: 0; }
+    .mini-row button { min-height: 34px; padding: 0; }
+    .toolbar-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .model-picker { display: grid; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: #fbfcfb; max-height: 240px; overflow: auto; }
+    .model-choice { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; }
+    .model-choice input { min-height: 18px; }
+    .service-panel { display: grid; gap: 12px; align-content: start; }
+    .service-list { display: grid; gap: 10px; min-width: 0; }
+    .service-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+    .service-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; min-width: 0; }
+    .service-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .service-health { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .service-meta { display: grid; gap: 5px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .service-meta div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .service-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; justify-self: end; flex-wrap: wrap; }
+    .service-actions button { flex: 0 0 auto; min-height: 30px; padding: 0 8px; font-size: 12px; }
+    .aiproxy-editor { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; }
+    .aiproxy-editor-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .aiproxy-editor .actions { justify-content: flex-end; }
+    .service-log { max-height: 180px; overflow: auto; }
+    @media (max-width: 1180px) {
+      .split { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 980px) {
+      .topbar, .panel-head { align-items: stretch; flex-direction: column; }
+      .stats { grid-template-columns: 1fr; }
+      .span-3, .span-4, .span-6, .span-8, .span-12 { grid-column: 1 / -1; }
+      .actions button { flex: 1 1 auto; }
+      .mini-row { grid-template-columns: minmax(0, 1fr) 82px 92px 30px; }
+      .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>Ai-api 公益服管理</h1>
+        <div class="subtle" id="serverState">读取中</div>
+      </div>
+      <div class="actions">
+        <button id="reloadBtn" type="button">刷新</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <nav class="tabs">
+      <button class="tab active" data-tab="config" type="button">Provider 维护</button>
+      <button class="tab" data-tab="health" type="button">Provider 测活</button>
+      <button class="tab" data-tab="aiproxy" type="button">AIProxy 服务</button>
+    </nav>
+
+    <section id="config" class="view active">
+      <div class="split">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Provider 维护</h2>
+              <div class="subtle">保存会先备份 config.yaml，再原子写入。</div>
+            </div>
+            <div class="actions">
+              <button id="addProviderBtn" type="button">新增</button>
+              <button id="exportConfigBtn" type="button">导出 JSON</button>
+              <button id="importConfigBtn" type="button">导入 JSON</button>
+              <input id="importConfigFile" type="file" accept="application/json,.json" hidden>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th style="width:140px">Name</th><th style="width:260px">Base URL</th><th style="width:90px">模型</th><th style="width:130px">状态</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:330px">Actions</th></tr></thead>
+              <tbody id="providerRows"></tbody>
+            </table>
+          </div>
+        </section>
+        <aside class="panel editor">
+          <div>
+            <h2 id="providerEditorTitle">Provider</h2>
+          </div>
+          <div class="field"><label for="providerName">Name</label><input id="providerName"></div>
+          <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
+          <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
+          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced">
+            <label>Model</label>
+            <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
+            <div id="modelFetchStatus" class="subtle"></div>
+            <div id="modelChoices" class="model-picker" hidden></div>
+            <div id="modelRows" class="mini-table"></div>
+          </div>
+          <div class="field">
+            <label for="headerPreset">User-Agent</label>
+            <select id="headerPreset">
+              <option value="default">默认，不修改UA</option>
+              <option value="empty">空UA</option>
+              <option value="curl">Curl</option>
+              <option value="chrome">Chrome</option>
+              <option value="codex">Codex</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input id="headerCustomUa" placeholder="填写自定义 User-Agent" hidden>
+          </div>
+          <div class="actions">
+            <button id="applyProviderBtn" class="primary" type="button">保存</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="health" class="view">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Provider 测活</h2>
+            <div class="subtle">按配置模型逐个测试。</div>
+          </div>
+          <div class="actions">
+            <label class="check-toggle"><input id="healthAllUa" type="checkbox">测所有UA</label>
+            <button id="selectAllHealthBtn" type="button">全部选中</button>
+            <button id="clearAllHealthBtn" type="button">全部取消</button>
+            <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="health-table">
+            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
+            <tbody id="healthRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="aiproxy" class="view">
+      <section class="panel service-panel">
+        <div class="panel-head">
+          <div>
+            <h2>AIProxy 服务状态</h2>
+            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
+          </div>
+          <div class="actions">
+            <button id="createAiproxyPageBtn" class="primary" type="button">创建服务</button>
+            <button id="refreshAiproxyPageBtn" type="button">刷新服务</button>
+          </div>
+        </div>
+        <div id="aiproxyPageRows" class="service-list"></div>
+        <div id="aiproxyEditor" class="aiproxy-editor" hidden>
+          <div class="aiproxy-editor-head">
+            <h2 id="aiproxyEditorTitle">创建 AIProxy 服务</h2>
+            <span class="subtle">保存后会自动重启；改名时会停止旧服务并启动新服务。</span>
+          </div>
+          <div class="grid">
+            <div class="field span-6"><label for="aiproxyServiceName">系统服务名</label><input id="aiproxyServiceName" value="aiproxy" placeholder="aiproxy"></div>
+            <div class="field span-6"><label for="aiproxyPort">端口</label><input id="aiproxyPort" type="number" min="1" max="65535" value="18006"></div>
+          </div>
+          <input id="aiproxyOldService" type="hidden">
+          <div class="subtle">系统服务名可填 <code>aiproxy</code> 或其他名称；实际 unit 会是 <code>&lt;名称&gt;.service</code>。默认端口 18006，可修改。</div>
+          <div class="actions">
+            <button id="cancelAiproxyEditorBtn" type="button">取消</button>
+            <button id="saveAiproxyEditorBtn" class="primary" type="button">保存并重启</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>经 AIProxy 调用测试</h2>
+            <div class="subtle">自动列出当前启用的 Provider 和模型；停用或没有模型的 Provider 不会显示。每行「测试」会通过本地 AIProxy 真实调用该 Provider/Model。</div>
+          </div>
+          <div class="actions">
+            <button id="runMonitorBtn" class="primary" type="button">检查全部</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="monitor-table">
+            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>状态</th><th class="detail-col">详情</th><th>检测时间</th><th>操作</th></tr></thead>
+            <tbody id="chainRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+
+  </main>
+
+  <script>
+    const state = {
+      tab: 'config',
+      providers: [],
+      monitor: { proxies: [], chains: [] },
+      monitorRunning: {},
+      monitorPrompts: {},
+      status: { providers: {}, proxies: {}, chains: {} },
+      healthResults: {},
+      healthRunning: {},
+      healthRun: null,
+      healthSelection: null,
+      appSync: {},
+      customProviders: { codex: { items: [] }, hermes: { items: [] } },
+      aiproxy: { items: [] },
+      configPath: 'config.yaml',
+      fetchedModels: [],
+      selectedProvider: -1,
+      selectedChain: -1,
+      lastSaveMessage: ''
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const modelNames = (p) => {
+      const m = p.models || p.model;
+      const normalize = (item) => {
+        if (typeof item === 'string') return item.trim();
+        if (item && typeof item === 'object') return String(item.id || item.name || '').trim();
+        return String(item ?? '').trim();
+      };
+      if (typeof m === 'string') return [m.trim()].filter(Boolean);
+      if (Array.isArray(m)) return m.map(normalize).filter(Boolean);
+      if (m && typeof m === 'object') return Object.keys(m).map(normalize).filter(Boolean);
+      return [];
+    };
+    const firstModel = (p) => modelNames(p)[0] || '';
+    const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
+    const DEFAULT_MONITOR_PROMPT = '在吗？';
+    const DEFAULT_PROXY_BASE = 'http://127.0.0.1:18006';
+    function providerByName(name) {
+      const key = String(name || '').toLowerCase();
+      return (state.providers || []).find(p => String(p.name || '').toLowerCase() === key) || null;
+    }
+    function activeProxyBase() {
+      const items = state.aiproxy?.items || [];
+      const preferred = items.find(item => item.httpAlive && item.url) || items.find(item => item.url) || null;
+      return String(preferred?.url || DEFAULT_PROXY_BASE).replace(/\/$/, '');
+    }
+
+    function providerLocalUrl(provider) {
+      return `${activeProxyBase()}/${encodeURIComponent(provider?.name || '')}/v1`;
+    }
+
+    function providerHealthSummary(provider) {
+      const models = modelNames(provider);
+      const providerName = provider?.name || '';
+      const statusMap = state.status?.providers || {};
+      const entries = (models.length ? models : ['']).map(model => {
+        const key = healthResultKey(providerName, model);
+        return state.healthResults[key] || statusMap[key] || null;
+      }).filter(Boolean);
+      if (!entries.length) return { label: '未测', kind: 'muted', checkedAt: '', detail: '' };
+      const alive = entries.filter(item => item.alive).length;
+      const latest = entries.slice().sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')))[0] || {};
+      const failed = entries.slice().reverse().find(item => item && !item.alive) || null;
+      const detail = healthDetailText(failed || latest) || healthDetailText(latest) || '';
+      const checkedAt = latest.checkedAt || '';
+      if (alive === entries.length) return { label: `可用 ${alive}/${entries.length}`, kind: 'ok', checkedAt, detail };
+      if (alive > 0) return { label: `部分 ${alive}/${entries.length}`, kind: 'warn', checkedAt, detail };
+      return { label: `失败 0/${entries.length}`, kind: 'fail', checkedAt, detail };
+    }
+
+    async function copyText(text, message = '已复制') {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      }
+      $('serverState').textContent = message;
+    }
+    function modelMeta(provider, model) {
+      const models = provider?.models || provider?.model;
+      if (models && typeof models === 'object' && !Array.isArray(models)) {
+        const meta = models[model];
+        return meta && typeof meta === 'object' ? meta : {};
+      }
+      return {};
+    }
+    function chainReasoningText(chain) {
+      const provider = providerByName(chain?.providerId);
+      const meta = modelMeta(provider, chain?.model);
+      const effort = meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning || '';
+      if (effort && typeof effort === 'object') return effort.effort || '默认';
+      return String(effort || '').trim() || '默认';
+    }
+    function providerEndpointText(provider) {
+      const mode = String(provider?.api_mode || '').trim();
+      if (mode === 'chat_completions') return 'chat';
+      if (mode === 'custom_endpoint') return provider?.custom_endpoint || provider?.endpoint || 'custom';
+      return 'responses';
+    }
+    function providerUserAgentText(provider) {
+      const headers = provider?.headers || {};
+      const remove = new Set((provider?.remove_headers || []).map(v => String(v || '').toLowerCase()));
+      if (remove.has('user-agent')) return '移除';
+      const key = Object.keys(headers).find(k => String(k).toLowerCase() === 'user-agent');
+      if (key === undefined) return '默认';
+      const value = headers[key];
+      if (value === '') return '空UA';
+      if (value === null || value === undefined) return '默认';
+      const ua = String(value);
+      const lower = ua.toLowerCase();
+      if (lower.includes('codex_cli_rs') || String(headers.Originator || headers.originator || '').toLowerCase() === 'codex_cli_rs') return 'Codex';
+      if (lower.startsWith('curl/') || lower === 'curl') return 'Curl';
+      if (lower.includes('chrome/') || lower.includes('chromium/') || lower.includes('applewebkit/')) return 'Chrome';
+      return '自定义';
+    }
+    function collectMonitorPrompts() {
+      const prompts = { ...(state.monitorPrompts || {}) };
+      document.querySelectorAll('[data-chain-prompt]').forEach(input => {
+        const id = input.dataset.chainPrompt;
+        if (id) prompts[id] = input.value;
+      });
+      state.monitorPrompts = prompts;
+      return prompts;
+    }
+    const shortDateTime = (iso) => {
+      if (!iso) return '-';
+      const match = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+      if (match) return `${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
+      return String(iso);
+    };
+    const isToday = (iso) => {
+      if (!iso) return false;
+      const d = new Date(iso);
+      const n = new Date();
+      return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+    };
+    const api = async (path, options = {}) => {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    };
+
+    async function loadAll() {
+      $('serverState').textContent = '读取中';
+      const [config, monitor, status, aiproxy] = await Promise.all([
+        api('/api/config'),
+        api('/api/monitor'),
+        api('/api/status'),
+        api('/api/aiproxy/services').catch(err => ({ items: [], error: err.message }))
+      ]);
+      state.providers = config.providers || [];
+      state.configPath = config.configPath || 'config.yaml';
+      sortProvidersByEnabled();
+      state.monitor = monitor;
+      state.status = status;
+      state.aiproxy = aiproxy;
+      if (state.selectedProvider >= state.providers.length) state.selectedProvider = -1;
+      if (state.selectedChain >= state.monitor.chains.length) state.selectedChain = -1;
+      render();
+      const serviceSummary = state.aiproxy.summary ? `，AIProxy ${state.aiproxy.summary.healthy}/${state.aiproxy.summary.total} 健康` : '';
+      const saveMessage = state.lastSaveMessage;
+      state.lastSaveMessage = '';
+      $('serverState').textContent = saveMessage || `已读取 ${state.providers.length} 个 provider${serviceSummary}`;
+    }
+
+    function render() {
+      renderProviders();
+      renderHealth();
+      renderMonitor();
+      renderAiproxy();
+    }
+
+    function providerForPersist(provider) {
+      const item = { ...(provider || {}) };
+      delete item.__draft;
+      return item;
+    }
+
+    function dropSelectedProviderDraft() {
+      const current = state.providers[state.selectedProvider];
+      if (current?.__draft) {
+        state.providers.splice(state.selectedProvider, 1);
+      }
+      state.selectedProvider = -1;
+    }
+
+    function beginProviderDraft(provider) {
+      dropSelectedProviderDraft();
+      state.providers.unshift({ ...provider, __draft: true });
+      state.selectedProvider = 0;
+      renderProviders();
+    }
+
+    function sortProvidersByEnabled() {
+      const selected = state.providers[state.selectedProvider] || null;
+      state.providers = state.providers
+        .map((provider, index) => ({ provider, index }))
+        .sort((a, b) => {
+          const aDisabled = a.provider.enabled === false ? 1 : 0;
+          const bDisabled = b.provider.enabled === false ? 1 : 0;
+          return aDisabled - bDisabled || a.index - b.index;
+        })
+        .map(item => item.provider);
+      state.selectedProvider = selected ? state.providers.indexOf(selected) : -1;
+    }
+
+    function renderProviders() {
+      $('providerRows').innerHTML = state.providers.map((p, i) => {
+        const models = modelNames(p);
+        const health = providerHealthSummary(p);
+        const localUrl = providerLocalUrl(p);
+        const healthTitle = [health.detail, health.checkedAt ? `检测：${health.checkedAt}` : ''].filter(Boolean).join('\n');
+        return `
+        <tr>
+          <td class="truncate">${esc(p.name)}${p.enabled === false ? ' <span class="status muted">停用</span>' : ''}</td>
+          <td class="truncate" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
+          <td title="${esc(models.join(', '))}">${esc(models.length || 0)}</td>
+          <td title="${esc(healthTitle)}">${statusPill(null, health.label, health.kind)}<div class="subtle">${esc(shortDateTime(health.checkedAt))}</div></td>
+          <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
+          <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
+          <td><div class="row-tools"><button data-copy-provider-url="${i}" type="button">复制URL</button><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
+        </tr>`;
+      }).join('') || `<tr><td colspan="7"><div class="empty">暂无 provider</div></td></tr>`;
+      renderProviderEditor();
+    }
+
+    function maskKey(key) {
+      if (!key) return '';
+      if (key.length <= 12) return '*'.repeat(key.length);
+      return `${key.slice(0, 6)}......${key.slice(-4)}`;
+    }
+
+    function providerUaLabel(provider) {
+      const headers = provider?.headers || {};
+      const remove = provider?.remove_headers || [];
+      const ua = headers['User-Agent'];
+      if (headers.Originator === 'codex_cli_rs') return 'Codex';
+      if (ua === '') return '空UA';
+      if (ua === 'curl/8.0') return 'Curl';
+      if (String(ua || '').includes('Mozilla/5.0')) return 'Chrome';
+      if (ua) return ua;
+      return '默认';
+    }
+
+    function endpointLabel(value, provider = {}) {
+      if (value === 'custom_endpoint') return provider.custom_endpoint || '自定义';
+      if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
+      if (value === 'codex_responses' || value === 'responses') return '/responses';
+      return value || '';
+    }
+
+    function normalizeEndpoint(value) {
+      const endpoint = String(value || '').trim();
+      if (!endpoint) return '';
+      return endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    }
+
+    function updateCustomEndpointInput() {
+      const input = $('providerCustomEndpoint');
+      if (!input) return;
+      input.hidden = $('providerMode').value !== 'custom_endpoint';
+    }
+
+    function modelsToRows(models) {
+      if (typeof models === 'string') return models.trim() ? [{ name: models, context: '', effort: '' }] : [];
+      if (Array.isArray(models)) return models.map(name => String(name).trim()).filter(Boolean).map(name => ({ name, context: '', effort: '' }));
+      if (models && typeof models === 'object') {
+        return Object.entries(models).filter(([name]) => String(name).trim()).map(([name, meta]) => ({
+          name,
+          context: meta?.context_length || meta?.max_model_len || meta?.max_tokens || '',
+          effort: meta?.reasoning_effort || meta?.reasoning || ''
+        }));
+      }
+      return [];
+    }
+
+    function rowsToModels() {
+      const models = {};
+      document.querySelectorAll('[data-model-row]').forEach(row => {
+        const name = row.querySelector('[data-model-name]').value.trim();
+        if (!name) return;
+        const context = row.querySelector('[data-model-context]').value.trim();
+        const effort = row.querySelector('[data-model-effort]').value;
+        const contextValue = Number(context);
+        models[name] = {};
+        if (context && Number.isFinite(contextValue) && contextValue > 0) models[name].context_length = contextValue;
+        if (effort) models[name].reasoning_effort = effort;
+      });
+      return models;
+    }
+
+    function renderModelRows(models) {
+      const rows = modelsToRows(models);
+      $('modelRows').innerHTML = rows.map((row, i) => modelRowHtml(row, i)).join('');
+    }
+
+    function modelRowHtml(row, i) {
+      return `<div class="mini-row" data-model-row="${i}"><input data-model-name value="${esc(row.name || '')}" placeholder="模型名称"><input data-model-context type="number" min="0" step="100000" value="${esc(row.context || '')}" placeholder="上下文"><select data-model-effort><option value="">默认</option>${['minimal','low','medium','high','xhigh','none'].map(v => `<option value="${v}" ${row.effort === v ? 'selected' : ''}>${v}</option>`).join('')}</select><button data-remove-model="${i}" type="button">x</button></div>`;
+    }
+
+    function renderModelChoices(models) {
+      state.fetchedModels = models || [];
+      $('modelChoices').hidden = !state.fetchedModels.length;
+      $('addSelectedModelsBtn').hidden = !state.fetchedModels.length;
+      $('modelChoices').innerHTML = state.fetchedModels.map((model, i) => `<label class="model-choice"><input type="checkbox" data-model-choice="${i}"><span class="truncate" title="${esc(model.id)}">${esc(model.id)}</span><span class="subtle">${esc(model.context_length || '')}</span></label>`).join('');
+    }
+
+    function clearFetchedModels() {
+      state.fetchedModels = [];
+      $('modelFetchStatus').textContent = '';
+      $('modelChoices').innerHTML = '';
+      $('modelChoices').hidden = true;
+      $('addSelectedModelsBtn').hidden = true;
+    }
+
+    function addFetchedModelsToRows() {
+      const existing = new Set([...document.querySelectorAll('[data-model-name]')].map(input => input.value.trim()).filter(Boolean));
+      const chosen = [...document.querySelectorAll('[data-model-choice]:checked')].map(input => state.fetchedModels[Number(input.dataset.modelChoice)]).filter(Boolean);
+      for (const model of chosen) {
+        if (existing.has(model.id)) continue;
+        $('modelRows').insertAdjacentHTML('beforeend', modelRowHtml({ name: model.id, context: model.context_length || '', effort: '' }, Date.now() + Math.random()));
+        existing.add(model.id);
+      }
+    }
+
+    const chromeUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    const codexUserAgent = 'codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color';
+
+    function detectHeaderPreset(provider) {
+      const headers = provider?.headers || {};
+      const remove = provider?.remove_headers || [];
+      const ua = headers['User-Agent'];
+      if (headers.Originator === 'codex_cli_rs' && ua === codexUserAgent) return 'codex';
+      if (ua === '') return 'empty';
+      if (ua === 'curl/8.0') return 'curl';
+      if (ua === chromeUserAgent) return 'chrome';
+      if (typeof ua === 'string' || Object.keys(headers).length) return 'custom';
+      return 'default';
+    }
+
+    function customUaValue(provider) {
+      const ua = provider?.headers?.['User-Agent'];
+      return typeof ua === 'string' ? ua : '';
+    }
+
+    function updateCustomUaInput() {
+      const input = $('headerCustomUa');
+      if (!input) return;
+      input.hidden = $('headerPreset').value !== 'custom';
+    }
+
+    function presetToHeaders(preset, customUa = '') {
+      if (preset === 'empty') return { headers: { 'User-Agent': '' }, remove_headers: [] };
+      if (preset === 'curl') return { headers: { 'User-Agent': 'curl/8.0' }, remove_headers: [] };
+      if (preset === 'chrome') return { headers: { 'User-Agent': chromeUserAgent }, remove_headers: [] };
+      if (preset === 'codex') return { headers: { Originator: 'codex_cli_rs', 'User-Agent': codexUserAgent }, remove_headers: [] };
+      if (preset === 'custom') return { headers: customUa ? { 'User-Agent': customUa } : {}, remove_headers: [] };
+      return { headers: {}, remove_headers: [] };
+    }
+
+    function renderProviderEditor() {
+      const p = state.providers[state.selectedProvider];
+      clearFetchedModels();
+      $('providerEditorTitle').textContent = p ? `编辑 ${p.name || ''}` : 'Provider';
+      $('providerName').value = p?.name || '';
+      $('providerBaseUrl').value = p?.base_url || '';
+      $('providerApiKey').value = p?.api_key || p?.key || '';
+      $('providerMode').value = p?.api_mode || 'codex_responses';
+      $('providerCustomEndpoint').value = p?.custom_endpoint || '';
+      updateCustomEndpointInput();
+      if (p) {
+        renderModelRows(p.models || {});
+      } else {
+        $('modelRows').innerHTML = '';
+      }
+      const headerPreset = detectHeaderPreset(p);
+      $('headerPreset').value = headerPreset;
+      $('headerCustomUa').value = headerPreset === 'custom' ? customUaValue(p) : '';
+      updateCustomUaInput();
+    }
+
+    function collectProviderEditor() {
+      const headerPreset = $('headerPreset').value;
+      const customUa = $('headerCustomUa').value.trim();
+      const endpointMode = $('providerMode').value || 'codex_responses';
+      const customEndpoint = normalizeEndpoint($('providerCustomEndpoint').value);
+      if (headerPreset === 'custom' && !customUa) throw new Error('自定义 UA 必填');
+      if (endpointMode === 'custom_endpoint' && !customEndpoint) throw new Error('自定义 Endpoint 必填');
+      const headerConfig = presetToHeaders(headerPreset, customUa);
+      const item = {
+        ...(state.providers[state.selectedProvider] || {}),
+        name: $('providerName').value.trim(),
+        base_url: $('providerBaseUrl').value.trim(),
+        api_key: $('providerApiKey').value.trim(),
+        api_mode: endpointMode,
+        enabled: state.providers[state.selectedProvider]?.enabled !== false,
+        models: rowsToModels(),
+        headers: headerConfig.headers,
+        remove_headers: headerConfig.remove_headers
+      };
+      if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
+      else delete item.custom_endpoint;
+      delete item.__draft;
+      return item;
+    }
+
+    function healthDetailText(status) {
+      const text = String(status?.compact || status?.detail || '').trim();
+      if (!text || text === '-' || text === '➖') return '';
+      const hiddenFragments = ['跳过', '不测', '未测试', '不支持responses'];
+      return hiddenFragments.some(fragment => text.includes(fragment)) ? '' : text;
+    }
+
+    const HEALTH_UA_COLUMNS = ['Codex', '空UA', 'Curl', 'Chrome', '自定义'];
+
+    function healthResultKey(providerName, model) {
+      return `${providerName}::${model || ''}`;
+    }
+
+    function healthRowsData() {
+      const rows = [];
+      state.providers.filter(provider => provider.enabled !== false).forEach((provider) => {
+        const providerName = provider.name || '';
+        const models = modelNames(provider);
+        const rowModels = models.length ? models : [''];
+        rowModels.forEach((model) => {
+          rows.push({
+            provider,
+            providerName,
+            model,
+            key: healthResultKey(providerName, model)
+          });
+        });
+      });
+      return rows;
+    }
+
+    function currentHealthSelection() {
+      const inputs = [...document.querySelectorAll('[data-health-select]')];
+      if (!inputs.length) return null;
+      return new Set(inputs.filter(input => input.checked).map(input => input.dataset.healthKey));
+    }
+
+    function selectedHealthTargets() {
+      return [...document.querySelectorAll('[data-health-select]:checked')].map(input => ({
+        key: input.dataset.healthKey,
+        provider: input.dataset.healthProvider,
+        model: input.dataset.healthModel || ''
+      })).filter(item => item.key && item.provider);
+    }
+
+    function healthUaResultMap(status) {
+      const resultMap = {};
+      const addResult = (item) => {
+        if (!item || !item.ua) return;
+        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : '自定义';
+        const text = String(item.compact || healthDetailText(item) || item.status || '').trim();
+        if (!text) return;
+        resultMap[label] = {
+          text,
+          title: [item.endpointLabel, item.ua, item.detail || item.status || text].filter(Boolean).join(': '),
+          alive: item.alive
+        };
+      };
+      if (Array.isArray(status?.uaResults)) status.uaResults.forEach(addResult);
+      else if (status?.ua) addResult(status);
+      return resultMap;
+    }
+
+    function healthUaCell(resultMap, label) {
+      const result = resultMap[label];
+      if (!result) return '<td></td>';
+      const kind = result.alive === true ? 'ok' : result.alive === false ? 'fail' : 'muted';
+      return `<td class="health-result-cell" title="${esc(result.title)}"><span class="status ${kind}">${esc(result.text)}</span></td>`;
+    }
+
+    function healthEndpointTitle(status) {
+      if (!Array.isArray(status?.endpointTrace) || !status.endpointTrace.length) return status?.endpointLabel || '';
+      return status.endpointTrace.map(attempt => `${attempt.endpointLabel}: ${attempt.alive ? '成功' : '失败'}`).join(' | ');
+    }
+
+    function healthEndpointText(status) {
+      if (status?.endpointLabel) return status.endpointLabel;
+      return '';
+    }
+
+    function hasReasoningEffort(value) {
+      if (value === true) return true;
+      const text = String(value ?? '').trim().toLowerCase();
+      return !!text && !['none', 'false', '0', 'off', 'no'].includes(text);
+    }
+
+    function modelMeta(provider, model) {
+      const models = provider?.models || provider?.model;
+      if (models && typeof models === 'object' && !Array.isArray(models)) return models[model] || {};
+      if (Array.isArray(models)) {
+        const item = models.find(entry => entry && typeof entry === 'object' && String(entry.id || entry.name || '') === model);
+        return item && typeof item === 'object' ? item : {};
+      }
+      return {};
+    }
+
+    function healthConfiguredEndpointLabel(provider, model) {
+      const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
+      if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
+      const meta = modelMeta(provider, model);
+      if (hasReasoningEffort(meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning)) return 'reasoning';
+      return 'responses';
+    }
+
+    function renderHealth() {
+      const rows = healthRowsData();
+      const selectedKeys = state.healthSelection || currentHealthSelection();
+      const hasSelectionState = selectedKeys instanceof Set;
+      $('healthRows').innerHTML = rows.map((row) => {
+        const p = row.provider;
+        const s = (state.healthResults || {})[row.key] || {};
+        const running = !!(state.healthRunning || {})[row.key];
+        const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
+        const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
+        const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
+        const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
+        const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
+        const uaResultMap = running ? {} : healthUaResultMap(s);
+        const uaCells = HEALTH_UA_COLUMNS.map(label => healthUaCell(uaResultMap, label)).join('');
+        return `<tr>
+          <td><label class="health-check" title="选择"><input type="checkbox" data-health-select="1" data-health-key="${esc(row.key)}" data-health-provider="${esc(row.providerName)}" data-health-model="${esc(row.model)}"${checked}><span class="health-check-box" aria-hidden="true"></span></label></td>
+          <td class="truncate">${esc(row.providerName)}</td>
+          <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
+          <td>${statusCell}</td>
+          <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
+          ${uaCells}
+          <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
+        </tr>`;
+      }).join('') || `<tr><td colspan="11"><div class="empty">暂无 provider</div></td></tr>`;
+    }
+
+    function renderMonitor() {
+      if (!$('chainRows')) return;
+      const rows = state.monitor.chains || [];
+      $('chainRows').innerHTML = rows.map((c, i) => {
+        const s = (state.status.chains || {})[c.id] || {};
+        const running = !!(state.monitorRunning || {})[c.id];
+        const statusCell = running ? statusPill(null, '检查中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
+        const detailText = running ? '正在通过 AIProxy 发起一次端到端请求...' : (s.detail || '');
+        const provider = providerByName(c.providerId);
+        const endpointText = providerEndpointText(provider);
+        const reasoningText = chainReasoningText(c);
+        const userAgentText = providerUserAgentText(provider);
+        const prompt = (state.monitorPrompts || {})[c.id] ?? s.prompt ?? DEFAULT_MONITOR_PROMPT;
+        return `<tr>
+          <td class="truncate" title="${esc(c.providerId || '')}">${esc(c.providerId || '')}</td>
+          <td class="truncate" title="${esc(c.model || '')}">${esc(c.model || '')}</td>
+          <td class="truncate" title="${esc(endpointText)}">${esc(endpointText)}</td>
+          <td class="truncate" title="${esc(reasoningText)}">${esc(reasoningText)}</td>
+          <td class="truncate" title="${esc(userAgentText)}">${esc(userAgentText)}</td>
+          <td>${statusCell}</td>
+          <td class="truncate detail-col" title="${esc(detailText)}">${esc(detailText)}</td>
+          <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
+          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" type="button">测试</button></div></td>
+        </tr>`;
+      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护中启用 Provider，并给 Provider 配置至少一个模型。</div></td></tr>`;
+    }
+
+    function collectMonitor() {
+      return state.monitor;
+    }
+
+    async function persistProviders() {
+      const providers = state.providers.filter(provider => !provider.__draft).map(providerForPersist);
+      const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ providers }) });
+      const warningText = data.warnings?.length ? `，警告 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}` : '';
+      const restartText = data.restart?.ok === false ? '，AIProxy 重启失败，请到 AIProxy 页查看' : '';
+      state.lastSaveMessage = `配置已保存${warningText}${restartText}`;
+      $('serverState').textContent = state.lastSaveMessage;
+      return data;
+    }
+
+    async function saveCurrent() {
+      if (state.tab === 'config') {
+        if (state.selectedProvider >= 0) {
+          const provider = collectProviderEditor();
+          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
+          state.providers[state.selectedProvider] = provider;
+        }
+        await persistProviders();
+      } else if (state.tab === 'monitor') {
+        collectMonitor();
+        await api('/api/monitor', { method: 'POST', body: JSON.stringify(state.monitor) });
+      }
+      await loadAll();
+    }
+
+    function setHealthSelection(checked) {
+      const keys = checked ? healthRowsData().map(row => row.key) : [];
+      state.healthSelection = new Set(keys);
+      document.querySelectorAll('[data-health-select]').forEach(input => {
+        input.checked = checked;
+      });
+    }
+
+    function renderHealthRunButton() {
+      const btn = $('runSelectedHealthBtn');
+      if (!btn) return;
+      const running = !!state.healthRun;
+      btn.textContent = running ? '取消' : '测试';
+      btn.classList.toggle('primary', !running);
+      btn.classList.toggle('danger', running);
+    }
+
+    function cancelHealthRun() {
+      const run = state.healthRun;
+      if (!run) return;
+      run.cancelled = true;
+      run.controllers.forEach(controller => controller.abort());
+      state.healthRunning = {};
+      state.healthRun = null;
+      renderHealth();
+      renderHealthRunButton();
+      $('serverState').textContent = '测活已取消';
+    }
+
+    async function runHealth(targets) {
+      if (state.healthRun) {
+        cancelHealthRun();
+        return;
+      }
+      if (!targets.length) throw new Error('请先选择要测试的 provider/model');
+      const allUa = !!$('healthAllUa')?.checked;
+      const targetKeys = targets.map(target => target.key);
+      const run = { cancelled: false, controllers: new Set() };
+      state.healthRun = run;
+      state.healthSelection = new Set(targetKeys);
+      state.healthResults = {};
+      state.healthRunning = Object.fromEntries(targetKeys.map(key => [key, true]));
+      renderHealth();
+      renderHealthRunButton();
+      $('serverState').textContent = `测活中 0/${targets.length}`;
+
+      const groups = new Map();
+      targets.forEach(target => {
+        if (!groups.has(target.provider)) groups.set(target.provider, []);
+        groups.get(target.provider).push(target);
+      });
+
+      let done = 0;
+      const runTarget = async (target) => {
+        if (run.cancelled) return;
+        const controller = new AbortController();
+        run.controllers.add(controller);
+        try {
+          const data = await api('/api/health/check', { method: 'POST', signal: controller.signal, body: JSON.stringify({ providers: [target.provider], models: { [target.provider]: [target.model] }, allUa }) });
+          if (run.cancelled) return;
+          state.status = data.status || state.status;
+          (data.results || []).forEach(result => {
+            if (!result) return;
+            const key = result.resultKey || healthResultKey(result.providerId, result.model);
+            state.healthResults[key] = result;
+          });
+        } catch (err) {
+          if (run.cancelled || err?.name === 'AbortError') return;
+          const message = err?.message || String(err);
+          state.healthResults[target.key] = {
+            resultKey: target.key,
+            providerId: target.provider,
+            model: target.model,
+            checkedAt: new Date().toISOString(),
+            alive: false,
+            latencyMs: null,
+            status: '失败',
+            detail: message,
+            compact: message,
+            endpointLabel: '-',
+            ua: '自定义',
+            uaResults: [{ ua: '自定义', alive: false, status: '失败', detail: message, compact: message }]
+          };
+        } finally {
+          run.controllers.delete(controller);
+          delete state.healthRunning[target.key];
+          if (!run.cancelled) {
+            done += 1;
+            renderHealth();
+            renderHealthRunButton();
+            $('serverState').textContent = `测活中 ${done}/${targets.length}`;
+          }
+        }
+      };
+
+      try {
+        await Promise.all([...groups.values()].map(async (providerTargets) => {
+          for (const target of providerTargets) {
+            if (run.cancelled) break;
+            await runTarget(target);
+          }
+        }));
+      } finally {
+        if (state.healthRun === run) {
+          state.healthRun = null;
+          state.healthRunning = {};
+          renderHealth();
+          renderHealthRunButton();
+          $('serverState').textContent = run.cancelled ? `测活已取消 ${done}/${targets.length}` : `测活完成 ${done}/${targets.length}`;
+        }
+      }
+    }
+
+    async function runMonitor(chainIds = null, promptOverrides = null) {
+      const ids = Array.isArray(chainIds) && chainIds.length ? chainIds : (state.monitor.chains || []).map(c => c.id).filter(Boolean);
+      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护中启用 Provider 并配置模型');
+      const currentPrompts = collectMonitorPrompts();
+      if (promptOverrides && typeof promptOverrides === 'object') Object.assign(currentPrompts, promptOverrides);
+      state.monitorPrompts = currentPrompts;
+      state.monitorRunning = Object.fromEntries(ids.map(id => [id, true]));
+      renderMonitor();
+      $('serverState').textContent = ids.length === 1 ? `链路检查中：${ids[0]}` : `全部链路检查中：0/${ids.length}（可能较慢）`;
+      try {
+        const prompts = Object.fromEntries(ids.map(id => [id, (state.monitorPrompts || {})[id] || DEFAULT_MONITOR_PROMPT]));
+        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts } : { prompts };
+        const data = await api('/api/monitor/check', { method: 'POST', body: JSON.stringify(body) });
+        state.status = data.status;
+        const results = data.chainResults || [];
+        const ok = results.filter(item => item.alive).length;
+        $('serverState').textContent = ids.length === 1
+          ? `链路检查完成：${results[0]?.alive ? '可用' : '失败'}`
+          : `全部链路检查完成：${ok}/${results.length} 可用`;
+      } finally {
+        state.monitorRunning = {};
+        render();
+      }
+    }
+
+    function aiproxyHealthLabel(item) {
+      if (item.health === 'healthy') return '健康';
+      if (item.health === 'unhealthy') return '异常';
+      if (item.health === 'starting') return '启动中';
+      if (item.health === 'stopped') return '已停止';
+      return '未知';
+    }
+
+    function aiproxyHealthKind(item) {
+      if (item.health === 'healthy') return 'ok';
+      if (item.health === 'unhealthy') return 'fail';
+      if (item.health === 'starting') return 'warn';
+      if (item.health === 'stopped') return 'muted';
+      return 'warn';
+    }
+
+    function renderAiproxy() {
+      const containers = ['aiproxyRows', 'aiproxyPageRows'].map(id => $(id)).filter(Boolean);
+      if (!containers.length) return;
+      const items = state.aiproxy.items || [];
+      const errorHtml = state.aiproxy.error ? `<div class="note">AIProxy 状态读取失败：${esc(state.aiproxy.error)}</div>` : '';
+      if (!items.length) {
+        const html = errorHtml || `<div class="empty">未发现 AIProxy systemd 服务</div>`;
+        containers.forEach(container => { container.innerHTML = html; });
+        return;
+      }
+      const html = errorHtml + items.map((item, i) => {
+        const id = item.id || '';
+        const name = item.name || item.service || id;
+        const latency = Number.isFinite(Number(item.httpLatencyMs)) ? ` · ${Number(item.httpLatencyMs)}ms` : '';
+        const httpText = item.httpAlive ? `HTTP 响应${latency}` : (item.httpTransient ? `探测重试中${latency}` : (item.httpDetail || 'HTTP 未通'));
+        const httpKind = item.httpAlive ? '' : (item.httpTransient ? 'warn' : 'fail');
+        const activeText = item.active || 'unknown';
+        const url = item.url || '';
+        return `<article class="service-card">
+          <div class="service-title">
+            <strong title="${esc(name)}">${esc(name)}</strong>
+            ${statusPill(null, aiproxyHealthLabel(item), aiproxyHealthKind(item))}
+          </div>
+          <div class="service-health">
+            ${statusPill(!!item.activeOk, activeText)}
+            <span title="${esc(item.httpDetail || httpText)}">${statusPill(item.httpAlive ? true : false, httpText, httpKind)}</span>
+          </div>
+          <div class="service-meta">
+            <div title="${esc(item.service || '')}">服务：${esc(item.service || '-')}</div>
+            <div title="${esc(url)}">地址：${esc(url || '-')}</div>
+            <div>端口：${esc(item.port || 18006)}</div>
+            <div title="${esc(item.config || '')}">配置：${esc(item.config || '-')}</div>
+            <div title="${esc(item.unitPath || '')}">Unit：${esc(item.unitPath || '-')}</div>
+          </div>
+          <div class="service-actions">
+            <button data-edit-aiproxy="${i}" type="button">编辑</button>
+            <button data-aiproxy-action="start" data-aiproxy-id="${esc(id)}" type="button">启动</button>
+            <button data-aiproxy-action="stop" data-aiproxy-id="${esc(id)}" type="button">停止</button>
+            <button data-aiproxy-action="restart" data-aiproxy-id="${esc(id)}" type="button">重启</button>
+          </div>
+        </article>`;
+      }).join('');
+      containers.forEach(container => { container.innerHTML = html; });
+    }
+
+    function serviceUnitBaseName(value) {
+      let text = String(value || '').trim() || 'aiproxy';
+      if (text.endsWith('.service')) text = text.slice(0, -8);
+      return text || 'aiproxy';
+    }
+
+    function openAiproxyEditor(item = null) {
+      const editor = $('aiproxyEditor');
+      if (!editor) return;
+      const serviceName = serviceUnitBaseName(item?.service || item?.id || 'aiproxy');
+      $('aiproxyEditorTitle').textContent = item?.service ? `编辑 ${item.service}` : '创建 AIProxy 服务';
+      $('aiproxyServiceName').value = serviceName;
+      $('aiproxyPort').value = item?.port || 18006;
+      $('aiproxyOldService').value = item?.service || '';
+      editor.hidden = false;
+      $('aiproxyServiceName').focus();
+    }
+
+    function closeAiproxyEditor() {
+      const editor = $('aiproxyEditor');
+      if (editor) editor.hidden = true;
+    }
+
+    function collectAiproxyEditor() {
+      const serviceName = serviceUnitBaseName($('aiproxyServiceName').value);
+      const port = Number($('aiproxyPort').value || 18006);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535');
+      return {
+        id: serviceName,
+        service: serviceName,
+        name: serviceName,
+        listen: '127.0.0.1',
+        port,
+        config: state.configPath || 'config.yaml',
+        verbose: false,
+        oldService: $('aiproxyOldService').value || ''
+      };
+    }
+
+    async function saveAiproxyEditor() {
+      const item = collectAiproxyEditor();
+      $('serverState').textContent = 'AIProxy 服务保存并重启中';
+      const data = await api('/api/aiproxy/services', { method: 'POST', body: JSON.stringify({ item }) });
+      setAiproxyLog(data);
+      closeAiproxyEditor();
+      await loadAiproxyServices();
+      await loadAll();
+    }
+
+    function setAiproxyLog(data) {
+      const action = data?.returnCode === 0 ? '完成' : '返回';
+      $('serverState').textContent = `AIProxy 操作${action}`;
+    }
+
+    async function loadAiproxyServices() {
+      try {
+        const data = await api('/api/aiproxy/services');
+        state.aiproxy = data;
+        renderAiproxy();
+        const summary = data.summary || {};
+        $('serverState').textContent = `AIProxy 已刷新：${summary.healthy || 0}/${summary.total || 0} 健康`;
+        return data;
+      } catch (err) {
+        state.aiproxy = { items: [], error: err.message };
+        renderAiproxy();
+        throw err;
+      }
+    }
+
+    document.addEventListener('click', async (event) => {
+      const target = event.target.closest('button');
+      if (!target) return;
+      try {
+        if (target.classList.contains('tab')) {
+          state.tab = target.dataset.tab;
+          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === target));
+          document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === state.tab));
+        } else if (target.id === 'reloadBtn') {
+          window.location.reload();
+        } else if (target.id === 'addProviderBtn') {
+          beginProviderDraft({ name: `provider-${state.providers.length + 1}`, base_url: 'https://example.com/v1', api_key: '', api_mode: 'codex_responses', models: {}, headers: {}, remove_headers: [], enabled: true });
+        } else if (target.hasAttribute('data-edit-provider')) {
+          const index = Number(target.dataset.editProvider);
+          const provider = state.providers[index];
+          if (state.selectedProvider === index) {
+            dropSelectedProviderDraft();
+          } else {
+            dropSelectedProviderDraft();
+            state.selectedProvider = state.providers.indexOf(provider);
+          }
+          renderProviders();
+        } else if (target.hasAttribute('data-copy-provider-url')) {
+          const provider = state.providers[Number(target.dataset.copyProviderUrl)];
+          if (!provider?.name) throw new Error('Provider 名称缺失');
+          await copyText(providerLocalUrl(provider), `已复制 ${provider.name} 本地 URL`);
+        } else if (target.hasAttribute('data-clone-provider')) {
+          const clone = JSON.parse(JSON.stringify(providerForPersist(state.providers[Number(target.dataset.cloneProvider)])));
+          clone.name = `${clone.name}-copy`;
+          beginProviderDraft(clone);
+        } else if (target.hasAttribute('data-toggle-provider')) {
+          const index = Number(target.dataset.toggleProvider);
+          state.providers[index].enabled = state.providers[index].enabled === false;
+          sortProvidersByEnabled();
+          await persistProviders();
+          await loadAll();
+        } else if (target.id === 'applyProviderBtn') {
+          const provider = collectProviderEditor();
+          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
+          if (state.selectedProvider < 0) {
+            state.providers.unshift(provider);
+          } else {
+            state.providers[state.selectedProvider] = provider;
+          }
+          state.selectedProvider = -1;
+          await persistProviders();
+          await loadAll();
+        } else if (target.hasAttribute('data-delete-provider')) {
+          const index = Number(target.dataset.deleteProvider);
+          const providerName = state.providers[index]?.name || ('#' + (index + 1));
+          if (!confirm('删除 Provider ' + providerName + '？')) return;
+          const wasDraft = !!state.providers[index]?.__draft;
+          state.providers.splice(index, 1);
+          if (state.selectedProvider === index) {
+            state.selectedProvider = -1;
+          } else if (state.selectedProvider > index) {
+            state.selectedProvider -= 1;
+          }
+          if (wasDraft) {
+            renderProviders();
+          } else {
+            await persistProviders();
+            await loadAll();
+          }
+        } else if (target.id === 'addModelBtn') {
+          $('modelRows').insertAdjacentHTML('beforeend', modelRowHtml({ name: '', context: '', effort: '' }, Date.now()));
+        } else if (target.id === 'fetchProviderModelsBtn') {
+          const provider = collectProviderEditor();
+          $('modelFetchStatus').textContent = '正在获取模型...';
+          const data = await api('/api/providers/models', { method: 'POST', body: JSON.stringify({ provider }) });
+          renderModelChoices(data.models || []);
+          $('modelFetchStatus').textContent = `获取到 ${data.count || 0} 个模型，耗时 ${data.latencyMs || 0}ms`;
+        } else if (target.id === 'addSelectedModelsBtn') {
+          addFetchedModelsToRows();
+        } else if (target.hasAttribute('data-remove-model')) {
+          target.closest('[data-model-row]')?.remove();
+        } else if (target.id === 'exportConfigBtn') {
+          const blob = new Blob([JSON.stringify({ providers: state.providers }, null, 2)], { type: 'application/json' });
+          const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'ai-api-config.json' });
+          a.click();
+          URL.revokeObjectURL(a.href);
+        } else if (target.id === 'importConfigBtn') {
+          $('importConfigFile').click();
+        } else if (target.id === 'selectAllHealthBtn') {
+          setHealthSelection(true);
+        } else if (target.id === 'clearAllHealthBtn') {
+          setHealthSelection(false);
+        } else if (target.id === 'runSelectedHealthBtn') {
+          if (state.healthRun) cancelHealthRun();
+          else await runHealth(selectedHealthTargets());
+        } else if (target.hasAttribute('data-test-chain')) {
+          const chain = state.monitor.chains[Number(target.dataset.testChain)];
+          if (!chain?.id) throw new Error('链路 ID 缺失，请刷新页面');
+          const input = target.closest('tr')?.querySelector('[data-chain-prompt]');
+          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT });
+        } else if (target.id === 'runMonitorBtn') {
+          await runMonitor();
+        } else if (target.id === 'createAiproxyPageBtn') {
+          openAiproxyEditor();
+        } else if (target.id === 'cancelAiproxyEditorBtn') {
+          closeAiproxyEditor();
+        } else if (target.id === 'saveAiproxyEditorBtn') {
+          await saveAiproxyEditor();
+        } else if (target.hasAttribute('data-edit-aiproxy')) {
+          const item = state.aiproxy.items?.[Number(target.dataset.editAiproxy)];
+          openAiproxyEditor(item || null);
+        } else if (target.id === 'refreshAiproxyBtn' || target.id === 'refreshAiproxyPageBtn') {
+          await loadAiproxyServices();
+        } else if (target.dataset.aiproxyAction) {
+          const data = await api('/api/aiproxy/services/control', { method: 'POST', body: JSON.stringify({ id: target.dataset.aiproxyId, action: target.dataset.aiproxyAction }) });
+          setAiproxyLog(data);
+          await loadAiproxyServices();
+        }
+      } catch (err) {
+        $('serverState').textContent = err.message;
+        alert(err.message);
+      }
+    });
+
+    $('headerPreset').addEventListener('change', updateCustomUaInput);
+    $('providerMode').addEventListener('change', updateCustomEndpointInput);
+
+    const chainProviderSelect = $('chainProvider');
+    if (chainProviderSelect) {
+      chainProviderSelect.addEventListener('change', () => {
+        const provider = state.providers.find(p => p.name === chainProviderSelect.value);
+        const chainModelInput = $('chainModel');
+        if (chainModelInput) chainModelInput.value = firstModel(provider || {});
+      });
+    }
+
+    $('importConfigFile').addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      state.providers = Array.isArray(parsed) ? parsed : parsed.providers || [];
+      state.selectedProvider = -1;
+      render();
+      event.target.value = '';
+    });
+
+    loadAll().catch(err => {
+      $('serverState').textContent = err.message;
+    });
+  </script>
+</body>
+</html>

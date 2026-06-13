@@ -1,0 +1,45 @@
+# 示例配置文件：请复制为 config.yaml 后填入你自己的 Provider 信息。
+#
+# 注意：公开仓库不要提交真实 config.yaml、真实 Provider 域名、真实 API Key、
+# 运行状态文件或测活结果。
+
+- name: provider-a
+  base_url: https://example-a.invalid/v1
+  api_key: ${PROVIDER_A_API_KEY}
+  api_mode: codex_responses
+  models:
+    gpt-5.5:
+      context_length: 400000
+      reasoning_effort: high
+  headers: {}
+  remove_headers: []
+  enabled: true
+
+- name: provider-b
+  base_url: https://example-b.invalid/v1
+  api_key: ${PROVIDER_B_API_KEY}
+  api_mode: chat_completions
+  models:
+    gpt-5.5:
+      context_length: 400000
+      reasoning_effort: high
+  headers:
+    User-Agent: ''
+  remove_headers: []
+  enabled: true
+
+- name: provider-c
+  base_url: https://example-c.invalid/v1
+  api_key: ${PROVIDER_C_API_KEY}
+  api_mode: codex_responses
+  models:
+    gpt-5.5:
+      context_length: 400000
+      reasoning_effort: high
+    glm-5.1:
+      context_length: 200000
+  headers:
+    Originator: codex_cli_rs
+    User-Agent: codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color
+  remove_headers: []
+  enabled: false

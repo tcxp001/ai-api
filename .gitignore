@@ -1,0 +1,31 @@
+# Local runtime config and state
+config.yaml
+config.json
+config.yaml.bak-*
+config.json.bak-*
+checkins.json
+monitor.json
+runtime-status.json
+runtime-history.json
+aiproxy-instances.json
+
+# Logs
+*.log
+proxy-restart.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local env/editor
+.env
+.env.*
+.DS_Store
+
+# Local backups and runtime artifacts
+*.bak-*
+dashboard-restart.log
+
+# Git should only track sanitized examples, never real provider configs
