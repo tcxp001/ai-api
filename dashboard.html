@@ -24,6 +24,7 @@
 
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
+    html, body { max-width: 100%; overflow-x: hidden; }
     body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
     button, input, textarea, select { font: inherit; }
     button {
@@ -99,9 +100,9 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(8,127,123,.14);
     }
-    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
-    table { width: 100%; min-width: 980px; border-collapse: collapse; table-layout: fixed; background: #fff; }
-    .health-table { min-width: 1650px; }
+    .table-wrap { max-width: 100%; overflow-x: auto; overflow-y: visible; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; background: #fff; }
+    .health-table { min-width: 0; }
     .monitor-table { width: 100%; min-width: 0; table-layout: fixed; }
     .monitor-table th, .monitor-table td { white-space: nowrap; }
     .monitor-table th:nth-child(1), .monitor-table td:nth-child(1) { width: 8%; }
@@ -110,19 +111,21 @@
     .monitor-table th:nth-child(4), .monitor-table td:nth-child(4) { width: 6%; }
     .monitor-table th:nth-child(5), .monitor-table td:nth-child(5) { width: 6%; }
     .monitor-table th:nth-child(6), .monitor-table td:nth-child(6) { width: 6%; }
-    .monitor-table th:nth-child(8), .monitor-table td:nth-child(8) { width: 6%; }
-    .monitor-table th:nth-child(9), .monitor-table td:nth-child(9) { width: 8%; }
-    .monitor-table .detail-col { width: 42%; min-width: 0; white-space: nowrap; }
-    .monitor-table .chain-prompt { width: 76px; }
+    .monitor-table th:nth-child(8), .monitor-table td:nth-child(8) { width: 7%; }
+    .monitor-table th:nth-child(9), .monitor-table td:nth-child(9) { width: 11%; }
+    .monitor-table .detail-col { width: 38%; min-width: 0; white-space: nowrap; }
+    .monitor-table .row-tools { width: 100%; flex-wrap: nowrap; }
+    .monitor-table .chain-prompt { flex: 1 1 0; width: auto; min-width: 0; }
+    .monitor-table .row-tools button { flex: 0 0 auto; }
     .health-check { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; cursor: pointer; }
     .health-check input { position: absolute; width: 1px; min-height: 0; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
     .health-check-box { width: 16px; height: 16px; border: 1px solid #a8b5b2; border-radius: 4px; background: #fff; box-shadow: inset 0 1px 1px rgba(19, 28, 32, .04); }
     .health-check input:checked + .health-check-box { border-color: var(--accent); background: var(--accent); }
     .health-check input:checked + .health-check-box::after { content: ""; display: block; width: 4px; height: 8px; margin: 2px 0 0 5px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
     .health-check input:focus-visible + .health-check-box { box-shadow: 0 0 0 3px rgba(8,127,123,.18); }
-    .health-result-cell { white-space: normal; overflow: visible; line-height: 1.25; }
+    .health-result-cell { white-space: nowrap; overflow: visible; }
     .health-result-cell .status { white-space: nowrap; line-height: 1.25; }
-    th, td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: 13px; }
+    th, td { min-width: 0; padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: 13px; overflow-wrap: anywhere; }
     th { background: var(--surface-2); color: #3a464c; font-weight: 700; }
     tr:last-child td { border-bottom: 0; }
     .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -148,11 +151,20 @@
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
     pre { margin: 0; padding: 12px; border-radius: 6px; background: var(--code); color: #ecf2ef; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .row-tools { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+    .row-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .row-tools button { min-height: 30px; padding: 0 8px; font-size: 12px; }
     .chain-prompt { width: 120px; min-height: 30px; padding: 4px 8px; font-size: 12px; }
     .row-tools button.danger { border-color: rgba(183,50,61,.45); background: rgba(183,50,61,.06); color: var(--danger); }
     .row-tools button.danger:hover:not(:disabled) { border-color: var(--danger); background: rgba(183,50,61,.1); }
+    .provider-table { min-width: 1380px; }
+    .provider-table th, .provider-table td { white-space: nowrap; }
+    .provider-url { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .provider-url code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 5px; border-radius: 4px; background: #f1f5f3; color: #253037; font-size: 12px; }
+    .provider-url button { flex: 0 0 auto; min-height: 26px; padding: 0 7px; font-size: 12px; }
+    .save-result { display: grid; gap: 6px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; font-size: 13px; line-height: 1.45; }
+    .save-result-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+    .save-result-row strong { flex: 0 0 96px; color: #344047; }
+    .save-result-row span { min-width: 0; overflow-wrap: anywhere; }
     .mini-table { display: grid; gap: 8px; min-width: 0; }
     .mini-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 104px 32px; gap: 6px; align-items: center; min-width: 0; }
     .header-row { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) 32px; }
@@ -226,11 +238,12 @@
             </div>
           </div>
           <div class="table-wrap">
-            <table>
-              <thead><tr><th style="width:140px">Provider</th><th style="width:320px">Base URL</th><th style="width:90px">Model</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
+            <table class="provider-table">
+              <thead><tr><th style="width:130px">Name</th><th style="width:78px">启用</th><th style="width:120px">API 模式</th><th style="width:82px">模型</th><th style="width:88px">健康</th><th style="width:190px">最近错误</th><th style="width:110px">检测时间</th><th style="width:270px">本地 URL</th><th style="width:110px">User-Agent</th><th style="width:250px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
+          <div id="saveResult" hidden></div>
         </section>
         <aside class="panel editor">
           <div>
@@ -239,7 +252,7 @@
           <div class="field"><label for="providerName">Name</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
-          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="chat_completions">OpenAI: /chat/completions</option><option value="codex_responses">OpenAI: /responses</option><option value="anthropic_messages">Anthropic: /messages</option><option value="custom_endpoint">Custom</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label>Model</label>
             <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
@@ -250,14 +263,15 @@
           <div class="field">
             <label for="headerPreset">User-Agent</label>
             <select id="headerPreset">
-              <option value="default">Default</option>
-              <option value="empty">Empty UA</option>
+              <option value="default">默认，不修改UA</option>
+              <option value="empty">空UA</option>
               <option value="curl">Curl</option>
               <option value="chrome">Chrome</option>
               <option value="codex">Codex</option>
-              <option value="custom">Custom</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="custom">自定义</option>
             </select>
-            <input id="headerCustomUa" placeholder="Custom User-Agent" hidden>
+            <input id="headerCustomUa" placeholder="填写自定义 User-Agent" hidden>
           </div>
           <div class="actions">
             <button id="applyProviderBtn" class="primary" type="button">保存</button>
@@ -271,18 +285,18 @@
         <div class="panel-head">
           <div>
             <h2>Provider 测活</h2>
-            <div class="subtle">选择 Provider/Model 后测试；UA matrix 会分别测试 Codex、Empty UA、Curl、Chrome。</div>
+            <div class="subtle">默认测试 Codex / Claude Code / 空UA / Curl / Chrome；取消「测所有UA」则只测 Provider 配置 UA。</div>
           </div>
           <div class="actions">
-            <label class="check-toggle"><input id="healthAllUa" type="checkbox">UA矩阵</label>
+            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测所有UA（含 Claude Code）</label>
             <button id="selectAllHealthBtn" type="button">全部选中</button>
             <button id="clearAllHealthBtn" type="button">全部取消</button>
-            <button id="runSelectedHealthBtn" class="primary" type="button">测试选中</button>
+            <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
           </div>
         </div>
         <div class="table-wrap">
           <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:110px">Reasoning</th><th style="width:90px">Status</th><th style="width:115px">Codex</th><th style="width:115px">Empty UA</th><th style="width:115px">Curl</th><th style="width:115px">Chrome</th><th style="width:130px">Custom</th><th style="width:170px">Last Test</th></tr></thead>
+            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:125px">Claude Code</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
             <tbody id="healthRows"></tbody>
           </table>
         </div>
@@ -294,7 +308,7 @@
         <div class="panel-head">
           <div>
             <h2>AIProxy 服务状态</h2>
-            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应、配置路径，以及启动/停止/重启。</div>
+            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
           </div>
           <div class="actions">
             <button id="createAiproxyPageBtn" class="primary" type="button">创建服务</button>
@@ -323,16 +337,16 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <h2>AIProxy 端到端测试</h2>
-            <div class="subtle">验证本地 AIProxy 到 Provider/Model 的完整调用链路；停用或没有模型的 Provider 不会显示。</div>
+            <h2>经 AIProxy 调用测试</h2>
+            <div class="subtle">自动列出当前启用的 Provider 和模型；停用或没有模型的 Provider 不会显示。每行「测试」会通过本地 AIProxy 真实调用该 Provider/Model。</div>
           </div>
           <div class="actions">
-            <button id="runMonitorBtn" class="primary" type="button">Check All</button><button id="runMonitor3xBtn" type="button">Check All 3x</button>
+            <button id="runMonitorBtn" class="primary" type="button">检查全部</button>
           </div>
         </div>
         <div class="table-wrap">
           <table class="monitor-table">
-            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>Status</th><th class="detail-col">Details</th><th>Last Test</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>状态</th><th class="detail-col">详情</th><th>检测时间</th><th>操作</th></tr></thead>
             <tbody id="chainRows"></tbody>
           </table>
         </div>
@@ -361,15 +375,11 @@
       fetchedModels: [],
       selectedProvider: -1,
       selectedChain: -1,
-      lastSaveMessage: ''
+      lastSaveMessage: '',
+      lastSaveDetails: null
     };
 
     const $ = (id) => document.getElementById(id);
-    const validTabs = new Set(['config', 'health', 'aiproxy']);
-    const tabFromLocation = () => {
-      const raw = decodeURIComponent(String(window.location.hash || '').replace(/^#/, '')).trim();
-      return validTabs.has(raw) ? raw : 'config';
-    };
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const modelNames = (p) => {
       const m = p.models || p.model;
@@ -398,37 +408,35 @@
       }
       return {};
     }
-    function providerReasoningText(provider, model) {
-      const meta = modelMeta(provider, model);
-      const effort = meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning || '';
-      if (effort && typeof effort === 'object') return String(effort.effort || '').trim() || '-';
-      return String(effort || '').trim() || '-';
-    }
     function chainReasoningText(chain) {
-      return providerReasoningText(providerByName(chain?.providerId), chain?.model);
+      const provider = providerByName(chain?.providerId);
+      const meta = modelMeta(provider, chain?.model);
+      const effort = meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning || '';
+      if (effort && typeof effort === 'object') return effort.effort || '默认';
+      return String(effort || '').trim() || '默认';
     }
     function providerEndpointText(provider) {
       const mode = String(provider?.api_mode || '').trim();
       if (mode === 'chat_completions') return 'chat';
-      if (mode === 'anthropic_messages') return 'messages';
       if (mode === 'custom_endpoint') return provider?.custom_endpoint || provider?.endpoint || 'custom';
       return 'responses';
     }
     function providerUserAgentText(provider) {
       const headers = provider?.headers || {};
       const remove = new Set((provider?.remove_headers || []).map(v => String(v || '').toLowerCase()));
-      if (remove.has('user-agent')) return 'Removed';
+      if (remove.has('user-agent')) return '移除';
       const key = Object.keys(headers).find(k => String(k).toLowerCase() === 'user-agent');
-      if (key === undefined) return 'Default';
+      if (key === undefined) return '默认';
       const value = headers[key];
-      if (value === '') return 'Empty UA';
-      if (value === null || value === undefined) return 'Default';
+      if (value === '') return '空UA';
+      if (value === null || value === undefined) return '默认';
       const ua = String(value);
       const lower = ua.toLowerCase();
       if (lower.includes('codex_cli_rs') || String(headers.Originator || headers.originator || '').toLowerCase() === 'codex_cli_rs') return 'Codex';
+      if (lower.includes('claude-code/') || lower.includes('claude-cli') || String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli') return 'Claude Code';
       if (lower.startsWith('curl/') || lower === 'curl') return 'Curl';
       if (lower.includes('chrome/') || lower.includes('chromium/') || lower.includes('applewebkit/')) return 'Chrome';
-      return 'Custom';
+      return '自定义';
     }
     function collectMonitorPrompts() {
       const prompts = { ...(state.monitorPrompts || {}) };
@@ -461,6 +469,27 @@
       return data;
     };
 
+    async function copyText(text) {
+      const value = String(text || '');
+      if (!value) throw new Error('没有可复制的内容');
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        if (!document.execCommand('copy')) throw new Error('浏览器拒绝复制');
+      } finally {
+        textarea.remove();
+      }
+    }
+
     async function loadAll() {
       $('serverState').textContent = '读取中';
       const [config, monitor, status, aiproxy] = await Promise.all([
@@ -484,18 +513,7 @@
       $('serverState').textContent = saveMessage || `已读取 ${state.providers.length} 个 provider${serviceSummary}`;
     }
 
-    function activateTab(tab, updateUrl = true) {
-      const nextTab = validTabs.has(tab) ? tab : 'config';
-      state.tab = nextTab;
-      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === nextTab));
-      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === nextTab));
-      if (updateUrl && window.location.hash !== `#${nextTab}`) {
-        history.pushState(null, '', `#${nextTab}`);
-      }
-    }
-
     function render() {
-      activateTab(state.tab, false);
       renderProviders();
       renderHealth();
       renderMonitor();
@@ -536,19 +554,128 @@
       state.selectedProvider = selected ? state.providers.indexOf(selected) : -1;
     }
 
+    function preferredAiproxyItem() {
+      const items = state.aiproxy?.items || [];
+      if (!items.length) return null;
+      return items.find(item => String(item.service || '') === 'aiproxy.service')
+        || items.find(item => item.health === 'healthy')
+        || items[0];
+    }
+
+    function aiproxyBaseUrl(item = null) {
+      const source = item || preferredAiproxyItem();
+      if (!source) return 'http://127.0.0.1:18006';
+      const port = Number(source.port || 18006);
+      let host = String(source.listen || '127.0.0.1').trim() || '127.0.0.1';
+      if (['0.0.0.0', '::', '[::]', '*'].includes(host)) host = '127.0.0.1';
+      if (host.includes(':') && !host.startsWith('[') && !/^\d+\.\d+\.\d+\.\d+$/.test(host)) host = `[${host}]`;
+      return `http://${host}:${Number.isFinite(port) ? port : 18006}`;
+    }
+
+    function providerLocalUrl(providerName) {
+      return `${aiproxyBaseUrl()}/${encodeURIComponent(String(providerName || '').trim())}/v1`;
+    }
+
+    function providerRecentHealth(provider) {
+      const providerName = String(provider?.name || '');
+      const bucket = state.status?.providers || {};
+      const rows = Object.entries(bucket).map(([key, value]) => ({ key, ...(value || {}) }))
+        .filter(item => String(item.providerId || '').toLowerCase() === providerName.toLowerCase() || String(item.key || '').toLowerCase().startsWith(`${providerName.toLowerCase()}::`))
+        .sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')));
+      const latest = rows[0] || null;
+      const latestFailure = rows.find(item => item.alive === false) || null;
+      return { latest, latestFailure };
+    }
+
+    function providerHealthPill(health) {
+      const latest = health.latest;
+      if (!latest?.checkedAt) return statusPill(null, '未测');
+      return statusPill(!!latest.alive, latest.alive ? '可用' : '失败');
+    }
+
+    function providerLastErrorText(health) {
+      const failure = health.latestFailure;
+      if (!failure?.checkedAt) return '-';
+      return healthDetailText(failure) || failure.compact || failure.detail || failure.status || '-';
+    }
+
+    function renderSaveResult() {
+      const box = $('saveResult');
+      if (!box) return;
+      const data = state.lastSaveDetails;
+      if (!data) {
+        box.hidden = true;
+        box.innerHTML = '';
+        return;
+      }
+      box.hidden = false;
+      box.className = 'save-result';
+      box.innerHTML = saveResultHtml(data);
+    }
+
+    function saveResultHtml(data) {
+      const rows = [];
+      const row = (label, value, ok = null) => {
+        const icon = ok === true ? '✅ ' : ok === false ? '⚠️ ' : '';
+        rows.push(`<div class="save-result-row"><strong>${esc(label)}</strong><span>${icon}${esc(value || '-')}</span></div>`);
+      };
+      row('保存结果', data.ok ? '配置已保存并完成原子写入' : '保存失败', !!data.ok);
+      row('配置备份', data.backup ? `已创建：${data.backup}` : '没有旧配置文件可备份', data.backup ? true : null);
+      row('应用同步', appSyncSummary(data.appSync), !data.appSync?.error);
+      row('AIProxy 重启', restartSummary(data.restart), data.restart?.ok !== false);
+      if (data.warnings?.length) row('保存警告', data.warnings.join('；'), false);
+      return rows.join('');
+    }
+
+    function appSyncSummary(appSync) {
+      if (!appSync) return '未返回同步结果';
+      if (appSync.error) return `同步失败：${appSync.error}`;
+      if (appSync.needed === false) return `无需同步（${appSync.reason || '配置未变化'}，${appSync.proxyBase || ''}）`;
+      const parts = [];
+      if (appSync.proxyBase) parts.push(`代理地址 ${appSync.proxyBase}`);
+      if (appSync.codex) parts.push(`Codex ${appSync.codex.providers ?? 0} 个 provider，profiles ${(appSync.codex.profiles || []).length} 个，备份 ${appSync.codex.backup ? '已创建' : '无'}`);
+      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers ?? 0} 个 provider，备份 ${appSync.hermes.backup ? '已创建' : '无'}`);
+      return parts.join('；') || '已同步';
+    }
+
+    function restartSummary(restart) {
+      if (!restart) return '未返回重启结果';
+      if (restart.configCheck?.ok === false) return `未重启：配置检查失败${restart.configCheck.output ? '：' + restart.configCheck.output : ''}`;
+      if (restart.ok === false) return restart.skipped || '自动重启失败，请到 AIProxy 服务页查看详情';
+      const manual = restart.manualProxy || {};
+      const services = restart.aiproxyServices || {};
+      const parts = ['配置检查通过'];
+      if (manual.matched) parts.push(`手动进程 ${manual.matched} 个，已启动 ${(manual.started || []).length} 个`);
+      if (services.matched) {
+        const restarted = (services.items || []).filter(item => item.restarted).length;
+        const inactive = (services.items || []).filter(item => item.skipped === 'inactive').length;
+        parts.push(`systemd 服务 ${services.matched} 个，重启 ${restarted} 个${inactive ? `，未运行 ${inactive} 个` : ''}`);
+      }
+      if (!manual.matched && !services.matched) parts.push('未发现当前配置对应的运行中 AIProxy，无需自动重启');
+      return parts.join('；');
+    }
+
     function renderProviders() {
       $('providerRows').innerHTML = state.providers.map((p, i) => {
         const models = modelNames(p);
+        const health = providerRecentHealth(p);
+        const lastError = providerLastErrorText(health);
+        const localUrl = providerLocalUrl(p.name);
         return `
         <tr>
-          <td class="truncate">${esc(p.name)}${p.enabled === false ? ' <span class="status muted">停用</span>' : ''}</td>
-          <td class="truncate" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
-          <td title="${esc(models.join(', '))}">${esc(models.length || 0)}</td>
-          <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
+          <td class="truncate" title="${esc(p.name)}">${esc(p.name)}</td>
+          <td>${p.enabled === false ? statusPill(false, '停用', 'muted') : statusPill(true, '启用')}</td>
+          <td class="truncate" title="${esc(endpointLabel(p.api_mode || '', p))}">${esc(endpointLabel(p.api_mode || '', p))}</td>
+          <td title="${esc(models.join(', '))}">${models.length}</td>
+          <td>${providerHealthPill(health)}</td>
+          <td class="truncate" title="${esc(lastError)}">${esc(lastError)}</td>
+          <td title="${esc(health.latest?.checkedAt || '')}">${esc(shortDateTime(health.latest?.checkedAt))}</td>
+          <td><div class="provider-url"><code title="${esc(localUrl)}">${esc(localUrl)}</code><button data-copy-provider-url="${i}" type="button">复制</button></div></td>
           <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
           <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="6"><div class="empty">暂无 provider</div></td></tr>`;
+      }).join('') || `<tr><td colspan="10"><div class="empty">暂无 provider</div></td></tr>`;
+      renderSaveResult();
       renderProviderEditor();
     }
 
@@ -563,17 +690,17 @@
       const remove = provider?.remove_headers || [];
       const ua = headers['User-Agent'];
       if (headers.Originator === 'codex_cli_rs') return 'Codex';
-      if (ua === '') return 'Empty UA';
+      if (String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli' || String(ua || '').toLowerCase().includes('claude-code/') || String(ua || '').toLowerCase().includes('claude-cli')) return 'Claude Code';
+      if (ua === '') return '空UA';
       if (ua === 'curl/8.0') return 'Curl';
       if (String(ua || '').includes('Mozilla/5.0')) return 'Chrome';
       if (ua) return ua;
-      return 'Default';
+      return '默认';
     }
 
     function endpointLabel(value, provider = {}) {
-      if (value === 'custom_endpoint') return provider.custom_endpoint || 'Custom';
+      if (value === 'custom_endpoint') return provider.custom_endpoint || '自定义';
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
-      if (value === 'anthropic_messages') return '/message';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
     }
@@ -653,13 +780,15 @@
     }
 
     const chromeUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    const codexUserAgent = 'codex_cli_rs/0.139.0 (Ubuntu 24.04 LTS; x86_64) xterm-256color';
+    const codexUserAgent = 'codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color';
+    const claudeCodeUserAgent = 'claude-code/2.1.153 (linux; x64; node/v24.16.0)';
 
     function detectHeaderPreset(provider) {
       const headers = provider?.headers || {};
       const remove = provider?.remove_headers || [];
       const ua = headers['User-Agent'];
       if (headers.Originator === 'codex_cli_rs' && ua === codexUserAgent) return 'codex';
+      if (ua === claudeCodeUserAgent || String(ua || '').toLowerCase().includes('claude-code/') || (String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli' && String(ua || '').toLowerCase().includes('claude-cli'))) return 'claude_code';
       if (ua === '') return 'empty';
       if (ua === 'curl/8.0') return 'curl';
       if (ua === chromeUserAgent) return 'chrome';
@@ -683,6 +812,7 @@
       if (preset === 'curl') return { headers: { 'User-Agent': 'curl/8.0' }, remove_headers: [] };
       if (preset === 'chrome') return { headers: { 'User-Agent': chromeUserAgent }, remove_headers: [] };
       if (preset === 'codex') return { headers: { Originator: 'codex_cli_rs', 'User-Agent': codexUserAgent }, remove_headers: [] };
+      if (preset === 'claude_code') return { headers: { 'User-Agent': claudeCodeUserAgent }, remove_headers: [] };
       if (preset === 'custom') return { headers: customUa ? { 'User-Agent': customUa } : {}, remove_headers: [] };
       return { headers: {}, remove_headers: [] };
     }
@@ -733,33 +863,6 @@
       return item;
     }
 
-    function validateProviderBeforeSave(provider, currentIndex = -1) {
-      const name = String(provider?.name || '').trim();
-      const baseUrl = String(provider?.base_url || '').trim();
-      if (!name) throw new Error('Provider 名称必填');
-      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) throw new Error('Provider 名称只能使用字母、数字、点号、下划线、连字符，并且必须以字母或数字开头');
-      if (!baseUrl) throw new Error('Base URL 必填');
-      let parsedUrl;
-      try { parsedUrl = new URL(baseUrl); } catch (_) { throw new Error('Base URL 必须是有效 URL'); }
-      if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('Base URL 必须以 http:// 或 https:// 开头');
-      if (provider.api_mode === 'custom_endpoint' && !String(provider.custom_endpoint || '').startsWith('/')) throw new Error('自定义 Endpoint 必须以 / 开头');
-      const duplicate = state.providers.find((item, index) => index !== currentIndex && !item.__draft && String(item.name || '').trim().toLowerCase() === name.toLowerCase());
-      if (duplicate) throw new Error(`Provider 名称重复：${name}`);
-    }
-
-    function providerSaveWarnings(provider) {
-      const warnings = [];
-      if (!String(provider?.api_key || provider?.key || '').trim()) warnings.push('API Key 为空；仅在上游不需要鉴权时才建议保存');
-      if (!Object.keys(provider?.models || {}).length) warnings.push('模型列表为空；Codex/Hermes 可能无法选择模型');
-      return warnings;
-    }
-
-    function confirmProviderWarnings(provider) {
-      const warnings = providerSaveWarnings(provider);
-      if (!warnings.length) return true;
-      return confirm(`当前 Provider 有 ${warnings.length} 条提示：\n- ${warnings.join('\n- ')}\n\n仍然保存？`);
-    }
-
     function healthDetailText(status) {
       const text = String(status?.compact || status?.detail || '').trim();
       if (!text || text === '-' || text === '➖') return '';
@@ -767,7 +870,7 @@
       return hiddenFragments.some(fragment => text.includes(fragment)) ? '' : text;
     }
 
-    const HEALTH_UA_COLUMNS = ['Codex', 'Empty UA', 'Curl', 'Chrome', 'Custom'];
+    const HEALTH_UA_COLUMNS = ['Codex', 'Claude Code', '空UA', 'Curl', 'Chrome', '自定义'];
 
     function healthResultKey(providerName, model) {
       return `${providerName}::${model || ''}`;
@@ -807,34 +910,19 @@
 
     function healthUaResultMap(status) {
       const resultMap = {};
-      const diagnosis = status?.diagnosis || {};
-      const diagnosisLabel = status?.diagnosisLabel || diagnosis.label || '';
-      const diagnosisTitle = [
-        diagnosis.summary || status?.diagnosisSummary,
-        diagnosis.suggestion || status?.diagnosisSuggestion
-      ].filter(Boolean).join('；');
       const addResult = (item) => {
         if (!item || !item.ua) return;
-        const normalizedUa = item.ua === '空UA' || item.ua === '空字符串' ? 'Empty UA' : item.ua === '自定义' ? 'Custom' : item.ua;
-        const label = HEALTH_UA_COLUMNS.includes(normalizedUa) ? normalizedUa : 'Custom';
-        const rawText = String(item.compact || healthDetailText(item) || item.status || '').trim();
-        if (!rawText) return;
-        const displayText = item.alive === true ? '可用' : (status?.alive ? 'UA不兼容' : diagnosisLabel || '失败');
+        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : '自定义';
+        const text = String(item.compact || healthDetailText(item) || item.status || '').trim();
+        if (!text) return;
         resultMap[label] = {
-          text: displayText,
-          title: [item.endpointLabel, item.ua, item.detail || item.status || rawText, diagnosisTitle].filter(Boolean).join('；'),
+          text,
+          title: [item.endpointLabel, item.ua, item.detail || item.status || text].filter(Boolean).join(': '),
           alive: item.alive
         };
       };
       if (Array.isArray(status?.uaResults)) status.uaResults.forEach(addResult);
       else if (status?.ua) addResult(status);
-
-      const expectedProfiles = Array.isArray(status?.uaProfiles) ? status.uaProfiles : [];
-      expectedProfiles.forEach(label => {
-        const normalized = label === '空UA' || label === '空字符串' ? 'Empty UA' : label === '自定义' ? 'Custom' : label;
-        if (!HEALTH_UA_COLUMNS.includes(normalized) || resultMap[normalized]) return;
-        resultMap[normalized] = { text: '未返回', title: 'UA matrix did not return this UA result', alive: false };
-      });
       return resultMap;
     }
 
@@ -873,9 +961,10 @@
 
     function healthConfiguredEndpointLabel(provider, model) {
       const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
-      if (endpoint.includes('/messages') || endpoint.includes('anthropic') || endpoint === 'messages') return 'messages';
       if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
-      return providerReasoningText(provider, model) === '-' ? 'responses' : 'reasoning';
+      const meta = modelMeta(provider, model);
+      if (hasReasoningEffort(meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning)) return 'reasoning';
+      return 'responses';
     }
 
     function renderHealth() {
@@ -888,8 +977,7 @@
         const running = !!(state.healthRunning || {})[row.key];
         const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
         const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
-        const endpointTitle = running ? 'reasoning -> responses -> chat -> messages' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
-        const reasoningText = providerReasoningText(p, row.model);
+        const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
         const uaResultMap = running ? {} : healthUaResultMap(s);
@@ -898,13 +986,12 @@
           <td><label class="health-check" title="选择"><input type="checkbox" data-health-select="1" data-health-key="${esc(row.key)}" data-health-provider="${esc(row.providerName)}" data-health-model="${esc(row.model)}"${checked}><span class="health-check-box" aria-hidden="true"></span></label></td>
           <td class="truncate">${esc(row.providerName)}</td>
           <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
-          <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
-          <td class="truncate" title="${esc(reasoningText)}">${esc(reasoningText)}</td>
           <td>${statusCell}</td>
+          <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
           ${uaCells}
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="12"><div class="empty">暂无可测 Provider。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
+      }).join('') || `<tr><td colspan="12"><div class="empty">暂无 provider</div></td></tr>`;
     }
 
     function renderMonitor() {
@@ -929,39 +1016,31 @@
           <td>${statusCell}</td>
           <td class="truncate detail-col" title="${esc(detailText)}">${esc(detailText)}</td>
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
-          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" data-monitor-runs="1" type="button">Test</button><button data-test-chain="${i}" data-monitor-runs="3" type="button">3x</button></div></td>
+          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" type="button">测试</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护页启用 Provider，并配置至少一个模型。</div></td></tr>`;
+      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护中启用 Provider，并给 Provider 配置至少一个模型。</div></td></tr>`;
     }
 
     function collectMonitor() {
       return state.monitor;
     }
 
-    function appSyncText(appSync) {
-      if (!appSync) return '应用配置未同步';
-      if (appSync.ok === false) return `Codex/Hermes 同步失败：${appSync.error || '请重试保存或检查配置文件权限'}`;
-      if (appSync.needed === false) return '应用配置无变化';
-      const parts = [];
-      if (appSync.codex) parts.push(`Codex ${appSync.codex.providers || 0} providers / ${(appSync.codex.profiles || []).length} profiles`);
-      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers || 0} providers`);
-      return parts.length ? `应用配置已同步（${parts.join('，')}）` : '应用配置已同步';
-    }
-
-    function saveResultMessage(data) {
-      const parts = ['配置已保存'];
-      parts.push(data.backup ? '已备份' : '无旧配置备份');
-      parts.push(appSyncText(data.appSync));
-      if (data.restart?.message) parts.push(data.restart.message);
-      if (data.warnings?.length) parts.push(`提示 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}`);
-      return parts.join('；');
+    function saveRestartText(restart) {
+      if (!restart || restart.ok !== false) return '';
+      if (restart.configCheck && restart.configCheck.ok === false) return '，AIProxy 未重启：配置检查失败';
+      if (restart.skipped) return '，AIProxy 未重启';
+      return '，AIProxy 重启失败，请到 AIProxy 页查看';
     }
 
     async function persistProviders() {
       const providers = state.providers.filter(provider => !provider.__draft).map(providerForPersist);
       const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ providers }) });
-      state.lastSaveMessage = saveResultMessage(data);
+      const warningText = data.warnings?.length ? `，警告 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}` : '';
+      const restartText = saveRestartText(data.restart);
+      state.lastSaveDetails = data;
+      state.lastSaveMessage = `配置已保存${warningText}${restartText}`;
       $('serverState').textContent = state.lastSaveMessage;
+      renderSaveResult();
       return data;
     }
 
@@ -969,8 +1048,7 @@
       if (state.tab === 'config') {
         if (state.selectedProvider >= 0) {
           const provider = collectProviderEditor();
-          validateProviderBeforeSave(provider, state.selectedProvider);
-          if (!confirmProviderWarnings(provider)) return;
+          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
           state.providers[state.selectedProvider] = provider;
         }
         await persistProviders();
@@ -1016,7 +1094,7 @@
         return;
       }
       if (!targets.length) throw new Error('请先选择要测试的 provider/model');
-      const allUa = !!$('healthAllUa')?.checked;
+      const allUa = $('healthAllUa') ? $('healthAllUa').checked : true;
       const targetKeys = targets.map(target => target.key);
       const run = { cancelled: false, controllers: new Set() };
       state.healthRun = run;
@@ -1050,7 +1128,6 @@
         } catch (err) {
           if (run.cancelled || err?.name === 'AbortError') return;
           const message = err?.message || String(err);
-          const failedUaProfiles = allUa ? HEALTH_UA_COLUMNS.slice(0, 4) : ['Custom'];
           state.healthResults[target.key] = {
             resultKey: target.key,
             providerId: target.provider,
@@ -1062,12 +1139,8 @@
             detail: message,
             compact: message,
             endpointLabel: '-',
-            ua: failedUaProfiles[0] || 'Custom',
-            uaProfiles: failedUaProfiles,
-            uaProfileCount: failedUaProfiles.length,
-            diagnosis: { category: 'request_error', label: '请求失败', summary: message, suggestion: '请稍后重试，或刷新页面查看服务状态' },
-            diagnosisLabel: '请求失败',
-            uaResults: failedUaProfiles.map(ua => ({ ua, alive: false, status: '失败', detail: message, compact: message }))
+            ua: '自定义',
+            uaResults: [{ ua: '自定义', alive: false, status: '失败', detail: message, compact: message }]
           };
         } finally {
           run.controllers.delete(controller);
@@ -1075,7 +1148,6 @@
           if (!run.cancelled) {
             done += 1;
             renderHealth();
-            renderProviders();
             renderHealthRunButton();
             $('serverState').textContent = `测活中 ${done}/${targets.length}`;
           }
@@ -1094,34 +1166,31 @@
           state.healthRun = null;
           state.healthRunning = {};
           renderHealth();
-          renderProviders();
           renderHealthRunButton();
           $('serverState').textContent = run.cancelled ? `测活已取消 ${done}/${targets.length}` : `测活完成 ${done}/${targets.length}`;
         }
       }
     }
 
-    async function runMonitor(chainIds = null, promptOverrides = null, runs = 1) {
-      runs = Math.max(1, Math.min(Number(runs || 1), 5));
+    async function runMonitor(chainIds = null, promptOverrides = null) {
       const ids = Array.isArray(chainIds) && chainIds.length ? chainIds : (state.monitor.chains || []).map(c => c.id).filter(Boolean);
-      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护页启用 Provider 并配置模型');
+      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护中启用 Provider 并配置模型');
       const currentPrompts = collectMonitorPrompts();
       if (promptOverrides && typeof promptOverrides === 'object') Object.assign(currentPrompts, promptOverrides);
       state.monitorPrompts = currentPrompts;
       state.monitorRunning = Object.fromEntries(ids.map(id => [id, true]));
       renderMonitor();
-      const runLabel = runs > 1 ? `${runs}x ` : '';
-      $('serverState').textContent = ids.length === 1 ? `${runLabel}链路检查中：${ids[0]}` : `${runLabel}全部链路检查中：0/${ids.length}（可能较慢）`;
+      $('serverState').textContent = ids.length === 1 ? `链路检查中：${ids[0]}` : `全部链路检查中：0/${ids.length}（可能较慢）`;
       try {
         const prompts = Object.fromEntries(ids.map(id => [id, (state.monitorPrompts || {})[id] || DEFAULT_MONITOR_PROMPT]));
-        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts, runs } : { prompts, runs };
+        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts } : { prompts };
         const data = await api('/api/monitor/check', { method: 'POST', body: JSON.stringify(body) });
         state.status = data.status;
         const results = data.chainResults || [];
         const ok = results.filter(item => item.alive).length;
         $('serverState').textContent = ids.length === 1
-          ? `${runLabel}链路检查完成：${results[0]?.alive ? '可用' : '失败'}${runs > 1 && results[0] ? `（${results[0].successCount || 0}/${results[0].runs || runs}）` : ''}`
-          : `${runLabel}全部链路检查完成：${ok}/${results.length} 稳定可用`;
+          ? `链路检查完成：${results[0]?.alive ? '可用' : '失败'}`
+          : `全部链路检查完成：${ok}/${results.length} 可用`;
       } finally {
         state.monitorRunning = {};
         render();
@@ -1263,11 +1332,24 @@
       if (!target) return;
       try {
         if (target.classList.contains('tab')) {
-          activateTab(target.dataset.tab, true);
+          const nextTab = target.dataset.tab || 'config';
+          if (state.tab === nextTab) {
+            await loadAll();
+            return;
+          }
+          state.tab = nextTab;
+          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === state.tab));
+          document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === state.tab));
+          await loadAll();
         } else if (target.id === 'reloadBtn') {
           window.location.reload();
         } else if (target.id === 'addProviderBtn') {
           beginProviderDraft({ name: `provider-${state.providers.length + 1}`, base_url: 'https://example.com/v1', api_key: '', api_mode: 'codex_responses', models: {}, headers: {}, remove_headers: [], enabled: true });
+        } else if (target.hasAttribute('data-copy-provider-url')) {
+          const provider = state.providers[Number(target.dataset.copyProviderUrl)];
+          const url = providerLocalUrl(provider?.name || '');
+          await copyText(url);
+          $('serverState').textContent = `已复制本地 URL：${url}`;
         } else if (target.hasAttribute('data-edit-provider')) {
           const index = Number(target.dataset.editProvider);
           const provider = state.providers[index];
@@ -1290,8 +1372,7 @@
           await loadAll();
         } else if (target.id === 'applyProviderBtn') {
           const provider = collectProviderEditor();
-          validateProviderBeforeSave(provider, state.selectedProvider);
-          if (!confirmProviderWarnings(provider)) return;
+          if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
           if (state.selectedProvider < 0) {
             state.providers.unshift(provider);
           } else {
@@ -1347,11 +1428,9 @@
           const chain = state.monitor.chains[Number(target.dataset.testChain)];
           if (!chain?.id) throw new Error('链路 ID 缺失，请刷新页面');
           const input = target.closest('tr')?.querySelector('[data-chain-prompt]');
-          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT }, Number(target.dataset.monitorRuns || 1));
+          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT });
         } else if (target.id === 'runMonitorBtn') {
-          await runMonitor(null, null, 1);
-        } else if (target.id === 'runMonitor3xBtn') {
-          await runMonitor(null, null, 3);
+          await runMonitor();
         } else if (target.id === 'createAiproxyPageBtn') {
           openAiproxyEditor();
         } else if (target.id === 'cancelAiproxyEditorBtn') {
@@ -1396,13 +1475,6 @@
       render();
       event.target.value = '';
     });
-
-    window.addEventListener('hashchange', () => {
-      activateTab(tabFromLocation(), false);
-    });
-
-    state.tab = tabFromLocation();
-    activateTab(state.tab, false);
 
     loadAll().catch(err => {
       $('serverState').textContent = err.message;

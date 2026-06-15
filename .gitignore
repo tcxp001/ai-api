@@ -24,11 +24,8 @@ venv/
 .env.*
 .DS_Store
 
-# Local backups and runtime artifacts
-*.bak-*
-dashboard-restart.log
-
-# Git should only track sanitized examples, never real provider configs
-
-# Public repository docs policy: keep internal working docs local only.
+# Local planning docs
 docs/
+
+# Local manual backups
+*.bak-*

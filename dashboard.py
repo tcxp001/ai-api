@@ -219,11 +219,8 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     provider.pop("url", None)
     if "api_key" not in provider and "key" in provider:
         provider["api_key"] = provider.pop("key")
-    mode = str(provider.get("api_mode") or "").strip() or "codex_responses"
-    mode = {"responses": "codex_responses", "chat": "chat_completions"}.get(mode, mode)
-    if mode not in {"codex_responses", "chat_completions", "anthropic_messages", "custom_endpoint"}:
-        raise ValueError(f"{label} api_mode must be codex_responses, chat_completions, anthropic_messages or custom_endpoint")
-    provider["api_mode"] = mode
+    mode = str(provider.get("api_mode") or "").strip()
+    provider["api_mode"] = mode or "codex_responses"
     custom_endpoint = str(provider.get("custom_endpoint") or provider.get("endpoint") or "").strip()
     if provider["api_mode"] == "custom_endpoint":
         if not custom_endpoint:
@@ -254,7 +251,7 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     elif isinstance(models, list):
         provider["models"] = {str(item): {} for item in models if str(item).strip()}
     elif isinstance(models, dict):
-        provider["models"] = {str(name).strip(): (meta if isinstance(meta, dict) else {}) for name, meta in models.items() if str(name).strip()}
+        provider["models"] = models
     else:
         provider["models"] = {}
     return provider
@@ -430,9 +427,7 @@ def provider_by_name() -> dict[str, dict[str, Any]]:
 
 def provider_api_mode(provider: dict[str, Any]) -> str:
     mode = str(provider.get("api_mode") or "").strip().lower()
-    if mode in {"custom_endpoint", "anthropic_messages"}:
-        # Codex/Hermes still talk to local AIProxy through OpenAI Responses;
-        # anthropic_messages is only the upstream wire mode used by AIProxy.
+    if mode == "custom_endpoint":
         return "codex_responses"
     return mode or "codex_responses"
 
@@ -446,8 +441,6 @@ def provider_endpoint(provider: dict[str, Any]) -> str:
         return endpoint or "/responses"
     if mode == "chat_completions":
         return "/chat/completions"
-    if mode == "anthropic_messages":
-        return "/messages"
     return "/responses"
 
 
@@ -871,16 +864,11 @@ def merge_discovered_chains(configured: list[dict[str, Any]], providers: list[di
 
 
 def app_config_preview(providers: list[dict[str, Any]], proxy_base: str = "http://127.0.0.1:18006") -> dict[str, Any]:
-    enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True) and str(provider.get("name") or "").strip()]
-    projection = app_sync_projection(enabled, proxy_base)
-    names = [str(provider.get("name") or "").strip() for provider in enabled]
+    names = [str(provider.get("name") or "").strip() for provider in providers if provider.get("name")]
     return {
         "codex": {"target": str(CODEX_CONFIG), "exists": CODEX_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "hermes": {"target": str(HERMES_CONFIG), "exists": HERMES_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "providers": names,
-        "projection": projection,
-        "needsSync": app_configs_need_proxy_sync(enabled, proxy_base),
-        "proxyBase": proxy_base,
         "discoveredChains": parse_codex_chains() + parse_hermes_chains(),
     }
 
@@ -1275,7 +1263,7 @@ def aiproxy_http_status(item: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         now = time.time()
         result["httpLatencyMs"] = int((now - started) * 1000)
-        raw_detail = f"{type(exc).__name__}: {str(exc)[:120]}"
+        raw_detail = api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 120)
         with aiproxy_http_probe_lock:
             state = aiproxy_http_probe_state.setdefault(service_key, {})
             failures = int(state.get("failures") or 0) + 1
@@ -1580,72 +1568,53 @@ def restart_aiproxy_services_for_config(config_path: Path) -> dict[str, Any]:
     return {"matched": len(items), "items": items}
 
 
-def summarize_restart_after_config_write(result: dict[str, Any]) -> dict[str, Any]:
-    manual = result.get("manualProxy") if isinstance(result.get("manualProxy"), dict) else {}
-    services = result.get("aiproxyServices") if isinstance(result.get("aiproxyServices"), dict) else {}
-    matched = 0
-    restarted = 0
-    skipped = 0
-    errors: list[str] = []
-
-    if manual.get("error"):
-        errors.append(str(manual.get("error")))
-    matched += int(manual.get("matched") or 0)
-    restarted += len(manual.get("started") or [])
-    for item in manual.get("errors") or []:
-        errors.append(str(item.get("error") or item))
-
-    if services.get("error"):
-        errors.append(str(services.get("error")))
-    matched += int(services.get("matched") or 0)
-    for item in services.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        service = str(item.get("service") or item.get("id") or "AIProxy")
-        if item.get("error"):
-            errors.append(f"{service}: {item.get('error')}")
-        elif item.get("restarted") is True:
-            restarted += 1
-        elif item.get("skipped"):
-            skipped += 1
-        elif item.get("returnCode") not in (None, 0):
-            errors.append(f"{service}: systemctl restart 返回 {item.get('returnCode')}")
-
-    ok = not errors
-    applied = restarted > 0
-    if errors:
-        message = "AIProxy 自动重启失败，请到 AIProxy 页查看"
-    elif applied:
-        message = "AIProxy 已自动重启，配置已生效"
-    elif matched:
-        message = "AIProxy 当前未运行，配置已保存，启动后生效" if skipped else "未执行 AIProxy 重启，请到 AIProxy 页确认状态"
-    else:
-        message = "未发现正在运行的 AIProxy，配置已保存，启动后生效"
-
-    result.update({
-        "ok": ok,
-        "applied": applied,
-        "matched": matched,
-        "restarted": restarted,
-        "skipped": skipped,
-        "errors": errors,
-        "message": message,
-    })
-    return result
+def check_proxy_config_before_restart(config_path: Path) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(BASE_DIR / "proxy.py"), "--config", str(config_path), "--check"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        output = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
+        return {"ok": completed.returncode == 0, "returnCode": completed.returncode, "output": output[-2000:]}
+    except Exception as exc:
+        return {"ok": False, "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
 
 
 def restart_after_config_write() -> dict[str, Any]:
     config_path = active_config_file()
     result: dict[str, Any] = {"configPath": str(config_path)}
+    result["configCheck"] = check_proxy_config_before_restart(config_path)
+    if not result["configCheck"].get("ok"):
+        result["ok"] = False
+        result["skipped"] = "proxy config check failed; existing proxy processes were left unchanged"
+        return result
     try:
         result["manualProxy"] = restart_manual_proxy_processes(config_path)
     except Exception as exc:
-        result["manualProxy"] = {"error": f"{type(exc).__name__}: {exc}"}
+        result["manualProxy"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
     try:
         result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path)
     except Exception as exc:
-        result["aiproxyServices"] = {"error": f"{type(exc).__name__}: {exc}"}
-    return summarize_restart_after_config_write(result)
+        result["aiproxyServices"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
+
+    ok = True
+    manual = result.get("manualProxy") if isinstance(result.get("manualProxy"), dict) else {}
+    if manual.get("error") or manual.get("errors"):
+        ok = False
+    services = result.get("aiproxyServices") if isinstance(result.get("aiproxyServices"), dict) else {}
+    if services.get("error"):
+        ok = False
+    for item in services.get("items") or []:
+        if item.get("error"):
+            ok = False
+        elif item.get("skipped") == "inactive":
+            continue
+        elif item.get("restarted") is False:
+            ok = False
+    result["ok"] = ok
+    return result
 
 
 def is_cloudflare_challenge(response: requests.Response) -> bool:
@@ -1696,7 +1665,7 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     if response.status_code != 200:
         if is_cloudflare_challenge(response):
             raise ValueError(f"/models HTTP {response.status_code}: Cloudflare/WAF 挑战，请重试")
-        detail = " ".join((response.text or "").split())[:160]
+        detail = api_checks.redact_sensitive(" ".join((response.text or "").split()), 160)
         raise ValueError(f"/models HTTP {response.status_code}: {detail}")
     payload = response.json()
     raw_models = payload.get("data") if isinstance(payload, dict) else payload
@@ -1722,10 +1691,10 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
 
 
 HEALTH_UA_LABELS = {
-    "空字符串": "Empty UA",
+    "空字符串": "空UA",
     "Chrome电脑": "Chrome",
 }
-HEALTH_UA_ORDER = ["Codex", "Empty UA", "Curl", "Chrome"]
+HEALTH_UA_ORDER = ["Codex", "Claude Code", "空UA", "Curl", "Chrome"]
 
 
 def health_ua_profiles() -> list[tuple[str, Any]]:
@@ -1747,109 +1716,32 @@ def health_configured_ua_label(headers: dict[str, Any], remove_headers: list[Any
     ua = header_value(headers, "User-Agent")
     if str(originator or "") == "codex_cli_rs":
         return "Codex"
+    x_app = header_value(headers, "x-app")
+    ua_text_lower = str(ua or "").lower()
+    if str(x_app or "").lower() == "cli" or "claude-code/" in ua_text_lower or "claude-cli" in ua_text_lower:
+        return "Claude Code"
     if ua is None:
-        return "Custom"
+        return "自定义"
 
     ua_text = str(ua)
     if ua_text == "":
-        return "Empty UA"
+        return "空UA"
     if ua_text == "curl/8.0":
         return "Curl"
     if "Mozilla/5.0" in ua_text:
         return "Chrome"
-    return "Custom"
+    return "自定义"
 
 
 HEALTH_ENDPOINT_CANDIDATES = [
     ("reasoning", "/responses", "reasoning"),
     ("responses", "/responses", "basic"),
     ("chat", "/chat/completions", "basic"),
-    ("messages", "/messages", "basic"),
 ]
 
 
 def health_result_key(provider_id: str, model: str) -> str:
     return f"{provider_id}::{model}"
-
-
-def health_failure_details(result: dict[str, Any]) -> list[str]:
-    details: list[str] = []
-    for attempt in result.get("endpointTrace") or []:
-        for item in attempt.get("uaResults") or []:
-            detail = str(item.get("detail") or item.get("compact") or item.get("status") or "").strip()
-            if detail:
-                details.append(detail)
-    for item in result.get("uaResults") or []:
-        detail = str(item.get("detail") or item.get("compact") or item.get("status") or "").strip()
-        if detail:
-            details.append(detail)
-    detail = str(result.get("detail") or result.get("compact") or "").strip()
-    if detail:
-        details.append(detail)
-    return details
-
-
-def health_diagnosis(category: str, label: str, summary: str, suggestion: str = "") -> dict[str, str]:
-    return {"category": category, "label": label, "summary": summary, "suggestion": suggestion}
-
-
-def diagnose_health_result(result: dict[str, Any]) -> dict[str, str]:
-    details = health_failure_details(result)
-    joined = " | ".join(details)
-    lower = joined.lower()
-
-    if result.get("alive"):
-        failed_ua = [item for item in result.get("uaResults") or [] if item.get("alive") is False]
-        if failed_ua:
-            return health_diagnosis("ua_partial", "部分 UA 失败", "当前可用，但部分 UA 不兼容", "如客户端失败，优先使用本次成功的 UA/Headers 预设")
-        return health_diagnosis("ok", "可用", "当前 Provider/模型可用", "")
-
-    if "缺 base_url/api_key/model" in joined:
-        return health_diagnosis("config", "配置不完整", "缺少 Base URL、API Key 或模型", "回到 Provider 维护页补齐必填配置后再测")
-
-    if "key无效" in joined.lower() or "invalid api key" in lower or "invalid token" in lower or re.search(r"\b401\b", joined):
-        return health_diagnosis("auth", "Key 问题", "上游拒绝鉴权或 API Key 无效", "检查 API Key 是否填错、过期，或是否需要额外 Header")
-
-    if "客户端未授权" in joined or "unauthorized client" in lower or "unauthorized_client" in lower:
-        return health_diagnosis("ua_auth", "客户端未授权", "上游可能限制客户端 UA/Headers", "在测活页开启 UA 矩阵，选择可用的 UA/Header 预设后保存")
-
-    if "额度不足" in joined or "quota" in lower or "balance" in lower:
-        return health_diagnosis("quota", "额度不足", "账号额度或余额不足", "更换 Provider、补充额度，或等待公益服额度恢复")
-
-    if "无模型通道" in joined or "模型未定价" in joined or "未启用" in joined or "model_cooldown" in lower or "渠道冷却" in joined:
-        return health_diagnosis("model", "模型不可用", "当前模型在该 Provider 上没有可用通道", "获取模型列表并选择已启用模型，或换用同模型的其他 Provider")
-
-    if "不支持responses" in joined or "不支持messages" in joined or "responses格式异常" in joined or "chat格式异常" in joined or "messages格式异常" in joined:
-        return health_diagnosis("endpoint", "Endpoint 不匹配", "上游接口模式与当前模型/Endpoint 不兼容", "切换 API 模式，或在测活结果中选择成功的 responses/chat/messages 路径")
-
-    if "返回html" in joined.lower() or "cloudflare" in lower or "waf" in lower or "just a moment" in lower:
-        return health_diagnosis("waf", "WAF/HTML", "上游返回 HTML 或 WAF/Cloudflare 挑战", "尝试更换 UA/Header 预设；如果仍失败，通常需要换 Provider")
-
-    if "超时" in joined or "timeout" in lower or "connectionerror" in lower or "proxyerror" in lower or "nameresolution" in lower or "sslerror" in lower:
-        return health_diagnosis("network", "网络/超时", "连接、DNS、TLS 或上游响应超时", "检查 Base URL、网络连通性、代理环境，或稍后重试")
-
-    if "非json" in joined.lower() or "格式异常" in joined or "返回错误" in joined:
-        return health_diagnosis("format", "返回格式异常", "上游返回内容不是预期的 OpenAI 兼容格式", "确认 Base URL 是否填到 /v1，或切换 API 模式后再测")
-
-    if re.search(r"\b404\b", joined):
-        return health_diagnosis("not_found", "路径/模型不存在", "上游返回 404，可能是 Base URL、Endpoint 或模型名不匹配", "确认 Base URL 是否包含 /v1，并检查模型名和 API 模式")
-
-    if re.search(r"\b429\b", joined):
-        return health_diagnosis("rate_limit", "限流", "上游返回 429 限流", "稍后重试，或切换其他 Provider")
-
-    if re.search(r"\b5\d\d\b", joined):
-        return health_diagnosis("upstream", "上游错误", "上游服务返回 5xx 错误", "稍后重试，或切换其他 Provider")
-
-    return health_diagnosis("unknown", "失败", "测活失败，原因未归类", "查看单元格详情，按 Key、模型、Endpoint、UA/Header 顺序排查")
-
-
-def attach_health_diagnosis(result: dict[str, Any]) -> dict[str, Any]:
-    diagnosis = diagnose_health_result(result)
-    result["diagnosis"] = diagnosis
-    result["diagnosisLabel"] = diagnosis.get("label", "")
-    result["diagnosisSummary"] = diagnosis.get("summary", "")
-    result["diagnosisSuggestion"] = diagnosis.get("suggestion", "")
-    return result
 
 
 def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool = False) -> dict[str, Any]:
@@ -1893,10 +1785,6 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             "endpointLabel": endpoint_label,
         }
 
-    profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
-    result["uaProfiles"] = [label for label, _ in profiles]
-    result["uaProfileCount"] = len(profiles)
-
     if not base_url or not api_key or not model:
         detail = "缺 base_url/api_key/model"
         result.update({
@@ -1904,11 +1792,11 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             "detail": detail,
             "compact": api_checks.compact_result("❌ 失败", detail, include_latency=True),
             "endpointLabel": "-",
-            "uaMode": "all" if all_ua else "configured",
-            "uaResults": [failed_ua_result(label, detail) for label, _ in profiles],
+            "uaResults": [failed_ua_result(ua_label, detail)],
         })
-        return attach_health_diagnosis(result)
+        return result
 
+    profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
     inner_workers = api_checks.provider_inner_max_workers(name)
 
     def check_one(endpoint_label: str, endpoint: str, variant: str, ua_label: str, user_agent: Any) -> dict[str, Any]:
@@ -1971,7 +1859,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
                 "uaMode": "all" if all_ua else "configured",
                 "uaResults": ua_results,
             })
-            return attach_health_diagnosis(result)
+            return result
 
     final_results = list((last_attempt or {}).get("uaResults") or [])
     primary = final_results[0] if final_results else failed_ua_result(ua_label, "测活失败")
@@ -1992,7 +1880,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
         "uaMode": "all" if all_ua else "configured",
         "uaResults": final_results,
     })
-    return attach_health_diagnosis(result)
+    return result
 
 
 def run_provider_check(provider: dict[str, Any], all_ua: bool = False, models: list[str] | None = None) -> list[dict[str, Any]]:
@@ -2001,82 +1889,6 @@ def run_provider_check(provider: dict[str, Any], all_ua: bool = False, models: l
     if not model_names:
         model_names = [""]
     return [run_provider_model_check(provider, model, all_ua) for model in model_names]
-
-def parse_sse_response_failure(response: requests.Response, max_lines: int = 240) -> tuple[bool, str, bool]:
-    """Return (failed, detail, completed) for an OpenAI Responses SSE stream."""
-    current_event = ""
-    data_lines: list[str] = []
-    lines_seen = 0
-    completed = False
-
-    def inspect_event(event: str, data: str) -> tuple[bool, str, bool]:
-        event = event.strip()
-        data = data.strip()
-        if not event and not data:
-            return False, "", False
-        if event == "response.completed" or '"type":"response.completed"' in data.replace(" ", ""):
-            return False, "", True
-        if event == "response.failed" or '"type":"response.failed"' in data.replace(" ", ""):
-            detail = data
-            try:
-                payload = json.loads(data)
-                response_obj = payload.get("response") if isinstance(payload, dict) else None
-                error = (response_obj or {}).get("error") if isinstance(response_obj, dict) else payload.get("error") if isinstance(payload, dict) else None
-                if isinstance(error, dict):
-                    detail = f"{error.get('code') or 'error'}: {error.get('message') or ''}".strip()
-            except Exception:
-                pass
-            return True, detail[:220] or "response.failed", False
-        if '"error"' in data:
-            try:
-                payload = json.loads(data)
-                error = payload.get("error") if isinstance(payload, dict) else None
-                if isinstance(error, dict):
-                    return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220], False
-            except Exception:
-                pass
-        return False, "", False
-
-    for raw_line in response.iter_lines(decode_unicode=True):
-        lines_seen += 1
-        line = raw_line or ""
-        if line.startswith("event:"):
-            current_event = line.split(":", 1)[1].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line.split(":", 1)[1].strip())
-        elif line == "":
-            failed, detail, done = inspect_event(current_event, "\n".join(data_lines))
-            if failed or done:
-                return failed, detail, done
-            current_event = ""
-            data_lines = []
-        if lines_seen >= max_lines:
-            break
-
-    if data_lines:
-        failed, detail, done = inspect_event(current_event, "\n".join(data_lines))
-        if failed or done:
-            return failed, detail, done
-    return False, "", completed
-
-
-def response_json_failure(response: requests.Response) -> tuple[bool, str]:
-    try:
-        payload = response.json()
-    except Exception:
-        return False, ""
-    if not isinstance(payload, dict):
-        return False, ""
-    error = payload.get("error")
-    if isinstance(error, dict):
-        return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220]
-    if payload.get("status") == "failed":
-        error = payload.get("error")
-        if isinstance(error, dict):
-            return True, f"{error.get('code') or 'error'}: {error.get('message') or ''}"[:220]
-        return True, "response status failed"
-    return False, ""
-
 
 def check_proxy(proxy: dict[str, Any]) -> dict[str, Any]:
     url = str(proxy.get("url") or "").rstrip("/")
@@ -2100,7 +1912,7 @@ def check_proxy(proxy: dict[str, Any]) -> dict[str, Any]:
         result["detail"] = f"HTTP {resp.status_code}"
     except Exception as exc:
         result["latencyMs"] = int((time.time() - started) * 1000)
-        result["detail"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        result["detail"] = api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 120)
     return result
 
 
@@ -2132,71 +1944,24 @@ def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], promp
     url = f"{proxy_url}/{provider_id}/v1/responses"
     payload = {
         "model": model,
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+        "input": [{"role": "user", "content": prompt}],
         "store": False,
-        "stream": True,
         "max_output_tokens": 8,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=(5, 30), stream=True)
-        used_endpoint = "responses"
+        resp = requests.post(url, json=payload, timeout=(5, 20))
         if resp.status_code in {404, 405, 501}:
-            resp.close()
             url = f"{proxy_url}/{provider_id}/v1/chat/completions"
             payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
             resp = requests.post(url, json=payload, timeout=(5, 20))
-            used_endpoint = "chat"
         result["latencyMs"] = int((time.time() - started) * 1000)
-        content_type = str(resp.headers.get("content-type") or "").lower()
-        if resp.status_code == 200 and "text/event-stream" in content_type:
-            failed, detail, completed = parse_sse_response_failure(resp)
-            result["alive"] = completed and not failed
-            result["detail"] = "HTTP 200 response.completed" if result["alive"] else f"HTTP 200 SSE failed: {detail or 'no response.completed'}"
-        elif resp.status_code == 200:
-            failed, detail = response_json_failure(resp)
-            result["alive"] = not failed
-            result["detail"] = f"HTTP 200 {used_endpoint}" if result["alive"] else f"HTTP 200 failed: {detail}"
-        else:
-            result["alive"] = False
-            result["detail"] = f"HTTP {resp.status_code}: {' '.join((resp.text or '').split())[:220]}"
-        resp.close()
+        result["alive"] = resp.status_code == 200
+        result["detail"] = "HTTP 200" if resp.status_code == 200 else api_checks.format_http_error(resp.status_code, resp)
     except Exception as exc:
         result["latencyMs"] = int((time.time() - started) * 1000)
-        result["detail"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        result["detail"] = api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 120)
     result["health"] = classify_health(bool(result.get("alive")), result.get("latencyMs"))
     return result
-
-
-def check_chain_repeated(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], prompt: str = DEFAULT_MONITOR_PROMPT, runs: int = 1) -> dict[str, Any]:
-    runs = max(1, min(int(runs or 1), 5))
-    if runs == 1:
-        result = check_chain(chain, proxies, prompt)
-        result["runs"] = 1
-        result["successCount"] = 1 if result.get("alive") else 0
-        return result
-
-    started = time.time()
-    attempts = []
-    for index in range(runs):
-        item = check_chain(chain, proxies, prompt)
-        item["attempt"] = index + 1
-        attempts.append(item)
-
-    success_count = sum(1 for item in attempts if item.get("alive"))
-    base = dict(attempts[-1] if attempts else {})
-    base["checkedAt"] = now_iso()
-    base["latencyMs"] = int((time.time() - started) * 1000)
-    base["runs"] = runs
-    base["successCount"] = success_count
-    base["attempts"] = attempts
-    base["alive"] = success_count == runs
-    if base["alive"]:
-        base["detail"] = f"{success_count}/{runs} success"
-    else:
-        failures = [f"#{item.get('attempt')}: {item.get('detail') or 'failed'}" for item in attempts if not item.get("alive")]
-        base["detail"] = f"{success_count}/{runs} success; " + "; ".join(failures)[:260]
-    base["health"] = classify_health(bool(base.get("alive")), base.get("latencyMs"))
-    return base
 
 
 def load_status() -> dict[str, Any]:
@@ -2300,7 +2065,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(404, {"error": "not found"})
         except Exception as exc:
-            self.send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            self.send_json(500, {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)})
 
     def do_POST(self) -> None:
         split = urlsplit(self.path)
@@ -2315,9 +2080,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 after_providers = load_provider_list()
                 try:
                     app_sync = auto_sync_app_configs(before_providers, after_providers)
-                    app_sync.setdefault("ok", True)
                 except Exception as exc:
-                    app_sync = {"ok": False, "needed": True, "error": f"{type(exc).__name__}: {exc}"}
+                    app_sync = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
+                    warnings.append(f"Codex/Hermes 同步失败：{app_sync['error']}")
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "warnings": warnings, "appSync": app_sync, "restart": restart})
                 return
@@ -2383,7 +2148,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     result_groups = [future.result() for future in futures]
                 results = [result for group in result_groups for result in group]
                 status = merge_status("providers", results, "resultKey") if results else load_status()
-                self.send_json(200, {"results": results, "status": status, "allUa": all_ua, "uaProfiles": [label for label, _ in health_ua_profiles()] if all_ua else []})
+                self.send_json(200, {"results": results, "status": status, "allUa": all_ua})
                 return
             if split.path == "/api/providers/models":
                 provider = payload.get("provider")
@@ -2403,15 +2168,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 prompt_default = str(payload.get("prompt") or DEFAULT_MONITOR_PROMPT)
                 prompt_map_raw = payload.get("prompts") or {}
                 prompt_map = prompt_map_raw if isinstance(prompt_map_raw, dict) else {}
-                runs = max(1, min(int(payload.get("runs") or 1), 5))
                 proxy_map = {str(p.get("id")): p for p in monitor["proxies"]}
                 proxy_ids = {str(c.get("proxyId")) for c in chains if c.get("proxyId")}
                 proxies = [p for p in monitor["proxies"] if p.get("enabled", True) and (chain_id_filter is None or str(p.get("id")) in proxy_ids)]
                 proxy_results = [check_proxy(proxy) for proxy in proxies]
-                chain_results = [check_chain_repeated(chain, proxy_map, str(prompt_map.get(str(chain.get("id"))) or prompt_default), runs) for chain in chains]
+                chain_results = [check_chain(chain, proxy_map, str(prompt_map.get(str(chain.get("id"))) or prompt_default)) for chain in chains]
                 merge_status("proxies", proxy_results, "proxyId")
                 status = merge_status("chains", chain_results, "chainId")
-                self.send_json(200, {"proxyResults": proxy_results, "chainResults": chain_results, "status": status, "runs": runs, "requestedChainIds": sorted(chain_id_filter) if chain_id_filter is not None else None})
+                self.send_json(200, {"proxyResults": proxy_results, "chainResults": chain_results, "status": status, "requestedChainIds": sorted(chain_id_filter) if chain_id_filter is not None else None})
                 return
             if split.path == "/api/backups/restore":
                 name = str(payload.get("name") or "").strip()
@@ -2462,7 +2226,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(404, {"error": "not found"})
         except Exception as exc:
-            self.send_json(400, {"error": f"{type(exc).__name__}: {exc}"})
+            self.send_json(400, {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)})
 
 
 def main() -> int:

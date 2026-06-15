@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 import argparse
 import json
 import queue
+import re
 import signal
 import threading
 import time
@@ -48,6 +49,8 @@ HOP_BY_HOP_HEADERS = {
 
 SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "x-api-key", "api-key"}
 RESPONSES_TO_CHAT_FALLBACK_STATUSES = {404, 405, 501}
+PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+VALID_API_MODES = {"", "codex_responses", "responses", "chat_completions", "custom_endpoint"}
 DEFAULT_POOL_MAXSIZE = 20
 DEFAULT_CONNECT_TIMEOUT = 30
 # Hermes' codex stream stale detector kills local requests after ~120s without
@@ -146,6 +149,11 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
         name = str(entry.get("name") or "").strip()
         if not name:
             raise ValueError(f"provider #{idx} missing required field: name")
+        if not PROVIDER_NAME_PATTERN.match(name):
+            raise ValueError(
+                f"provider {name!r} name must be a URL-safe path segment: "
+                "letters, numbers, dot, underscore or hyphen; it must start with a letter or number"
+            )
         base_url = str(entry.get("base_url") or "").strip().rstrip("/")
         if not base_url.startswith(("http://", "https://")):
             raise ValueError(f"provider {name!r} base_url must be http(s) URL")
@@ -159,13 +167,21 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
         provider_reasoning = entry.get("reasoning_effort") or entry.get("reasoning")
         if isinstance(provider_reasoning, dict):
             provider_reasoning = provider_reasoning.get("effort")
+        api_mode = str(entry.get("api_mode") or "").strip()
+        if api_mode not in VALID_API_MODES:
+            raise ValueError(f"provider {name!r} api_mode must be one of: {', '.join(sorted(VALID_API_MODES - {''}))}")
         custom_endpoint = str(entry.get("custom_endpoint") or entry.get("endpoint") or "").strip()
         if custom_endpoint and not custom_endpoint.startswith("/"):
             custom_endpoint = "/" + custom_endpoint
+        if api_mode == "custom_endpoint" and not custom_endpoint:
+            raise ValueError(f"provider {name!r} custom_endpoint is required when api_mode is custom_endpoint")
+        key = name.lower()
+        if key in {existing.lower() for existing in normalized["providers"]}:
+            raise ValueError(f"provider {name!r} duplicates an earlier provider name")
         normalized["providers"][name] = {
             "base_url": base_url,
             "api_key": str(entry.get("api_key") or entry.get("key") or "").strip(),
-            "api_mode": str(entry.get("api_mode") or "").strip(),
+            "api_mode": api_mode,
             "custom_endpoint": custom_endpoint,
             "headers": {str(k): "" if v is None else str(v) for k, v in headers.items()},
             "remove_headers": {str(h).lower() for h in remove_headers},
@@ -220,12 +236,6 @@ def redact_header(name: str, value: str) -> str:
     if name.lower() in SENSITIVE_HEADERS:
         return "<redacted>"
     return value
-
-
-def set_header_if_missing(headers: dict[str, str], name: str, value: str) -> None:
-    target = name.lower()
-    if not any(str(key).lower() == target for key in headers):
-        headers[name] = value
 
 
 def compact_body(text: str, limit: int = 500) -> str:
@@ -393,110 +403,6 @@ def responses_payload_to_chat(body_json: dict[str, Any]) -> dict[str, Any]:
         messages.append({"role": "user", "content": ""})
     chat["messages"] = messages
     return {k: v for k, v in chat.items() if v is not None}
-
-
-def anthropic_text_from_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        pieces: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                pieces.append(part)
-            elif isinstance(part, dict):
-                if part.get("text") is not None:
-                    pieces.append(str(part.get("text") or ""))
-        return "".join(pieces)
-    if isinstance(content, dict):
-        return "" if content.get("text") is None else str(content.get("text"))
-    return "" if content is None else str(content)
-
-
-def anthropic_content_blocks(content: Any) -> list[dict[str, Any]]:
-    text_value = anthropic_text_from_content(content)
-    return [{"type": "text", "text": text_value}] if text_value else [{"type": "text", "text": ""}]
-
-
-def responses_payload_to_anthropic_messages(body_json: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {"model": body_json.get("model")}
-    max_tokens = body_json.get("max_output_tokens", body_json.get("max_tokens", 1024))
-    payload["max_tokens"] = max_tokens or 1024
-    for key in ("temperature", "top_p", "stream"):
-        if key in body_json:
-            payload[key] = body_json.get(key)
-    if body_json.get("stop") is not None:
-        stop = body_json.get("stop")
-        payload["stop_sequences"] = stop if isinstance(stop, list) else [stop]
-
-    system_parts: list[str] = []
-    if body_json.get("instructions"):
-        system_parts.append(str(body_json.get("instructions")))
-
-    messages: list[dict[str, Any]] = []
-
-    def add_message(role: str, content: Any) -> None:
-        role = "assistant" if role == "assistant" else "user"
-        blocks = anthropic_content_blocks(content)
-        if messages and messages[-1].get("role") == role:
-            messages[-1].setdefault("content", []).extend(blocks)
-        else:
-            messages.append({"role": role, "content": blocks})
-
-    input_value = body_json.get("input")
-    if isinstance(input_value, list):
-        for item in input_value:
-            if isinstance(item, dict):
-                role = str(item.get("role") or "user").strip() or "user"
-                content = item.get("content", "")
-                if role in {"system", "developer"}:
-                    text = anthropic_text_from_content(content)
-                    if text:
-                        system_parts.append(text)
-                    continue
-                add_message(role, content)
-            else:
-                add_message("user", item)
-    elif input_value is not None:
-        add_message("user", input_value)
-
-    if not messages:
-        add_message("user", "")
-    payload["messages"] = messages
-    if system_parts:
-        payload["system"] = "\n\n".join(system_parts)
-    return {k: v for k, v in payload.items() if v is not None}
-
-
-def anthropic_message_text(payload: dict[str, Any]) -> str:
-    parts: list[str] = []
-    content = payload.get("content") if isinstance(payload, dict) else None
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("text") is not None:
-                parts.append(str(part.get("text") or ""))
-            elif isinstance(part, str):
-                parts.append(part)
-    elif isinstance(content, str):
-        parts.append(content)
-    return "".join(parts)
-
-
-def anthropic_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
-    usage = payload.get("usage") if isinstance(payload, dict) else None
-    if not isinstance(usage, dict):
-        return None
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    total = None
-    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-        total = input_tokens + output_tokens
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total}
-
-
-def anthropic_payload_to_responses(payload: dict[str, Any], model: str = "") -> dict[str, Any]:
-    response_id = str(payload.get("id") or f"resp_{int(time.time() * 1000)}")
-    response_model = model or str(payload.get("model") or "")
-    return response_payload_from_text(response_id, response_model, anthropic_message_text(payload), anthropic_usage(payload))
 
 
 def chat_payload_text(chat_payload: dict[str, Any]) -> str:
@@ -719,72 +625,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             })
         self._write_response_stream_done(response_id, response_model, text, chat_payload.get("usage"), emit_text=False)
 
-    def _send_anthropic_stream_as_responses(self, resp: requests.Response, model: str = "") -> None:
-        response_id = f"resp_{int(time.time() * 1000)}"
-        response_model = model
-        text_parts: list[str] = []
-        started = False
-        usage = None
-
-        self._send_response_stream_headers(resp.status_code)
-        if self.command == "HEAD":
-            return
-
-        def ensure_started() -> None:
-            nonlocal started
-            if not started:
-                self._write_response_stream_start(response_id, response_model)
-                started = True
-
-        for raw_line in resp.iter_lines(decode_unicode=False):
-            if not raw_line:
-                continue
-            line = raw_line.decode("utf-8", errors="replace")
-            data = line[5:].strip() if line.startswith("data:") else ""
-            if not data or data == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(data)
-            except Exception:
-                continue
-            event_type = str(chunk.get("type") or "") if isinstance(chunk, dict) else ""
-            if event_type == "message_start":
-                message = chunk.get("message") if isinstance(chunk, dict) else {}
-                if isinstance(message, dict):
-                    response_id = str(message.get("id") or response_id)
-                    response_model = str(message.get("model") or response_model)
-                ensure_started()
-            elif event_type == "content_block_delta":
-                ensure_started()
-                delta = chunk.get("delta") if isinstance(chunk, dict) else {}
-                piece = ""
-                if isinstance(delta, dict):
-                    piece = str(delta.get("text") or "")
-                if piece:
-                    text_parts.append(piece)
-                    self._write_sse_event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "item_id": "msg_0",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": piece,
-                    })
-            elif event_type == "message_delta":
-                delta = chunk.get("delta") if isinstance(chunk, dict) else {}
-                if isinstance(delta, dict) and isinstance(delta.get("usage"), dict):
-                    usage = delta.get("usage")
-            elif event_type == "error":
-                error = chunk.get("error") if isinstance(chunk, dict) else {}
-                message = error.get("message") if isinstance(error, dict) else "Anthropic stream error"
-                self._write_sse_event("response.failed", {
-                    "type": "response.failed",
-                    "response": response_payload_from_text(response_id, response_model, "", status="failed") | {"error": {"code": "upstream_error", "message": str(message)}},
-                })
-                return
-
-        ensure_started()
-        self._write_response_stream_done(response_id, response_model, "".join(text_parts), usage, emit_text=False)
-
     def _send_chat_stream_as_responses(self, resp: requests.Response, model: str = "") -> None:
         response_id = f"resp_{int(time.time() * 1000)}"
         response_model = model
@@ -918,28 +758,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
         convert_chat_response = False
-        convert_anthropic_response = False
-        api_mode = str(provider.get("api_mode") or "").strip().lower()
         if (
             self.command == "POST"
             and route_path == "/responses"
-            and api_mode == "anthropic_messages"
-            and isinstance(body_json, dict)
-        ):
-            query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
-            upstream_path = "/messages" + query
-            upstream_route_path = "/messages"
-            url = base_url + upstream_path
-            body_json = responses_payload_to_anthropic_messages(body_json)
-            body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
-            if api_key:
-                set_header_if_missing(headers, "x-api-key", api_key)
-            set_header_if_missing(headers, "anthropic-version", "2023-06-01")
-            convert_anthropic_response = True
-        elif (
-            self.command == "POST"
-            and route_path == "/responses"
-            and api_mode == "chat_completions"
+            and str(provider.get("api_mode") or "").strip().lower() == "chat_completions"
             and isinstance(body_json, dict)
         ):
             query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
@@ -956,9 +778,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         started = time.time()
 
-        def send_upstream(active_session: requests.Session) -> tuple[requests.Response, bool, bool]:
+        def send_upstream(active_session: requests.Session) -> tuple[requests.Response, bool]:
             active_convert_chat_response = convert_chat_response
-            active_convert_anthropic_response = convert_anthropic_response
             timeout = (
                 float(provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT),
                 float(provider.get("read_timeout") or DEFAULT_READ_TIMEOUT),
@@ -992,12 +813,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     timeout=timeout,
                 )
                 active_convert_chat_response = True
-                active_convert_anthropic_response = False
-            return active_resp, active_convert_chat_response, active_convert_anthropic_response
+            return active_resp, active_convert_chat_response
 
         try:
             try:
-                resp, convert_chat_response, convert_anthropic_response = send_upstream(session)
+                resp, convert_chat_response = send_upstream(session)
             except TRANSPORT_RETRY_EXCEPTIONS as exc:
                 self.server.session_pool.discard(session)
                 if self.command not in {"GET", "POST"}:
@@ -1011,7 +831,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     repr(exc),
                 )
                 session = self.server.session_pool.fresh(provider)
-                resp, convert_chat_response, convert_anthropic_response = send_upstream(session)
+                resp, convert_chat_response = send_upstream(session)
         except Exception as exc:
             self.server.log_error_always(self, "%s %s -> %s proxy_error=%s", provider_name, self.command, url, repr(exc))
             self._send_text(502, f"proxy error: {type(exc).__name__}: {exc}\n")
@@ -1020,24 +840,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         elapsed = time.time() - started
         self.server.log_if_verbose(self, "%s %s %s -> HTTP %s %.2fs", provider_name, self.command, proxied_path, resp.status_code, elapsed)
-
-        if convert_anthropic_response and resp.status_code < 400:
-            try:
-                response_model = str((body_json or {}).get("model") or "")
-                if isinstance(body_json, dict) and body_json.get("stream"):
-                    if "text/event-stream" in str(resp.headers.get("Content-Type") or "").lower():
-                        self._send_anthropic_stream_as_responses(resp, model=response_model)
-                    else:
-                        self._send_json(resp.status_code, anthropic_payload_to_responses(resp.json(), model=response_model))
-                else:
-                    self._send_json(resp.status_code, anthropic_payload_to_responses(resp.json(), model=response_model))
-                return
-            finally:
-                resp.close()
-                if should_discard_upstream_response(resp):
-                    self.server.session_pool.discard(session)
-                else:
-                    self.server.session_pool.release(provider_name, provider, session)
 
         if convert_chat_response and resp.status_code < 400:
             try:

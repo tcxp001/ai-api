@@ -4,6 +4,7 @@ sys.dont_write_bytecode = True
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -16,10 +17,10 @@ import yaml
 # 顶部配置：选择 UA 测试方式
 # ==========================================
 # single：只用 UA_CHOICE 指定的一种 UA，输出 chat / responses / reasoning 耗时表
-# matrix：五种 UA 全部测试，输出 Python / Curl / Chrome / 空UA / Codex 对比表
+# matrix：六种 UA 全部测试，输出 Python / Curl / Chrome / 空UA / Codex / Claude Code 对比表
 # 默认用 Py 默认 UA；如 provider 需要固定 UA，就在 config.yaml 的 headers 里显式写。
 UA_TEST_MODE = "matrix"  # 可选: "single" / "matrix"
-UA_CHOICE = 1            # single 模式生效：1 Python | 2 Curl | 3 Chrome电脑 | 4 空字符串 | 5 Codex
+UA_CHOICE = 1            # single 模式生效：1 Python | 2 Curl | 3 Chrome电脑 | 4 空字符串 | 5 Codex | 6 Claude Code
 
 # Provider 选择：直接写逗号分隔 name；空字符串表示全体候选。
 PROVIDERS_TO_TEST = ""                    # 参与测试，例如: provider-a, provider-b；空 = 全部
@@ -34,15 +35,17 @@ MAX_WORKERS = 20
 INNER_MAX_WORKERS = 3
 INNER_MAX_WORKERS_1_PROVIDERS = "any"
 DEFAULT_TRUST_ENV_PROXY = False
+CLAUDE_CODE_USER_AGENT = "claude-code/2.1.153 (linux; x64; node/v24.16.0)"
 
 UA_PROFILES = {
     1: ("Python默认UA", None),
     2: ("Curl", "curl/8.0"),
     3: ("Chrome电脑", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
     4: ("空字符串", ""),
-    5: ("Codex", {"Originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.139.0 (Ubuntu 24.04 LTS; x86_64) xterm-256color"}),
+    5: ("Codex", {"Originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color"}),
+    6: ("Claude Code", CLAUDE_CODE_USER_AGENT),
 }
-UA_ORDER = ["Python默认UA", "Curl", "Chrome电脑", "空字符串", "Codex"]
+UA_ORDER = ["Python默认UA", "Curl", "Chrome电脑", "空字符串", "Codex", "Claude Code"]
 TEST_UAS = {name: value for name, value in UA_PROFILES.values()}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +82,6 @@ ENDPOINT_VARIANTS = [
     ("/chat/completions", "basic", "chat"),
     ("/responses", "basic", "responses"),
     ("/responses", "reasoning", "reasoning"),
-    ("/messages", "basic", "messages"),
 ]
 
 
@@ -242,10 +244,6 @@ def is_chat_endpoint(endpoint):
     return endpoint_path(endpoint).endswith("/chat/completions")
 
 
-def is_messages_endpoint(endpoint):
-    return endpoint_path(endpoint).endswith("/messages")
-
-
 def build_payload(model, endpoint, variant="basic"):
     if is_responses_endpoint(endpoint):
         payload = {
@@ -259,13 +257,6 @@ def build_payload(model, endpoint, variant="basic"):
             payload["reasoning"] = {"effort": "high", "summary": "auto"}
         return payload
 
-    if is_messages_endpoint(endpoint):
-        return {
-            "model": model,
-            "messages": [{"role": "user", "content": "在吗？"}],
-            "max_tokens": MAX_OUTPUT_TOKENS,
-        }
-
     return {
         "model": model,
         "messages": [{"role": "user", "content": "在吗？"}],
@@ -273,9 +264,26 @@ def build_payload(model, endpoint, variant="basic"):
     }
 
 
+SENSITIVE_VALUE_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\b(?:ak|pk|rk)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{12,}"),
+    re.compile(r"(?i)((?:api[_-]?key|x-api-key|authorization|token)[\s:=\"]+)[^\s,;\"'}]{8,}"),
+]
+
+
+def redact_sensitive(value, limit=None):
+    text = "" if value is None else str(value)
+    for pattern in SENSITIVE_VALUE_PATTERNS:
+        text = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "<redacted>", text)
+    if limit is not None and len(text) > limit:
+        text = text[:limit]
+    return text
+
+
 def response_text(response):
     text = getattr(response, "text", "") or ""
-    return " ".join(text.split())
+    return redact_sensitive(" ".join(text.split()))
 
 
 def validate_success_response(response, endpoint):
@@ -301,11 +309,6 @@ def validate_success_response(response, endpoint):
         if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
             return True, ""
         return False, "responses格式异常"
-    if is_messages_endpoint(endpoint):
-        content = payload.get("content")
-        if isinstance(content, list) or payload.get("stop_reason") or payload.get("type") == "message":
-            return True, ""
-        return False, "messages格式异常"
     return True, ""
 
 
@@ -327,8 +330,6 @@ def format_http_error(status_code, response):
         return f"{status_code} 模型未定价/未启用"
     if "invalid url" in lower_body and "/responses" in lower_body:
         return f"{status_code} 不支持responses"
-    if "invalid url" in lower_body and "/messages" in lower_body:
-        return f"{status_code} 不支持messages"
     if "insufficient account balance" in lower_body or "bad_response_status_code" in lower_body:
         return f"{status_code} 上游拒绝"
 
@@ -356,13 +357,9 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
         with requests.Session() as session:
             session.headers.clear()
             session.trust_env = trust_env_proxy
-            headers = build_headers(api_key, user_agent, provider_headers, remove_headers)
-            if is_messages_endpoint(endpoint):
-                headers.setdefault("x-api-key", api_key)
-                headers.setdefault("anthropic-version", "2023-06-01")
             response = session.post(
                 url,
-                headers=headers,
+                headers=build_headers(api_key, user_agent, provider_headers, remove_headers),
                 json=build_payload(model, endpoint, variant),
                 timeout=request_timeout,
             )
@@ -570,8 +567,8 @@ def single_table_row(name, model, chat, responses, reasoning):
     return f"| {pad(name, 10)} | {pad(model, 18)} | {pad(chat, 22)} | {pad(responses, 22)} | {pad(reasoning, 22)} |"
 
 
-def matrix_table_row(name, model, test, py_default, curl, chrome, empty_ua, codex):
-    return f"| {pad(name, 10)} | {pad(model, 18)} | {pad(test, 11)} | {pad(py_default, 22)} | {pad(curl, 22)} | {pad(chrome, 22)} | {pad(empty_ua, 22)} | {pad(codex, 22)} |"
+def matrix_table_row(name, model, test, py_default, curl, chrome, empty_ua, codex, claude_code):
+    return f"| {pad(name, 10)} | {pad(model, 18)} | {pad(test, 11)} | {pad(py_default, 22)} | {pad(curl, 22)} | {pad(chrome, 22)} | {pad(empty_ua, 22)} | {pad(codex, 22)} | {pad(claude_code, 22)} |"
 
 
 
@@ -584,7 +581,7 @@ def single_header_row():
 
 
 def matrix_header_row():
-    return matrix_table_row("服务商", "模型", "测试", "Python", "Curl", "Chrome", "空UA", "Codex")
+    return matrix_table_row("服务商", "模型", "测试", "Python", "Curl", "Chrome", "空UA", "Codex", "Claude Code")
 
 
 def format_active_ua_value(ua_choice, active_ua):
@@ -663,9 +660,9 @@ def test_provider_ua_matrix(provider):
     inner_workers = provider_inner_max_workers(name)
 
     if not base_url or not api_key:
-        output_lines.append(matrix_table_row(name, "-", "-", "⚠️缺URL/Key", "-", "-", "-", "-"))
+        output_lines.append(matrix_table_row(name, "-", "-", "⚠️缺URL/Key", "-", "-", "-", "-", "-"))
     elif not models_to_test:
-        output_lines.append(matrix_table_row(name, "-", "-", "⚠️未配模型", "-", "-", "-", "-"))
+        output_lines.append(matrix_table_row(name, "-", "-", "⚠️未配模型", "-", "-", "-", "-", "-"))
     else:
         common_kwargs = {
             "provider_headers": provider_headers,
