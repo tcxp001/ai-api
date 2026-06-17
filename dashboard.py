@@ -220,6 +220,8 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     if "api_key" not in provider and "key" in provider:
         provider["api_key"] = provider.pop("key")
     mode = str(provider.get("api_mode") or "").strip()
+    if mode == "message":
+        mode = "messages"
     provider["api_mode"] = mode or "codex_responses"
     custom_endpoint = str(provider.get("custom_endpoint") or provider.get("endpoint") or "").strip()
     if provider["api_mode"] == "custom_endpoint":
@@ -227,6 +229,8 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
             raise ValueError(f"{label} custom_endpoint is required")
         if not custom_endpoint.startswith("/"):
             custom_endpoint = "/" + custom_endpoint
+        if custom_endpoint == "/message":
+            custom_endpoint = "/messages"
         provider["custom_endpoint"] = custom_endpoint
     else:
         provider.pop("custom_endpoint", None)
@@ -427,6 +431,8 @@ def provider_by_name() -> dict[str, dict[str, Any]]:
 
 def provider_api_mode(provider: dict[str, Any]) -> str:
     mode = str(provider.get("api_mode") or "").strip().lower()
+    if mode == "message":
+        mode = "messages"
     if mode == "custom_endpoint":
         return "codex_responses"
     return mode or "codex_responses"
@@ -438,9 +444,13 @@ def provider_endpoint(provider: dict[str, Any]) -> str:
         endpoint = str(provider.get("custom_endpoint") or "").strip()
         if endpoint and not endpoint.startswith("/"):
             endpoint = "/" + endpoint
+        if endpoint == "/message":
+            endpoint = "/messages"
         return endpoint or "/responses"
     if mode == "chat_completions":
         return "/chat/completions"
+    if mode in {"messages", "message"}:
+        return "/messages"
     return "/responses"
 
 
@@ -1737,6 +1747,7 @@ HEALTH_ENDPOINT_CANDIDATES = [
     ("reasoning", "/responses", "reasoning"),
     ("responses", "/responses", "basic"),
     ("chat", "/chat/completions", "basic"),
+    ("messages", "/messages", "basic"),
 ]
 
 

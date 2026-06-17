@@ -80,6 +80,7 @@ EXCEPTION_SHORT_LABELS = {
 
 ENDPOINT_VARIANTS = [
     ("/chat/completions", "basic", "chat"),
+    ("/messages", "basic", "messages"),
     ("/responses", "basic", "responses"),
     ("/responses", "reasoning", "reasoning"),
 ]
@@ -244,6 +245,10 @@ def is_chat_endpoint(endpoint):
     return endpoint_path(endpoint).endswith("/chat/completions")
 
 
+def is_messages_endpoint(endpoint):
+    return endpoint_path(endpoint).endswith("/messages")
+
+
 def build_payload(model, endpoint, variant="basic"):
     if is_responses_endpoint(endpoint):
         payload = {
@@ -305,6 +310,11 @@ def validate_success_response(response, endpoint):
         if isinstance(choices, list) and choices:
             return True, ""
         return False, "chat格式异常"
+    if is_messages_endpoint(endpoint):
+        content = payload.get("content")
+        if isinstance(content, list) or isinstance(content, str) or payload.get("stop_reason") or payload.get("role") == "assistant":
+            return True, ""
+        return False, "messages格式异常"
     if is_responses_endpoint(endpoint):
         if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
             return True, ""
@@ -337,7 +347,7 @@ def format_http_error(status_code, response):
 
 
 def request_timeout_for(endpoint, variant="basic"):
-    if is_chat_endpoint(endpoint):
+    if is_chat_endpoint(endpoint) or is_messages_endpoint(endpoint):
         return CONNECT_TIMEOUT, CHAT_READ_TIMEOUT
     if is_responses_endpoint(endpoint) and variant == "reasoning":
         return CONNECT_TIMEOUT, REASONING_READ_TIMEOUT
@@ -483,7 +493,7 @@ def compact_result(status, detail, include_latency=False):
         return detail_text.replace("总超时(>", "总>").replace(")", "")
     if detail_text.startswith("请求超时"):
         return "超时"
-    if detail_text in {"返回HTML", "非JSON", "格式异常", "返回错误", "chat格式异常", "responses格式异常"}:
+    if detail_text in {"返回HTML", "非JSON", "格式异常", "返回错误", "chat格式异常", "messages格式异常", "responses格式异常"}:
         return detail_text
 
     code, _, reason = detail_text.partition(" ")
@@ -563,8 +573,8 @@ def format_task_key(key, provider_headers=None):
     return str(key)
 
 
-def single_table_row(name, model, chat, responses, reasoning):
-    return f"| {pad(name, 10)} | {pad(model, 18)} | {pad(chat, 22)} | {pad(responses, 22)} | {pad(reasoning, 22)} |"
+def single_table_row(name, model, chat, responses, reasoning, messages):
+    return f"| {pad(name, 10)} | {pad(model, 18)} | {pad(chat, 22)} | {pad(responses, 22)} | {pad(reasoning, 22)} | {pad(messages, 22)} |"
 
 
 def matrix_table_row(name, model, test, py_default, curl, chrome, empty_ua, codex, claude_code):
@@ -577,7 +587,7 @@ def table_separator(row, char="-"):
 
 
 def single_header_row():
-    return single_table_row("服务商", "模型", "chat", "responses", "reasoning")
+    return single_table_row("服务商", "模型", "chat", "responses", "reasoning", "messages")
 
 
 def matrix_header_row():
@@ -605,9 +615,9 @@ def test_single_provider(provider):
     inner_workers = provider_inner_max_workers(name)
 
     if not base_url or not api_key:
-        output_lines.append(single_table_row(name, "-", "⚠️缺URL/Key", "-", "-"))
+        output_lines.append(single_table_row(name, "-", "⚠️缺URL/Key", "-", "-", "-"))
     elif not models_to_test:
-        output_lines.append(single_table_row(name, "-", "⚠️未配模型", "-", "-"))
+        output_lines.append(single_table_row(name, "-", "⚠️未配模型", "-", "-", "-"))
     else:
         common_kwargs = {
             "provider_headers": provider_headers,
@@ -642,11 +652,22 @@ def test_single_provider(provider):
                 chat_results[(model, "chat")] = untested_result()
         chat_results.update(run_limited_checks(chat_tasks, inner_workers))
 
+        messages_tasks = []
+        messages_results = {}
+        for model in models_to_test:
+            chat_result = chat_results.get((model, "chat"))
+            if all_failed([chat_result]):
+                messages_tasks.append(((model, "messages"), (base_url, api_key, model, "/messages", active_ua), common_kwargs))
+            else:
+                messages_results[(model, "messages")] = untested_result()
+        messages_results.update(run_limited_checks(messages_tasks, inner_workers))
+
         for model in models_to_test:
             chat = chat_results.get((model, "chat"), (None, None, "-"))[2]
             responses = responses_results.get((model, "responses"), (None, None, "-"))[2]
             reasoning = reasoning_results.get((model, "reasoning"), (None, None, "-"))[2]
-            output_lines.append(single_table_row(name, model, chat, responses, reasoning))
+            messages = messages_results.get((model, "messages"), (None, None, "-"))[2]
+            output_lines.append(single_table_row(name, model, chat, responses, reasoning, messages))
 
     with print_lock:
         for line in output_lines:
@@ -707,6 +728,20 @@ def test_provider_ua_matrix(provider):
         chat_results.update(new_chat)
         progress_lines.extend(new_progress)
 
+        messages_tasks = []
+        messages_results = {}
+        for model in models_to_test:
+            model_chat_results = [chat_results.get((model, "chat", ua_name)) for ua_name in UA_ORDER]
+            if all_failed(model_chat_results):
+                for ua_name, ua_string in TEST_UAS.items():
+                    messages_tasks.append(((model, "messages", ua_name), (base_url, api_key, model, "/messages", ua_string), common_kwargs))
+            else:
+                for ua_name in UA_ORDER:
+                    messages_results[(model, "messages", ua_name)] = untested_result()
+        new_messages, new_progress = run_limited_checks(messages_tasks, inner_workers, progress_label=f"{name} messages", provider_headers=provider_headers)
+        messages_results.update(new_messages)
+        progress_lines.extend(new_progress)
+
         for model in models_to_test:
             output_lines.append(matrix_table_row(
                 name,
@@ -725,6 +760,12 @@ def test_provider_ua_matrix(provider):
                 model,
                 "reasoning",
                 *(reasoning_results.get((model, "reasoning", ua_name), (None, None, "-"))[2] for ua_name in UA_ORDER),
+            ))
+            output_lines.append(matrix_table_row(
+                name,
+                model,
+                "messages",
+                *(messages_results.get((model, "messages", ua_name), (None, None, "-"))[2] for ua_name in UA_ORDER),
             ))
 
     return output_lines, progress_lines

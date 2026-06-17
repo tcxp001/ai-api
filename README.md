@@ -213,6 +213,7 @@ Provider API 模式。
 |---|---|
 | `codex_responses` | 优先按 Responses API 使用，适合 Codex |
 | `chat_completions` | 上游只支持 Chat Completions 时使用 |
+| `messages` | 上游使用 `/messages` endpoint 时使用 |
 | `custom_endpoint` | 上游需要自定义 endpoint 时使用 |
 
 缺省值：

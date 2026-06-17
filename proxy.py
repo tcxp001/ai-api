@@ -50,7 +50,7 @@ HOP_BY_HOP_HEADERS = {
 SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "x-api-key", "api-key"}
 RESPONSES_TO_CHAT_FALLBACK_STATUSES = {404, 405, 501}
 PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-VALID_API_MODES = {"", "codex_responses", "responses", "chat_completions", "custom_endpoint"}
+VALID_API_MODES = {"", "codex_responses", "responses", "chat_completions", "messages", "custom_endpoint"}
 DEFAULT_POOL_MAXSIZE = 20
 DEFAULT_CONNECT_TIMEOUT = 30
 # Hermes' codex stream stale detector kills local requests after ~120s without
@@ -168,11 +168,15 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
         if isinstance(provider_reasoning, dict):
             provider_reasoning = provider_reasoning.get("effort")
         api_mode = str(entry.get("api_mode") or "").strip()
+        if api_mode == "message":
+            api_mode = "messages"
         if api_mode not in VALID_API_MODES:
             raise ValueError(f"provider {name!r} api_mode must be one of: {', '.join(sorted(VALID_API_MODES - {''}))}")
         custom_endpoint = str(entry.get("custom_endpoint") or entry.get("endpoint") or "").strip()
         if custom_endpoint and not custom_endpoint.startswith("/"):
             custom_endpoint = "/" + custom_endpoint
+        if custom_endpoint == "/message":
+            custom_endpoint = "/messages"
         if api_mode == "custom_endpoint" and not custom_endpoint:
             raise ValueError(f"provider {name!r} custom_endpoint is required when api_mode is custom_endpoint")
         key = name.lower()
@@ -726,7 +730,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         custom_endpoint = str(provider.get("custom_endpoint") or "").strip()
         upstream_path = proxied_path
-        if custom_endpoint and route_path in {"/responses", "/chat/completions"}:
+        if custom_endpoint and route_path in {"/responses", "/chat/completions", "/messages"}:
             query = ""
             if "?" in proxied_path:
                 query = "?" + proxied_path.split("?", 1)[1]
@@ -758,15 +762,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
         convert_chat_response = False
+        provider_api_mode = str(provider.get("api_mode") or "").strip().lower()
+        if provider_api_mode == "message":
+            provider_api_mode = "messages"
         if (
             self.command == "POST"
             and route_path == "/responses"
-            and str(provider.get("api_mode") or "").strip().lower() == "chat_completions"
+            and provider_api_mode in {"chat_completions", "messages"}
             and isinstance(body_json, dict)
         ):
             query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
-            upstream_path = "/chat/completions" + query
-            upstream_route_path = "/chat/completions"
+            upstream_path = ("/messages" if provider_api_mode == "messages" else "/chat/completions") + query
+            upstream_route_path = "/messages" if provider_api_mode == "messages" else "/chat/completions"
             url = base_url + upstream_path
             body_json = responses_payload_to_chat(body_json)
             body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")

@@ -100,7 +100,7 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(8,127,123,.14);
     }
-    .table-wrap { max-width: 100%; overflow-x: auto; overflow-y: visible; border: 1px solid var(--border); border-radius: 8px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; background: #fff; }
     .health-table { min-width: 0; }
     .monitor-table { width: 100%; min-width: 0; table-layout: fixed; }
@@ -151,16 +151,11 @@
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
     pre { margin: 0; padding: 12px; border-radius: 6px; background: var(--code); color: #ecf2ef; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .row-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row-tools { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
     .row-tools button { min-height: 30px; padding: 0 8px; font-size: 12px; }
     .chain-prompt { width: 120px; min-height: 30px; padding: 4px 8px; font-size: 12px; }
     .row-tools button.danger { border-color: rgba(183,50,61,.45); background: rgba(183,50,61,.06); color: var(--danger); }
     .row-tools button.danger:hover:not(:disabled) { border-color: var(--danger); background: rgba(183,50,61,.1); }
-    .provider-table { min-width: 1380px; }
-    .provider-table th, .provider-table td { white-space: nowrap; }
-    .provider-url { display: flex; align-items: center; gap: 6px; min-width: 0; }
-    .provider-url code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 5px; border-radius: 4px; background: #f1f5f3; color: #253037; font-size: 12px; }
-    .provider-url button { flex: 0 0 auto; min-height: 26px; padding: 0 7px; font-size: 12px; }
     .save-result { display: grid; gap: 6px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; font-size: 13px; line-height: 1.45; }
     .save-result-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
     .save-result-row strong { flex: 0 0 96px; color: #344047; }
@@ -238,8 +233,8 @@
             </div>
           </div>
           <div class="table-wrap">
-            <table class="provider-table">
-              <thead><tr><th style="width:130px">Name</th><th style="width:78px">启用</th><th style="width:120px">API 模式</th><th style="width:82px">模型</th><th style="width:88px">健康</th><th style="width:190px">最近错误</th><th style="width:110px">检测时间</th><th style="width:270px">本地 URL</th><th style="width:110px">User-Agent</th><th style="width:250px">Actions</th></tr></thead>
+            <table>
+              <thead><tr><th style="width:140px">Provider</th><th style="width:320px">Base URL</th><th style="width:90px">Model</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
@@ -247,12 +242,12 @@
         </section>
         <aside class="panel editor">
           <div>
-            <h2 id="providerEditorTitle">Provider</h2>
+            <h2 id="providerEditorTitle" hidden></h2>
           </div>
-          <div class="field"><label for="providerName">Name</label><input id="providerName"></div>
+          <div class="field"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
-          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="messages">/messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label>Model</label>
             <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
@@ -288,7 +283,7 @@
             <div class="subtle">默认测试 Codex / Claude Code / 空UA / Curl / Chrome；取消「测所有UA」则只测 Provider 配置 UA。</div>
           </div>
           <div class="actions">
-            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测所有UA（含 Claude Code）</label>
+            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测所有UA</label>
             <button id="selectAllHealthBtn" type="button">全部选中</button>
             <button id="clearAllHealthBtn" type="button">全部取消</button>
             <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
@@ -418,7 +413,11 @@
     function providerEndpointText(provider) {
       const mode = String(provider?.api_mode || '').trim();
       if (mode === 'chat_completions') return 'chat';
-      if (mode === 'custom_endpoint') return provider?.custom_endpoint || provider?.endpoint || 'custom';
+      if (mode === 'messages' || mode === 'message') return 'messages';
+      if (mode === 'custom_endpoint') {
+        const endpoint = provider?.custom_endpoint || provider?.endpoint || 'custom';
+        return endpoint === '/message' ? '/messages' : endpoint;
+      }
       return 'responses';
     }
     function providerUserAgentText(provider) {
@@ -658,23 +657,16 @@
     function renderProviders() {
       $('providerRows').innerHTML = state.providers.map((p, i) => {
         const models = modelNames(p);
-        const health = providerRecentHealth(p);
-        const lastError = providerLastErrorText(health);
-        const localUrl = providerLocalUrl(p.name);
         return `
         <tr>
-          <td class="truncate" title="${esc(p.name)}">${esc(p.name)}</td>
-          <td>${p.enabled === false ? statusPill(false, '停用', 'muted') : statusPill(true, '启用')}</td>
-          <td class="truncate" title="${esc(endpointLabel(p.api_mode || '', p))}">${esc(endpointLabel(p.api_mode || '', p))}</td>
-          <td title="${esc(models.join(', '))}">${models.length}</td>
-          <td>${providerHealthPill(health)}</td>
-          <td class="truncate" title="${esc(lastError)}">${esc(lastError)}</td>
-          <td title="${esc(health.latest?.checkedAt || '')}">${esc(shortDateTime(health.latest?.checkedAt))}</td>
-          <td><div class="provider-url"><code title="${esc(localUrl)}">${esc(localUrl)}</code><button data-copy-provider-url="${i}" type="button">复制</button></div></td>
+          <td class="truncate">${esc(p.name)}${p.enabled === false ? ' <span class="status muted">停用</span>' : ''}</td>
+          <td class="truncate" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
+          <td title="${esc(models.join(', '))}">${esc(models.length || 0)}</td>
+          <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
           <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
           <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="10"><div class="empty">暂无 provider</div></td></tr>`;
+      }).join('') || `<tr><td colspan="6"><div class="empty">暂无 provider</div></td></tr>`;
       renderSaveResult();
       renderProviderEditor();
     }
@@ -699,8 +691,12 @@
     }
 
     function endpointLabel(value, provider = {}) {
-      if (value === 'custom_endpoint') return provider.custom_endpoint || '自定义';
+      if (value === 'custom_endpoint') {
+        const endpoint = provider.custom_endpoint || '自定义';
+        return endpoint === '/message' ? '/messages' : endpoint;
+      }
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
+      if (value === 'messages' || value === 'message') return '/messages';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
     }
@@ -780,7 +776,7 @@
     }
 
     const chromeUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    const codexUserAgent = 'codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color';
+    const codexUserAgent = 'codex_cli_rs/0.139.0 (Ubuntu 24.04 LTS; x86_64) xterm-256color';
     const claudeCodeUserAgent = 'claude-code/2.1.153 (linux; x64; node/v24.16.0)';
 
     function detectHeaderPreset(provider) {
@@ -824,7 +820,7 @@
       $('providerName').value = p?.name || '';
       $('providerBaseUrl').value = p?.base_url || '';
       $('providerApiKey').value = p?.api_key || p?.key || '';
-      $('providerMode').value = p?.api_mode || 'codex_responses';
+      $('providerMode').value = p?.api_mode === 'message' ? 'messages' : (p?.api_mode || 'codex_responses');
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       updateCustomEndpointInput();
       if (p) {
@@ -841,7 +837,7 @@
     function collectProviderEditor() {
       const headerPreset = $('headerPreset').value;
       const customUa = $('headerCustomUa').value.trim();
-      const endpointMode = $('providerMode').value || 'codex_responses';
+      const endpointMode = $('providerMode').value === 'message' ? 'messages' : ($('providerMode').value || 'codex_responses');
       const customEndpoint = normalizeEndpoint($('providerCustomEndpoint').value);
       if (headerPreset === 'custom' && !customUa) throw new Error('自定义 UA 必填');
       if (endpointMode === 'custom_endpoint' && !customEndpoint) throw new Error('自定义 Endpoint 必填');
@@ -961,6 +957,7 @@
 
     function healthConfiguredEndpointLabel(provider, model) {
       const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
+      if (endpoint.includes('/messages') || endpoint === 'messages') return 'messages';
       if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
       const meta = modelMeta(provider, model);
       if (hasReasoningEffort(meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning)) return 'reasoning';
@@ -977,7 +974,7 @@
         const running = !!(state.healthRunning || {})[row.key];
         const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
         const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
-        const endpointTitle = running ? 'reasoning -> responses -> chat' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
+        const endpointTitle = running ? 'reasoning -> responses -> chat -> messages' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
         const uaResultMap = running ? {} : healthUaResultMap(s);
