@@ -1227,7 +1227,7 @@ def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, A
         "service": AIPROXY_SINGLE_SERVICE,
         "listen": str(source.get("listen") or "127.0.0.1"),
         "port": port,
-        "config": str(source.get("config") or active_config_file()),
+        "config": str(source.get("config") or CONFIG_YAML_FILE),
         "verbose": api_checks.coerce_bool(source.get("verbose"), False),
     }
 
@@ -1458,6 +1458,20 @@ def find_aiproxy_service_item(service_id: str) -> dict[str, Any] | None:
 
 
 
+def aiproxy_config_files() -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for path in [CONFIG_YAML_FILE, *sorted(BASE_DIR.glob("*.yaml")), *sorted(BASE_DIR.glob("*.yml"))]:
+        if not path.exists() or not path.is_file():
+            continue
+        value = str(path.resolve(strict=False))
+        if value in seen:
+            continue
+        seen.add(value)
+        items.append({"name": path.name, "path": value})
+    return items
+
+
 def list_aiproxy_services() -> dict[str, Any]:
     data = load_aiproxy_instances()
     item = ensure_single_aiproxy_service()
@@ -1465,6 +1479,8 @@ def list_aiproxy_services() -> dict[str, Any]:
     return {
         "items": items,
         "updatedAt": data.get("updatedAt", ""),
+        "defaultConfig": str(CONFIG_YAML_FILE),
+        "configFiles": aiproxy_config_files(),
         "summary": {
             "total": 1,
             "running": 1 if item.get("activeOk") else 0,

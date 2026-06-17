@@ -307,7 +307,7 @@
             <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
           </div>
           <div class="actions">
-            <button id="refreshAiproxyPageBtn" type="button">刷新服务</button>
+            <button id="refreshAiproxyPageBtn" type="button">刷新AIProxy</button>
           </div>
         </div>
         <div id="aiproxyPageRows" class="service-list"></div>
@@ -317,10 +317,10 @@
             <span class="subtle">AIProxy 为单实例服务，保存后会自动重启。</span>
           </div>
           <div class="grid">
-            <div class="field span-6"><label>系统服务名</label><input value="aiproxy.service" disabled></div>
-            <div class="field span-6"><label for="aiproxyPort">端口</label><input id="aiproxyPort" type="number" min="1" max="65535" value="18006"></div>
+            <div class="field span-6"><label for="aiproxyAddress">服务地址</label><input id="aiproxyAddress" placeholder="http://127.0.0.1:18006"></div>
+            <div class="field span-6"><label for="aiproxyConfig">配置 YAML</label><input id="aiproxyConfig" list="aiproxyConfigOptions" placeholder="config.yaml"><datalist id="aiproxyConfigOptions"></datalist></div>
           </div>
-          <div class="subtle">固定使用 <code>aiproxy.service</code>，默认端口 18006，可修改端口后保存重启。</div>
+          <div class="subtle">固定使用 <code>aiproxy.service</code>；服务地址默认 <code>http://127.0.0.1:18006</code>，配置默认脚本根目录 <code>config.yaml</code>，保存后自动重启。</div>
           <div class="actions">
             <button id="cancelAiproxyEditorBtn" type="button">取消</button>
             <button id="saveAiproxyEditorBtn" class="primary" type="button">保存并重启</button>
@@ -624,6 +624,7 @@
     function aiproxyBaseUrl(item = null) {
       const source = item || preferredAiproxyItem();
       if (!source) return 'http://127.0.0.1:18006';
+      if (source.url) return String(source.url).replace(/\/$/, '');
       const port = Number(source.port || 18006);
       let host = String(source.listen || '127.0.0.1').trim() || '127.0.0.1';
       if (['0.0.0.0', '::', '[::]', '*'].includes(host)) host = '127.0.0.1';
@@ -1389,7 +1390,6 @@
           <div class="service-meta">
             <div title="${esc(item.service || '')}">服务：${esc(item.service || '-')}</div>
             <div title="${esc(url)}">地址：${esc(url || '-')}</div>
-            <div>端口：${esc(item.port || 18006)}</div>
             <div title="${esc(item.config || '')}">配置：${esc(item.config || '-')}</div>
             <div title="${esc(item.unitPath || '')}">Unit：${esc(item.unitPath || '-')}</div>
           </div>
@@ -1404,13 +1404,56 @@
       containers.forEach(container => { container.innerHTML = html; });
     }
 
+    function aiproxyDefaultConfigPath() {
+      return state.aiproxy.defaultConfig || state.configPath || 'config.yaml';
+    }
+
+    function renderAiproxyConfigOptions(currentConfig = '') {
+      const list = $('aiproxyConfigOptions');
+      if (!list) return;
+      const values = [
+        aiproxyDefaultConfigPath(),
+        currentConfig,
+        ...(state.aiproxy.configFiles || []).map(item => item.path || item.name || '')
+      ].map(value => String(value || '').trim()).filter(Boolean);
+      const unique = [...new Set(values)];
+      list.innerHTML = unique.map(value => `<option value="${esc(value)}"></option>`).join('');
+    }
+
+    function aiproxyServiceAddress(item = null) {
+      if (item?.url) return item.url;
+      const listen = String(item?.listen || '127.0.0.1').trim() || '127.0.0.1';
+      const port = Number(item?.port || 18006);
+      const host = listen.includes(':') && !listen.startsWith('[') ? `[${listen}]` : listen;
+      return `http://${host}:${Number.isInteger(port) ? port : 18006}`;
+    }
+
+    function parseAiproxyServiceAddress(raw) {
+      const text = String(raw || '').trim() || 'http://127.0.0.1:18006';
+      const withScheme = /^https?:\/\//i.test(text) ? text : `http://${text}`;
+      let url;
+      try {
+        url = new URL(withScheme);
+      } catch (_err) {
+        throw new Error('服务地址格式不正确');
+      }
+      if (url.protocol !== 'http:') throw new Error('服务地址只支持 http://');
+      const listen = url.hostname.replace(/^\[(.*)\]$/, '$1');
+      const port = Number(url.port || 18006);
+      if (!listen) throw new Error('服务地址缺少主机');
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('服务地址端口必须是 1-65535');
+      return { listen, port };
+    }
+
     function openAiproxyEditor(item = null) {
       const editor = $('aiproxyEditor');
       if (!editor) return;
       $('aiproxyEditorTitle').textContent = '编辑 AIProxy';
-      $('aiproxyPort').value = item?.port || 18006;
+      $('aiproxyAddress').value = aiproxyServiceAddress(item);
+      renderAiproxyConfigOptions(item?.config || '');
+      $('aiproxyConfig').value = item?.config || aiproxyDefaultConfigPath();
       editor.hidden = false;
-      $('aiproxyPort').focus();
+      $('aiproxyAddress').focus();
     }
 
     function closeAiproxyEditor() {
@@ -1419,15 +1462,17 @@
     }
 
     function collectAiproxyEditor() {
-      const port = Number($('aiproxyPort').value || 18006);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535');
+      const address = parseAiproxyServiceAddress($('aiproxyAddress')?.value);
+      const config = String($('aiproxyConfig')?.value || aiproxyDefaultConfigPath()).trim();
+      if (!config) throw new Error('配置 YAML 必填');
+      if (!/\.ya?ml$/i.test(config)) throw new Error('配置文件必须是 .yaml 或 .yml');
       return {
         id: 'aiproxy',
         service: 'aiproxy.service',
         name: 'AIProxy',
-        listen: '127.0.0.1',
-        port,
-        config: state.configPath || 'config.yaml',
+        listen: address.listen,
+        port: address.port,
+        config,
         verbose: false
       };
     }
@@ -1453,7 +1498,7 @@
         state.aiproxy = data;
         renderAiproxy();
         const summary = data.summary || {};
-        $('serverState').textContent = `AIProxy 已刷新：${summary.healthy || 0}/${summary.total || 0} 健康`;
+        $('serverState').textContent = `AIProxy 已刷新：${Number(summary.healthy || 0) > 0 ? '健康' : '异常'}`;
         return data;
       } catch (err) {
         state.aiproxy = { items: [], error: err.message };
