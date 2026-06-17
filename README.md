@@ -38,8 +38,7 @@ cp config.example.yaml config.yaml
     gpt-5.5:
       reasoning_effort: high
   headers:
-    Originator: codex_cli_rs
-    User-Agent: codex_cli_rs/0.139.0
+    User-Agent: curl/8.0
   enabled: true
 ```
 
