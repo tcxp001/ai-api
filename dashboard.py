@@ -2041,6 +2041,129 @@ def check_proxy(proxy: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def response_error_message(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error") or payload.get("last_error")
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("type") or error.get("code") or "").strip()
+    if error:
+        return str(error).strip()
+    response = payload.get("response")
+    if isinstance(response, dict):
+        return response_error_message(response)
+    return ""
+
+
+
+def http_error_detail(response: requests.Response) -> str:
+    base = api_checks.format_http_error(response.status_code, response)
+    extra = ""
+    try:
+        payload = response.json()
+        extra = response_error_message(payload)
+        if not extra and isinstance(payload, dict):
+            extra = str(payload.get("message") or payload.get("detail") or "").strip()
+    except Exception:
+        extra = api_checks.response_text(response)[:160]
+    extra = api_checks.redact_sensitive(extra, 160).strip()
+    if extra and extra not in base:
+        return f"{base}：{extra}"
+    return base
+
+def check_responses_completed_stream(url: str, payload: dict[str, Any]) -> tuple[bool, str, int | None]:
+    started = time.time()
+    event_name = ""
+    last_event = ""
+    last_detail = ""
+    event_count = 0
+    completed = False
+    response_status = ""
+    try:
+        with requests.post(url, json={**payload, "stream": True}, timeout=(5, 40), stream=True) as resp:
+            if resp.status_code != 200:
+                return False, http_error_detail(resp), int((time.time() - started) * 1000)
+            content_type = str(resp.headers.get("content-type") or "").lower()
+            if "text/event-stream" not in content_type:
+                try:
+                    body = resp.json()
+                except Exception:
+                    return False, "responses 未完成：非 SSE/非 JSON", int((time.time() - started) * 1000)
+                response_status = str(body.get("status") or "") if isinstance(body, dict) else ""
+                if isinstance(body, dict) and response_status == "completed":
+                    return True, "response.completed", int((time.time() - started) * 1000)
+                detail = response_error_message(body) or response_status or "未收到 response.completed"
+                return False, f"responses 未完成：{detail}", int((time.time() - started) * 1000)
+
+            for raw_line in resp.iter_lines(decode_unicode=True):
+                if raw_line is None:
+                    continue
+                line = str(raw_line).strip()
+                if not line:
+                    continue
+                if line.startswith("event:"):
+                    event_name = line.split(":", 1)[1].strip()
+                    last_event = event_name or last_event
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line.split(":", 1)[1].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    break
+                event_count += 1
+                try:
+                    item = json.loads(data)
+                except Exception:
+                    last_detail = api_checks.redact_sensitive(data, 120)
+                    continue
+                item_type = str(item.get("type") or event_name or "") if isinstance(item, dict) else event_name
+                last_event = item_type or last_event
+                if item_type == "response.completed":
+                    completed = True
+                    break
+                if item_type in {"response.failed", "response.incomplete"}:
+                    detail = response_error_message(item) or item_type
+                    return False, f"responses 失败：{detail}", int((time.time() - started) * 1000)
+                detail = response_error_message(item)
+                if detail:
+                    last_detail = detail
+    except Exception as exc:
+        return False, api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 160), int((time.time() - started) * 1000)
+
+    elapsed = int((time.time() - started) * 1000)
+    if completed:
+        return True, "response.completed", elapsed
+    if not event_count:
+        return False, "responses 未完成：无流式事件", elapsed
+    suffix = last_detail or last_event or "未收到 response.completed"
+    return False, f"responses 未完成：{suffix}", elapsed
+
+
+def check_chat_completed(url: str, payload: dict[str, Any]) -> tuple[bool, str, int | None]:
+    started = time.time()
+    try:
+        resp = requests.post(url, json=payload, timeout=(5, 20))
+        elapsed = int((time.time() - started) * 1000)
+        if resp.status_code != 200:
+            return False, http_error_detail(resp), elapsed
+        try:
+            body = resp.json()
+        except Exception:
+            return False, "chat 未完成：非 JSON", elapsed
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if isinstance(choices, list) and choices:
+            finish = str((choices[0] or {}).get("finish_reason") or "") if isinstance(choices[0], dict) else ""
+            if finish and finish not in {"stop", "length"}:
+                return False, f"chat 未完成：finish_reason={finish}", elapsed
+            return True, "chat completed", elapsed
+        detail = response_error_message(body) or "缺少 choices"
+        return False, f"chat 未完成：{detail}", elapsed
+    except Exception as exc:
+        return False, api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 160), int((time.time() - started) * 1000)
+
+
 def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], prompt: str = DEFAULT_MONITOR_PROMPT) -> dict[str, Any]:
     proxy = proxies.get(str(chain.get("proxyId")))
     proxy_url = str((proxy or {}).get("url") or "").rstrip("/")
@@ -2066,25 +2189,24 @@ def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], promp
     if len(prompt) > 1000:
         prompt = prompt[:1000]
     result["prompt"] = prompt
-    url = f"{proxy_url}/{provider_id}/v1/responses"
-    payload = {
+    responses_url = f"{proxy_url}/{provider_id}/v1/responses"
+    responses_payload = {
         "model": model,
         "input": [{"role": "user", "content": prompt}],
         "store": False,
         "max_output_tokens": 8,
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=(5, 20))
-        if resp.status_code in {404, 405, 501}:
-            url = f"{proxy_url}/{provider_id}/v1/chat/completions"
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
-            resp = requests.post(url, json=payload, timeout=(5, 20))
-        result["latencyMs"] = int((time.time() - started) * 1000)
-        result["alive"] = resp.status_code == 200
-        result["detail"] = "HTTP 200" if resp.status_code == 200 else api_checks.format_http_error(resp.status_code, resp)
-    except Exception as exc:
-        result["latencyMs"] = int((time.time() - started) * 1000)
-        result["detail"] = api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 120)
+    alive, detail, latency = check_responses_completed_stream(responses_url, responses_payload)
+    endpoint = "responses"
+    if not alive and (detail.startswith("404") or detail.startswith("405") or detail.startswith("501")):
+        chat_url = f"{proxy_url}/{provider_id}/v1/chat/completions"
+        chat_payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
+        alive, detail, latency = check_chat_completed(chat_url, chat_payload)
+        endpoint = "chat"
+    result["latencyMs"] = latency if latency is not None else int((time.time() - started) * 1000)
+    result["alive"] = bool(alive)
+    result["endpoint"] = endpoint
+    result["detail"] = detail if alive else api_checks.redact_sensitive(detail, 200)
     result["health"] = classify_health(bool(result.get("alive")), result.get("latencyMs"))
     return result
 
