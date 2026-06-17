@@ -1227,6 +1227,7 @@ def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, A
         "service": AIPROXY_SINGLE_SERVICE,
         "listen": str(source.get("listen") or "127.0.0.1"),
         "port": port,
+        "url": str(source.get("url") or source.get("publicUrl") or "").strip().rstrip("/"),
         "config": str(source.get("config") or CONFIG_YAML_FILE),
         "verbose": api_checks.coerce_bool(source.get("verbose"), False),
     }
@@ -1301,6 +1302,9 @@ def parse_cli_flag(args: list[str], name: str) -> str:
 
 
 def aiproxy_probe_url(item: dict[str, Any]) -> str:
+    explicit_url = str(item.get("url") or "").strip().rstrip("/")
+    if explicit_url:
+        return explicit_url
     port_text = str(item.get("port") or "").strip()
     listen = str(item.get("listen") or "").strip() or "127.0.0.1"
     if not port_text:

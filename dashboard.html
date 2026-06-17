@@ -234,7 +234,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th style="width:52px">No</th><th style="width:130px">Provider</th><th style="width:270px">Base URL</th><th style="width:150px">Endpoint</th><th style="width:125px;white-space:nowrap">User-Agent</th><th style="width:165px">Model</th><th style="width:220px">Actions</th></tr></thead>
+              <thead><tr><th style="width:52px">No.</th><th style="width:130px">Provider</th><th style="width:270px">Base URL</th><th style="width:150px">Endpoint</th><th style="width:125px;white-space:nowrap">User-Agent</th><th style="width:165px">Model</th><th style="width:220px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
@@ -244,7 +244,7 @@
           <div>
             <h2 id="providerEditorTitle" hidden></h2>
           </div>
-          <div class="field"><label for="providerNo">No</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
+          <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
           <div class="field"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
@@ -1438,11 +1438,13 @@
         throw new Error('服务地址格式不正确');
       }
       if (url.protocol !== 'http:') throw new Error('服务地址只支持 http://');
-      const listen = url.hostname.replace(/^\[(.*)\]$/, '$1');
+      const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
       const port = Number(url.port || 18006);
-      if (!listen) throw new Error('服务地址缺少主机');
+      if (!host) throw new Error('服务地址缺少主机');
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('服务地址端口必须是 1-65535');
-      return { listen, port };
+      const loopbackHosts = ['127.0.0.1', 'localhost', '::1', '[::1]'];
+      const listen = loopbackHosts.includes(host) ? '127.0.0.1' : '0.0.0.0';
+      return { listen, port, url: `${url.protocol}//${url.host}` };
     }
 
     function openAiproxyEditor(item = null) {
@@ -1472,6 +1474,7 @@
         name: 'AIProxy',
         listen: address.listen,
         port: address.port,
+        url: address.url,
         config,
         verbose: false
       };
