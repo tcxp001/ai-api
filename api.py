@@ -202,22 +202,28 @@ def print_provider_selection(selected_providers, skipped_providers):
     print()
 
 
-def build_headers(api_key, user_agent, provider_headers=None, remove_headers=None):
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
+def build_headers(api_key, user_agent, provider_headers=None, remove_headers=None, auth_mode="bearer", anthropic_version="2023-06-01"):
+    auth_mode = str(auth_mode or "bearer").strip().lower()
+    headers = {"Content-Type": "application/json"}
+    if auth_mode == "anthropic":
+        if api_key:
+            headers["x-api-key"] = str(api_key)
+        headers["anthropic-version"] = str(anthropic_version or "2023-06-01")
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-    # 同一份 config.yaml 里可给 provider 写额外 headers，例如 ar 的 Originator。
-    # Authorization / Content-Type 仍由测试脚本统一生成，避免配置里误覆盖 key。
+    # 同一份 config.yaml 里可给 provider 写额外 headers，例如 Originator。
+    # 鉴权和 Content-Type 由测试脚本统一生成，避免配置里误覆盖 key。
     for key, value in (provider_headers or {}).items():
         key_s = str(key)
-        if key_s.lower() in {"authorization", "content-type"}:
+        if key_s.lower() in {"authorization", "content-type", "x-api-key", "anthropic-version"}:
             continue
         headers[key_s] = "" if value is None else str(value)
 
     for key in (remove_headers or []):
-        headers.pop(str(key), None)
+        for existing in list(headers.keys()):
+            if existing.lower() == str(key).lower():
+                headers.pop(existing, None)
 
     # None 表示“不主动修改 UA”：若 provider_headers 写了 User-Agent，就保留配置值；
     # dict 表示覆盖/追加一组测试 headers，例如 Codex 的 Originator + User-Agent。
@@ -225,7 +231,7 @@ def build_headers(api_key, user_agent, provider_headers=None, remove_headers=Non
     if isinstance(user_agent, dict):
         for key, value in user_agent.items():
             key_s = str(key)
-            if key_s.lower() in {"authorization", "content-type"}:
+            if key_s.lower() in {"authorization", "content-type", "x-api-key", "anthropic-version"}:
                 continue
             headers[key_s] = "" if value is None else str(value)
     elif user_agent is not None:
@@ -309,16 +315,16 @@ def validate_success_response(response, endpoint):
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             return True, ""
-        return False, "chat格式异常"
+        return False, "chat 格式异常"
     if is_messages_endpoint(endpoint):
         content = payload.get("content")
         if isinstance(content, list) or isinstance(content, str) or payload.get("stop_reason") or payload.get("role") == "assistant":
             return True, ""
-        return False, "messages格式异常"
+        return False, "messages 格式异常"
     if is_responses_endpoint(endpoint):
         if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
             return True, ""
-        return False, "responses格式异常"
+        return False, "responses 格式异常"
     return True, ""
 
 
@@ -359,7 +365,7 @@ def request_total_timeout_for(endpoint, variant="basic"):
     return connect_timeout + read_timeout
 
 
-def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY):
+def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY, auth_mode="bearer", anthropic_version="2023-06-01"):
     url = base_url.rstrip("/") + endpoint
     request_timeout = request_timeout_for(endpoint, variant)
     start_time = time.time()
@@ -369,7 +375,7 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
             session.trust_env = trust_env_proxy
             response = session.post(
                 url,
-                headers=build_headers(api_key, user_agent, provider_headers, remove_headers),
+                headers=build_headers(api_key, user_agent, provider_headers, remove_headers, auth_mode=auth_mode, anthropic_version=anthropic_version),
                 json=build_payload(model, endpoint, variant),
                 timeout=request_timeout,
             )
@@ -392,7 +398,7 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
         return "❌ 失败", f"{type(e).__name__}: {str(e)[:100]}"
 
 
-def check_endpoint(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY):
+def check_endpoint(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY, auth_mode="bearer", anthropic_version="2023-06-01"):
     total_timeout = request_total_timeout_for(endpoint, variant)
     payload = {
         "args": [base_url, api_key, model, endpoint, user_agent],
@@ -401,6 +407,8 @@ def check_endpoint(base_url, api_key, model, endpoint, user_agent, variant="basi
             "provider_headers": provider_headers,
             "remove_headers": remove_headers,
             "trust_env_proxy": trust_env_proxy,
+            "auth_mode": auth_mode,
+            "anthropic_version": anthropic_version,
         },
     }
     try:
@@ -485,6 +493,9 @@ def compact_result(status, detail, include_latency=False):
         return "跳过"
 
     detail_text = str(detail or "")
+    format_labels = {"chat格式异常": "chat 格式异常", "messages格式异常": "messages 格式异常", "responses格式异常": "responses 格式异常"}
+    if detail_text in format_labels:
+        return format_labels[detail_text]
     if detail_text.startswith("连接超时"):
         return f"连接>{CONNECT_TIMEOUT}s"
     if detail_text.startswith("读超时"):
@@ -493,14 +504,14 @@ def compact_result(status, detail, include_latency=False):
         return detail_text.replace("总超时(>", "总>").replace(")", "")
     if detail_text.startswith("请求超时"):
         return "超时"
-    if detail_text in {"返回HTML", "非JSON", "格式异常", "返回错误", "chat格式异常", "messages格式异常", "responses格式异常"}:
+    if detail_text in {"返回HTML", "非JSON", "格式异常", "返回错误", "chat 格式异常", "messages 格式异常", "responses 格式异常", "chat格式异常", "messages格式异常", "responses格式异常"}:
         return detail_text
 
     code, _, reason = detail_text.partition(" ")
     code = code.rstrip(":")
     if code.isdigit():
         label = reason.strip() or HTTP_ERROR_LABELS.get(int(code), "HTTP错误")
-        return f"{code}{label.replace(' ', '')}"
+        return f"{code} {label.replace(' ', '')}"
 
     if ":" in detail_text:
         exc_name = detail_text.split(":", 1)[0]

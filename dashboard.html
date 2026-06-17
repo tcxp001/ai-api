@@ -227,14 +227,14 @@
             </div>
             <div class="actions">
               <button id="addProviderBtn" type="button">新增</button>
-              <button id="exportConfigBtn" type="button">导出 JSON</button>
-              <button id="importConfigBtn" type="button">导入 JSON</button>
-              <input id="importConfigFile" type="file" accept="application/json,.json" hidden>
+              <button id="exportConfigBtn" type="button">导出 YAML</button>
+              <button id="importConfigBtn" type="button">导入 YAML</button>
+              <input id="importConfigFile" type="file" accept=".yaml,.yml,application/x-yaml,text/yaml" hidden>
             </div>
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th style="width:140px">Provider</th><th style="width:320px">Base URL</th><th style="width:90px">Model</th><th style="width:130px">Endpoint</th><th style="width:120px">User-Agent</th><th style="width:280px">Actions</th></tr></thead>
+              <thead><tr><th style="width:52px">No</th><th style="width:130px">Provider</th><th style="width:270px">Base URL</th><th style="width:150px">Endpoint</th><th style="width:125px;white-space:nowrap">User-Agent</th><th style="width:165px">Model</th><th style="width:220px">Actions</th></tr></thead>
               <tbody id="providerRows"></tbody>
             </table>
           </div>
@@ -244,29 +244,30 @@
           <div>
             <h2 id="providerEditorTitle" hidden></h2>
           </div>
+          <div class="field"><label for="providerNo">No</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
           <div class="field"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
           <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="messages">/messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
+          <div class="field provider-edit-spaced">
+            <label for="headerPreset">User-Agent</label>
+            <select id="headerPreset">
+              <option value="default">Default</option>
+              <option value="codex">Codex</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="empty">Empty</option>
+              <option value="curl">Curl</option>
+              <option value="chrome">Chrome</option>
+              <option value="custom">Custom</option>
+            </select>
+            <input id="headerCustomUa" placeholder="Custom User-Agent" hidden>
+          </div>
           <div class="field provider-edit-spaced">
             <label>Model</label>
             <div class="toolbar-line"><button id="addModelBtn" type="button">新增模型</button><button id="fetchProviderModelsBtn" type="button">获取模型</button><button id="addSelectedModelsBtn" type="button" hidden>加入选中</button></div>
             <div id="modelFetchStatus" class="subtle"></div>
             <div id="modelChoices" class="model-picker" hidden></div>
             <div id="modelRows" class="mini-table"></div>
-          </div>
-          <div class="field">
-            <label for="headerPreset">User-Agent</label>
-            <select id="headerPreset">
-              <option value="default">默认，不修改UA</option>
-              <option value="empty">空UA</option>
-              <option value="curl">Curl</option>
-              <option value="chrome">Chrome</option>
-              <option value="codex">Codex</option>
-              <option value="claude_code">Claude Code</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input id="headerCustomUa" placeholder="填写自定义 User-Agent" hidden>
           </div>
           <div class="actions">
             <button id="applyProviderBtn" class="primary" type="button">保存</button>
@@ -280,10 +281,10 @@
         <div class="panel-head">
           <div>
             <h2>Provider 测活</h2>
-            <div class="subtle">默认测试 Codex / Claude Code / 空UA / Curl / Chrome；取消「测所有UA」则只测 Provider 配置 UA。</div>
+            <div class="subtle">默认测试 Codex / Claude Code / Empty / Curl / Chrome；取消「测试UA矩阵」则只测 Provider 配置 User-Agent。</div>
           </div>
           <div class="actions">
-            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测所有UA</label>
+            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测试UA矩阵</label>
             <button id="selectAllHealthBtn" type="button">全部选中</button>
             <button id="clearAllHealthBtn" type="button">全部取消</button>
             <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
@@ -291,7 +292,7 @@
         </div>
         <div class="table-wrap">
           <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">站点</th><th style="width:160px">模型</th><th style="width:90px">状态</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:125px">Claude Code</th><th style="width:105px">空UA</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">自定义</th><th style="width:170px">检测时间</th></tr></thead>
+            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:90px">Status</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:125px">Claude Code</th><th style="width:105px">Empty</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">Custom</th><th style="width:170px">Checked At</th></tr></thead>
             <tbody id="healthRows"></tbody>
           </table>
         </div>
@@ -306,22 +307,20 @@
             <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
           </div>
           <div class="actions">
-            <button id="createAiproxyPageBtn" class="primary" type="button">创建服务</button>
             <button id="refreshAiproxyPageBtn" type="button">刷新服务</button>
           </div>
         </div>
         <div id="aiproxyPageRows" class="service-list"></div>
         <div id="aiproxyEditor" class="aiproxy-editor" hidden>
           <div class="aiproxy-editor-head">
-            <h2 id="aiproxyEditorTitle">创建 AIProxy 服务</h2>
-            <span class="subtle">保存后会自动重启；改名时会停止旧服务并启动新服务。</span>
+            <h2 id="aiproxyEditorTitle">编辑 AIProxy</h2>
+            <span class="subtle">AIProxy 为单实例服务，保存后会自动重启。</span>
           </div>
           <div class="grid">
-            <div class="field span-6"><label for="aiproxyServiceName">系统服务名</label><input id="aiproxyServiceName" value="aiproxy" placeholder="aiproxy"></div>
+            <div class="field span-6"><label>系统服务名</label><input value="aiproxy.service" disabled></div>
             <div class="field span-6"><label for="aiproxyPort">端口</label><input id="aiproxyPort" type="number" min="1" max="65535" value="18006"></div>
           </div>
-          <input id="aiproxyOldService" type="hidden">
-          <div class="subtle">系统服务名可填 <code>aiproxy</code> 或其他名称；实际 unit 会是 <code>&lt;名称&gt;.service</code>。默认端口 18006，可修改。</div>
+          <div class="subtle">固定使用 <code>aiproxy.service</code>，默认端口 18006，可修改端口后保存重启。</div>
           <div class="actions">
             <button id="cancelAiproxyEditorBtn" type="button">取消</button>
             <button id="saveAiproxyEditorBtn" class="primary" type="button">保存并重启</button>
@@ -352,8 +351,12 @@
   </main>
 
   <script>
+    const TAB_PATHS = { config: '/config', health: '/health', aiproxy: '/aiproxy' };
+    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/health': 'health', '/aiproxy': 'aiproxy' };
+    const tabFromLocation = () => PATH_TABS[window.location.pathname] || 'config';
+
     const state = {
-      tab: 'config',
+      tab: tabFromLocation(),
       providers: [],
       monitor: { proxies: [], chains: [] },
       monitorRunning: {},
@@ -413,29 +416,27 @@
     function providerEndpointText(provider) {
       const mode = String(provider?.api_mode || '').trim();
       if (mode === 'chat_completions') return 'chat';
-      if (mode === 'messages' || mode === 'message') return 'messages';
+      if (mode === 'messages') return 'messages';
       if (mode === 'custom_endpoint') {
         const endpoint = provider?.custom_endpoint || provider?.endpoint || 'custom';
-        return endpoint === '/message' ? '/messages' : endpoint;
+        return endpoint;
       }
       return 'responses';
     }
     function providerUserAgentText(provider) {
       const headers = provider?.headers || {};
-      const remove = new Set((provider?.remove_headers || []).map(v => String(v || '').toLowerCase()));
-      if (remove.has('user-agent')) return '移除';
       const key = Object.keys(headers).find(k => String(k).toLowerCase() === 'user-agent');
-      if (key === undefined) return '默认';
+      if (key === undefined) return 'Default';
       const value = headers[key];
-      if (value === '') return '空UA';
-      if (value === null || value === undefined) return '默认';
+      if (value === '') return 'Empty';
+      if (value === null || value === undefined) return 'Default';
       const ua = String(value);
       const lower = ua.toLowerCase();
       if (lower.includes('codex_cli_rs') || String(headers.Originator || headers.originator || '').toLowerCase() === 'codex_cli_rs') return 'Codex';
       if (lower.includes('claude-code/') || lower.includes('claude-cli') || String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli') return 'Claude Code';
       if (lower.startsWith('curl/') || lower === 'curl') return 'Curl';
       if (lower.includes('chrome/') || lower.includes('chromium/') || lower.includes('applewebkit/')) return 'Chrome';
-      return '自定义';
+      return 'Custom';
     }
     function collectMonitorPrompts() {
       const prompts = { ...(state.monitorPrompts || {}) };
@@ -460,13 +461,26 @@
     };
     const api = async (path, options = {}) => {
       const res = await fetch(path, {
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         ...options
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
     };
+
+    function setActiveTab(tab, options = {}) {
+      const nextTab = TAB_PATHS[tab] ? tab : 'config';
+      state.tab = nextTab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === state.tab));
+      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === state.tab));
+      const nextPath = TAB_PATHS[state.tab] || '/config';
+      if (options.push && window.location.pathname !== nextPath) {
+        history.pushState({ tab: state.tab }, '', nextPath);
+      } else if (options.replace && window.location.pathname !== nextPath) {
+        history.replaceState({ tab: state.tab }, '', nextPath);
+      }
+    }
 
     async function copyText(text) {
       const value = String(text || '');
@@ -492,10 +506,10 @@
     async function loadAll() {
       $('serverState').textContent = '读取中';
       const [config, monitor, status, aiproxy] = await Promise.all([
-        api('/api/config'),
-        api('/api/monitor'),
-        api('/api/status'),
-        api('/api/aiproxy/services').catch(err => ({ items: [], error: err.message }))
+        api('/config'),
+        api('/monitor'),
+        api('/status'),
+        api('/aiproxy').catch(err => ({ items: [], error: err.message }))
       ]);
       state.providers = config.providers || [];
       state.configPath = config.configPath || 'config.yaml';
@@ -506,7 +520,7 @@
       if (state.selectedProvider >= state.providers.length) state.selectedProvider = -1;
       if (state.selectedChain >= state.monitor.chains.length) state.selectedChain = -1;
       render();
-      const serviceSummary = state.aiproxy.summary ? `，AIProxy ${state.aiproxy.summary.healthy}/${state.aiproxy.summary.total} 健康` : '';
+      const serviceSummary = state.aiproxy.summary ? `，AIProxy${Number(state.aiproxy.summary.healthy || 0) > 0 ? '健康' : '异常'}` : '';
       const saveMessage = state.lastSaveMessage;
       state.lastSaveMessage = '';
       $('serverState').textContent = saveMessage || `已读取 ${state.providers.length} 个 provider${serviceSummary}`;
@@ -519,10 +533,21 @@
       renderAiproxy();
     }
 
-    function providerForPersist(provider) {
+    function compactProviderForPersist(provider) {
       const item = { ...(provider || {}) };
       delete item.__draft;
+      if (Array.isArray(item.remove_headers) && item.remove_headers.length === 0) delete item.remove_headers;
+      if (item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers) && !Object.keys(item.headers).length) delete item.headers;
+      if (item.models && typeof item.models === 'object' && !Array.isArray(item.models) && !Object.keys(item.models).length) delete item.models;
+      if (item.auth_mode === 'bearer') delete item.auth_mode;
+      ['note', 'api_key', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
+        if (item[key] === '') delete item[key];
+      });
       return item;
+    }
+
+    function providerForPersist(provider) {
+      return compactProviderForPersist(provider);
     }
 
     function dropSelectedProviderDraft() {
@@ -540,17 +565,52 @@
       renderProviders();
     }
 
+    function firstDisabledIndex(providers = state.providers) {
+      const index = providers.findIndex(provider => provider.enabled === false);
+      return index < 0 ? providers.length : index;
+    }
+
     function sortProvidersByEnabled() {
       const selected = state.providers[state.selectedProvider] || null;
-      state.providers = state.providers
-        .map((provider, index) => ({ provider, index }))
-        .sort((a, b) => {
-          const aDisabled = a.provider.enabled === false ? 1 : 0;
-          const bDisabled = b.provider.enabled === false ? 1 : 0;
-          return aDisabled - bDisabled || a.index - b.index;
-        })
-        .map(item => item.provider);
+      const enabled = state.providers.filter(provider => provider.enabled !== false);
+      const disabled = state.providers.filter(provider => provider.enabled === false);
+      state.providers = [...enabled, ...disabled];
       state.selectedProvider = selected ? state.providers.indexOf(selected) : -1;
+    }
+
+    function providerTargetNo(maxNo) {
+      const input = $('providerNo');
+      const raw = Number(input?.value || 1);
+      const value = Number.isInteger(raw) ? raw : 1;
+      return Math.min(Math.max(value, 1), Math.max(maxNo, 1));
+    }
+
+    function upsertProviderAtNo(provider, targetNo) {
+      const oldIndex = state.selectedProvider;
+      const providers = [...state.providers];
+      if (oldIndex >= 0) providers.splice(oldIndex, 1);
+      const disabledStart = firstDisabledIndex(providers);
+      let index;
+      if (provider.enabled === false) {
+        index = Math.min(Math.max(targetNo - 1, disabledStart), providers.length);
+      } else {
+        index = Math.min(Math.max(targetNo - 1, 0), disabledStart);
+      }
+      providers.splice(index, 0, provider);
+      state.providers = providers;
+      state.selectedProvider = -1;
+    }
+
+    function moveProviderAfterToggle(index) {
+      const providers = [...state.providers];
+      const provider = providers[index];
+      if (!provider) return;
+      providers.splice(index, 1);
+      provider.enabled = provider.enabled === false;
+      const insertIndex = firstDisabledIndex(providers);
+      providers.splice(insertIndex, 0, provider);
+      state.providers = providers;
+      state.selectedProvider = -1;
     }
 
     function preferredAiproxyItem() {
@@ -654,19 +714,48 @@
       return parts.join('；');
     }
 
+    function providerBaseUrl(provider) {
+      return String(provider?.base_url || provider?.url || '').trim();
+    }
+
+    function providerApiKey(provider) {
+      return String(provider?.api_key || provider?.key || '').trim();
+    }
+
+    function modelSummary(provider) {
+      const rows = modelsToRows(provider?.models || provider?.model);
+      if (!rows.length) return { text: '0', title: '未配置模型' };
+      const first = rows[0].name || '-';
+      const text = rows.length === 1 ? first : `${first} +${rows.length - 1}`;
+      const title = rows.map(row => {
+        const meta = [];
+        if (row.context) meta.push(`ctx ${row.context}`);
+        if (row.effort) meta.push(`reasoning ${row.effort}`);
+        return meta.length ? `${row.name} (${meta.join(', ')})` : row.name;
+      }).join('\n');
+      return { text, title };
+    }
+
     function renderProviders() {
       $('providerRows').innerHTML = state.providers.map((p, i) => {
-        const models = modelNames(p);
+        const models = modelSummary(p);
+        const baseUrl = providerBaseUrl(p);
+        const uaLabel = providerUaLabel(p);
+        const providerBadges = [
+          p.enabled === false ? '<span class="status muted">停用</span>' : '',
+          providerApiKey(p) ? '' : '<span class="status warn">无Key</span>'
+        ].filter(Boolean).join(' ');
         return `
         <tr>
-          <td class="truncate">${esc(p.name)}${p.enabled === false ? ' <span class="status muted">停用</span>' : ''}</td>
-          <td class="truncate" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
-          <td title="${esc(models.join(', '))}">${esc(models.length || 0)}</td>
-          <td>${esc(endpointLabel(p.api_mode || '', p))}</td>
-          <td class="truncate" title="${esc(providerUaLabel(p))}">${esc(providerUaLabel(p))}</td>
-          <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">复制</button><button class="danger" data-delete-provider="${i}" type="button">删除</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button></div></td>
+          <td>${i + 1}</td>
+          <td class="truncate" title="${esc(p.name || '')}">${esc(p.name)}${providerBadges ? ' ' + providerBadges : ''}</td>
+          <td class="truncate" title="${esc(baseUrl)}">${esc(baseUrl)}</td>
+          <td class="truncate" title="${esc(endpointLabel(p.api_mode || 'codex_responses', p))}">${esc(endpointLabel(p.api_mode || 'codex_responses', p))}</td>
+          <td class="truncate" title="${esc(uaLabel)}">${esc(uaLabel)}</td>
+          <td class="truncate" title="${esc(models.title)}">${esc(models.text)}</td>
+          <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">克隆</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button><button class="danger" data-delete-provider="${i}" type="button">删除</button></div></td>
         </tr>`;
-      }).join('') || `<tr><td colspan="6"><div class="empty">暂无 provider</div></td></tr>`;
+      }).join('') || `<tr><td colspan="7"><div class="empty">暂无 provider</div></td></tr>`;
       renderSaveResult();
       renderProviderEditor();
     }
@@ -677,28 +766,45 @@
       return `${key.slice(0, 6)}......${key.slice(-4)}`;
     }
 
+    function headerValue(headers, name) {
+      const wanted = String(name || '').toLowerCase();
+      const key = Object.keys(headers || {}).find(k => String(k).toLowerCase() === wanted);
+      return key === undefined ? undefined : headers[key];
+    }
+
     function providerUaLabel(provider) {
       const headers = provider?.headers || {};
-      const remove = provider?.remove_headers || [];
-      const ua = headers['User-Agent'];
-      if (headers.Originator === 'codex_cli_rs') return 'Codex';
-      if (String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli' || String(ua || '').toLowerCase().includes('claude-code/') || String(ua || '').toLowerCase().includes('claude-cli')) return 'Claude Code';
-      if (ua === '') return '空UA';
-      if (ua === 'curl/8.0') return 'Curl';
-      if (String(ua || '').includes('Mozilla/5.0')) return 'Chrome';
-      if (ua) return ua;
-      return '默认';
+            const ua = headerValue(headers, 'User-Agent');
+      const originator = String(headerValue(headers, 'Originator') || '').toLowerCase();
+      const xApp = String(headerValue(headers, 'x-app') || '').toLowerCase();
+      const uaText = String(ua ?? '');
+      const uaLower = uaText.toLowerCase();
+      if (originator === 'codex_cli_rs' || uaLower.includes('codex_cli_rs')) return 'Codex';
+      if (xApp === 'cli' || uaLower.includes('claude-code/') || uaLower.includes('claude-cli')) return 'Claude Code';
+      if (ua === '') return 'Empty';
+      if (uaText === 'curl/8.0' || uaLower.startsWith('curl/')) return 'Curl';
+      if (uaLower.includes('mozilla/5.0') || uaLower.includes('chrome/') || uaLower.includes('applewebkit/')) return 'Chrome';
+      if (typeof ua === 'string') return ua || 'Empty';
+      return 'Default';
     }
 
     function endpointLabel(value, provider = {}) {
       if (value === 'custom_endpoint') {
-        const endpoint = provider.custom_endpoint || '自定义';
-        return endpoint === '/message' ? '/messages' : endpoint;
+        const endpoint = provider.custom_endpoint || provider.endpoint || 'Custom';
+        return endpoint;
       }
       if (value === 'chat_completions' || value === 'chat') return '/chat/completions';
-      if (value === 'messages' || value === 'message') return '/messages';
+      if (value === 'messages') return '/messages';
       if (value === 'codex_responses' || value === 'responses') return '/responses';
       return value || '';
+    }
+
+    function normalizeEndpointMode(value) {
+      const mode = String(value || '').trim();
+      if (mode === 'chat') return 'chat_completions';
+      if (mode === 'responses') return 'codex_responses';
+      if (['codex_responses', 'chat_completions', 'messages', 'custom_endpoint'].includes(mode)) return mode;
+      return 'codex_responses';
     }
 
     function normalizeEndpoint(value) {
@@ -778,22 +884,26 @@
     const chromeUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
     const codexUserAgent = 'codex_cli_rs/0.139.0 (Ubuntu 24.04 LTS; x86_64) xterm-256color';
     const claudeCodeUserAgent = 'claude-code/2.1.153 (linux; x64; node/v24.16.0)';
+    const uaRelatedHeaders = new Set(['user-agent', 'originator', 'x-app']);
 
     function detectHeaderPreset(provider) {
       const headers = provider?.headers || {};
-      const remove = provider?.remove_headers || [];
-      const ua = headers['User-Agent'];
-      if (headers.Originator === 'codex_cli_rs' && ua === codexUserAgent) return 'codex';
-      if (ua === claudeCodeUserAgent || String(ua || '').toLowerCase().includes('claude-code/') || (String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli' && String(ua || '').toLowerCase().includes('claude-cli'))) return 'claude_code';
+      const ua = headerValue(headers, 'User-Agent');
+      const originator = String(headerValue(headers, 'Originator') || '').toLowerCase();
+      const xApp = String(headerValue(headers, 'x-app') || '').toLowerCase();
+      const uaText = String(ua ?? '');
+      const uaLower = uaText.toLowerCase();
+      if (originator === 'codex_cli_rs' || uaLower.includes('codex_cli_rs')) return 'codex';
+      if (uaText === claudeCodeUserAgent || uaLower.includes('claude-code/') || (xApp === 'cli' && uaLower.includes('claude-cli'))) return 'claude_code';
       if (ua === '') return 'empty';
-      if (ua === 'curl/8.0') return 'curl';
-      if (ua === chromeUserAgent) return 'chrome';
-      if (typeof ua === 'string' || Object.keys(headers).length) return 'custom';
+      if (uaText === 'curl/8.0' || uaLower.startsWith('curl/')) return 'curl';
+      if (uaText === chromeUserAgent || uaLower.includes('mozilla/5.0') || uaLower.includes('chrome/') || uaLower.includes('applewebkit/')) return 'chrome';
+      if (typeof ua === 'string') return 'custom';
       return 'default';
     }
 
     function customUaValue(provider) {
-      const ua = provider?.headers?.['User-Agent'];
+      const ua = headerValue(provider?.headers || {}, 'User-Agent');
       return typeof ua === 'string' ? ua : '';
     }
 
@@ -803,24 +913,36 @@
       input.hidden = $('headerPreset').value !== 'custom';
     }
 
-    function presetToHeaders(preset, customUa = '') {
-      if (preset === 'empty') return { headers: { 'User-Agent': '' }, remove_headers: [] };
-      if (preset === 'curl') return { headers: { 'User-Agent': 'curl/8.0' }, remove_headers: [] };
-      if (preset === 'chrome') return { headers: { 'User-Agent': chromeUserAgent }, remove_headers: [] };
-      if (preset === 'codex') return { headers: { Originator: 'codex_cli_rs', 'User-Agent': codexUserAgent }, remove_headers: [] };
-      if (preset === 'claude_code') return { headers: { 'User-Agent': claudeCodeUserAgent }, remove_headers: [] };
-      if (preset === 'custom') return { headers: customUa ? { 'User-Agent': customUa } : {}, remove_headers: [] };
-      return { headers: {}, remove_headers: [] };
+    function baseHeaderConfig(provider) {
+      const headers = {};
+      Object.entries(provider?.headers || {}).forEach(([key, value]) => {
+        if (!uaRelatedHeaders.has(String(key).toLowerCase())) headers[key] = value;
+      });
+      const remove_headers = (provider?.remove_headers || []).filter(key => String(key || '').toLowerCase() !== 'user-agent');
+      return { headers, remove_headers };
+    }
+
+    function presetToHeaders(preset, customUa = '', provider = null) {
+      const config = baseHeaderConfig(provider);
+      if (preset === 'empty') return { headers: { ...config.headers, 'User-Agent': '' }, remove_headers: config.remove_headers };
+      if (preset === 'curl') return { headers: { ...config.headers, 'User-Agent': 'curl/8.0' }, remove_headers: config.remove_headers };
+      if (preset === 'chrome') return { headers: { ...config.headers, 'User-Agent': chromeUserAgent }, remove_headers: config.remove_headers };
+      if (preset === 'codex') return { headers: { ...config.headers, Originator: 'codex_cli_rs', 'User-Agent': codexUserAgent }, remove_headers: config.remove_headers };
+      if (preset === 'claude_code') return { headers: { ...config.headers, 'User-Agent': claudeCodeUserAgent }, remove_headers: config.remove_headers };
+      if (preset === 'custom') return { headers: customUa ? { ...config.headers, 'User-Agent': customUa } : config.headers, remove_headers: config.remove_headers };
+      return config;
     }
 
     function renderProviderEditor() {
       const p = state.providers[state.selectedProvider];
       clearFetchedModels();
       $('providerEditorTitle').textContent = p ? `编辑 ${p.name || ''}` : 'Provider';
+      $('providerNo').value = p ? state.selectedProvider + 1 : 1;
+      $('providerNo').max = Math.max(state.providers.length, 1);
       $('providerName').value = p?.name || '';
-      $('providerBaseUrl').value = p?.base_url || '';
-      $('providerApiKey').value = p?.api_key || p?.key || '';
-      $('providerMode').value = p?.api_mode === 'message' ? 'messages' : (p?.api_mode || 'codex_responses');
+      $('providerBaseUrl').value = providerBaseUrl(p);
+      $('providerApiKey').value = providerApiKey(p);
+      $('providerMode').value = normalizeEndpointMode(p?.api_mode);
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       updateCustomEndpointInput();
       if (p) {
@@ -834,20 +956,28 @@
       updateCustomUaInput();
     }
 
+    function authModeForEndpoint(endpointMode, customEndpoint = '') {
+      if (endpointMode === 'messages') return 'anthropic';
+      if (endpointMode === 'custom_endpoint' && customEndpoint === '/messages') return 'anthropic';
+      return 'bearer';
+    }
+
     function collectProviderEditor() {
       const headerPreset = $('headerPreset').value;
       const customUa = $('headerCustomUa').value.trim();
-      const endpointMode = $('providerMode').value === 'message' ? 'messages' : ($('providerMode').value || 'codex_responses');
+      const endpointMode = normalizeEndpointMode($('providerMode').value);
       const customEndpoint = normalizeEndpoint($('providerCustomEndpoint').value);
-      if (headerPreset === 'custom' && !customUa) throw new Error('自定义 UA 必填');
+      if (headerPreset === 'custom' && !customUa) throw new Error('Custom User-Agent is required');
       if (endpointMode === 'custom_endpoint' && !customEndpoint) throw new Error('自定义 Endpoint 必填');
-      const headerConfig = presetToHeaders(headerPreset, customUa);
+      if (customEndpoint === '/message') throw new Error('Endpoint must be /messages, not /message');
+      const headerConfig = presetToHeaders(headerPreset, customUa, state.providers[state.selectedProvider] || {});
       const item = {
         ...(state.providers[state.selectedProvider] || {}),
         name: $('providerName').value.trim(),
         base_url: $('providerBaseUrl').value.trim(),
         api_key: $('providerApiKey').value.trim(),
         api_mode: endpointMode,
+        auth_mode: authModeForEndpoint(endpointMode, customEndpoint),
         enabled: state.providers[state.selectedProvider]?.enabled !== false,
         models: rowsToModels(),
         headers: headerConfig.headers,
@@ -855,8 +985,7 @@
       };
       if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
       else delete item.custom_endpoint;
-      delete item.__draft;
-      return item;
+      return compactProviderForPersist(item);
     }
 
     function healthDetailText(status) {
@@ -866,7 +995,7 @@
       return hiddenFragments.some(fragment => text.includes(fragment)) ? '' : text;
     }
 
-    const HEALTH_UA_COLUMNS = ['Codex', 'Claude Code', '空UA', 'Curl', 'Chrome', '自定义'];
+    const HEALTH_UA_COLUMNS = ['Codex', 'Claude Code', 'Empty', 'Curl', 'Chrome', 'Custom'];
 
     function healthResultKey(providerName, model) {
       return `${providerName}::${model || ''}`;
@@ -904,11 +1033,26 @@
       })).filter(item => item.key && item.provider);
     }
 
+    function healthConfiguredUaColumn(provider) {
+      const label = providerUaLabel(provider);
+      if (HEALTH_UA_COLUMNS.includes(label)) return label;
+      if (!label || label === 'Default') return '';
+      return 'Custom';
+    }
+
+    function healthConfiguredUaMap(provider) {
+      const label = healthConfiguredUaColumn(provider);
+      if (!label) return {};
+      const configured = providerUaLabel(provider);
+      return { [label]: { text: '✅', title: 'Configured User-Agent: ' + configured, configured: true } };
+    }
+
     function healthUaResultMap(status) {
       const resultMap = {};
       const addResult = (item) => {
         if (!item || !item.ua) return;
-        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : '自定义';
+        if (item.ua === 'Default') return;
+        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : 'Custom';
         const text = String(item.compact || healthDetailText(item) || item.status || '').trim();
         if (!text) return;
         resultMap[label] = {
@@ -925,6 +1069,7 @@
     function healthUaCell(resultMap, label) {
       const result = resultMap[label];
       if (!result) return '<td></td>';
+      if (result.configured) return `<td class="health-result-cell" title="${esc(result.title)}">${esc(result.text)}</td>`;
       const kind = result.alive === true ? 'ok' : result.alive === false ? 'fail' : 'muted';
       return `<td class="health-result-cell" title="${esc(result.title)}"><span class="status ${kind}">${esc(result.text)}</span></td>`;
     }
@@ -964,6 +1109,10 @@
       return 'responses';
     }
 
+    function healthEndpointTraceTitle(configuredEndpoint) {
+      return configuredEndpoint === 'messages' ? 'messages' : 'reasoning -> responses -> chat';
+    }
+
     function renderHealth() {
       const rows = healthRowsData();
       const selectedKeys = state.healthSelection || currentHealthSelection();
@@ -974,16 +1123,16 @@
         const running = !!(state.healthRunning || {})[row.key];
         const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
         const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
-        const endpointTitle = running ? 'reasoning -> responses -> chat -> messages' : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
+        const endpointTitle = running ? healthEndpointTraceTitle(configuredEndpoint) : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
         const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
         const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
-        const uaResultMap = running ? {} : healthUaResultMap(s);
+        const uaResultMap = running ? {} : s.checkedAt ? healthUaResultMap(s) : healthConfiguredUaMap(p);
         const uaCells = HEALTH_UA_COLUMNS.map(label => healthUaCell(uaResultMap, label)).join('');
         return `<tr>
           <td><label class="health-check" title="选择"><input type="checkbox" data-health-select="1" data-health-key="${esc(row.key)}" data-health-provider="${esc(row.providerName)}" data-health-model="${esc(row.model)}"${checked}><span class="health-check-box" aria-hidden="true"></span></label></td>
           <td class="truncate">${esc(row.providerName)}</td>
-          <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
           <td>${statusCell}</td>
+          <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
           <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
           ${uaCells}
           <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
@@ -1031,7 +1180,7 @@
 
     async function persistProviders() {
       const providers = state.providers.filter(provider => !provider.__draft).map(providerForPersist);
-      const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ providers }) });
+      const data = await api('/config', { method: 'POST', body: JSON.stringify({ providers, format: 'yaml' }) });
       const warningText = data.warnings?.length ? `，警告 ${data.warnings.length} 条：${data.warnings.slice(0, 2).join('；')}${data.warnings.length > 2 ? '…' : ''}` : '';
       const restartText = saveRestartText(data.restart);
       state.lastSaveDetails = data;
@@ -1046,12 +1195,12 @@
         if (state.selectedProvider >= 0) {
           const provider = collectProviderEditor();
           if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
-          state.providers[state.selectedProvider] = provider;
+          upsertProviderAtNo(provider, providerTargetNo(state.providers.length));
         }
         await persistProviders();
       } else if (state.tab === 'monitor') {
         collectMonitor();
-        await api('/api/monitor', { method: 'POST', body: JSON.stringify(state.monitor) });
+        await api('/monitor', { method: 'POST', body: JSON.stringify(state.monitor) });
       }
       await loadAll();
     }
@@ -1114,7 +1263,7 @@
         const controller = new AbortController();
         run.controllers.add(controller);
         try {
-          const data = await api('/api/health/check', { method: 'POST', signal: controller.signal, body: JSON.stringify({ providers: [target.provider], models: { [target.provider]: [target.model] }, allUa }) });
+          const data = await api('/health', { method: 'POST', signal: controller.signal, body: JSON.stringify({ providers: [target.provider], models: { [target.provider]: [target.model] }, allUa }) });
           if (run.cancelled) return;
           state.status = data.status || state.status;
           (data.results || []).forEach(result => {
@@ -1136,8 +1285,8 @@
             detail: message,
             compact: message,
             endpointLabel: '-',
-            ua: '自定义',
-            uaResults: [{ ua: '自定义', alive: false, status: '失败', detail: message, compact: message }]
+            ua: 'Custom',
+            uaResults: [{ ua: 'Custom', alive: false, status: '失败', detail: message, compact: message }]
           };
         } finally {
           run.controllers.delete(controller);
@@ -1181,7 +1330,7 @@
       try {
         const prompts = Object.fromEntries(ids.map(id => [id, (state.monitorPrompts || {})[id] || DEFAULT_MONITOR_PROMPT]));
         const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts } : { prompts };
-        const data = await api('/api/monitor/check', { method: 'POST', body: JSON.stringify(body) });
+        const data = await api('/monitor/check', { method: 'POST', body: JSON.stringify(body) });
         state.status = data.status;
         const results = data.chainResults || [];
         const ok = results.filter(item => item.alive).length;
@@ -1255,22 +1404,13 @@
       containers.forEach(container => { container.innerHTML = html; });
     }
 
-    function serviceUnitBaseName(value) {
-      let text = String(value || '').trim() || 'aiproxy';
-      if (text.endsWith('.service')) text = text.slice(0, -8);
-      return text || 'aiproxy';
-    }
-
     function openAiproxyEditor(item = null) {
       const editor = $('aiproxyEditor');
       if (!editor) return;
-      const serviceName = serviceUnitBaseName(item?.service || item?.id || 'aiproxy');
-      $('aiproxyEditorTitle').textContent = item?.service ? `编辑 ${item.service}` : '创建 AIProxy 服务';
-      $('aiproxyServiceName').value = serviceName;
+      $('aiproxyEditorTitle').textContent = '编辑 AIProxy';
       $('aiproxyPort').value = item?.port || 18006;
-      $('aiproxyOldService').value = item?.service || '';
       editor.hidden = false;
-      $('aiproxyServiceName').focus();
+      $('aiproxyPort').focus();
     }
 
     function closeAiproxyEditor() {
@@ -1279,25 +1419,23 @@
     }
 
     function collectAiproxyEditor() {
-      const serviceName = serviceUnitBaseName($('aiproxyServiceName').value);
       const port = Number($('aiproxyPort').value || 18006);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535');
       return {
-        id: serviceName,
-        service: serviceName,
-        name: serviceName,
+        id: 'aiproxy',
+        service: 'aiproxy.service',
+        name: 'AIProxy',
         listen: '127.0.0.1',
         port,
         config: state.configPath || 'config.yaml',
-        verbose: false,
-        oldService: $('aiproxyOldService').value || ''
+        verbose: false
       };
     }
 
     async function saveAiproxyEditor() {
       const item = collectAiproxyEditor();
       $('serverState').textContent = 'AIProxy 服务保存并重启中';
-      const data = await api('/api/aiproxy/services', { method: 'POST', body: JSON.stringify({ item }) });
+      const data = await api('/aiproxy', { method: 'POST', body: JSON.stringify({ item }) });
       setAiproxyLog(data);
       closeAiproxyEditor();
       await loadAiproxyServices();
@@ -1311,7 +1449,7 @@
 
     async function loadAiproxyServices() {
       try {
-        const data = await api('/api/aiproxy/services');
+        const data = await api('/aiproxy');
         state.aiproxy = data;
         renderAiproxy();
         const summary = data.summary || {};
@@ -1334,19 +1472,12 @@
             await loadAll();
             return;
           }
-          state.tab = nextTab;
-          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === state.tab));
-          document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === state.tab));
+          setActiveTab(nextTab, { push: true });
           await loadAll();
         } else if (target.id === 'reloadBtn') {
           window.location.reload();
         } else if (target.id === 'addProviderBtn') {
-          beginProviderDraft({ name: `provider-${state.providers.length + 1}`, base_url: 'https://example.com/v1', api_key: '', api_mode: 'codex_responses', models: {}, headers: {}, remove_headers: [], enabled: true });
-        } else if (target.hasAttribute('data-copy-provider-url')) {
-          const provider = state.providers[Number(target.dataset.copyProviderUrl)];
-          const url = providerLocalUrl(provider?.name || '');
-          await copyText(url);
-          $('serverState').textContent = `已复制本地 URL：${url}`;
+          beginProviderDraft({ name: `provider-${state.providers.length + 1}`, base_url: 'https://example.com/v1', api_mode: 'codex_responses', enabled: true });
         } else if (target.hasAttribute('data-edit-provider')) {
           const index = Number(target.dataset.editProvider);
           const provider = state.providers[index];
@@ -1363,19 +1494,14 @@
           beginProviderDraft(clone);
         } else if (target.hasAttribute('data-toggle-provider')) {
           const index = Number(target.dataset.toggleProvider);
-          state.providers[index].enabled = state.providers[index].enabled === false;
-          sortProvidersByEnabled();
+          moveProviderAfterToggle(index);
           await persistProviders();
           await loadAll();
         } else if (target.id === 'applyProviderBtn') {
           const provider = collectProviderEditor();
           if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
-          if (state.selectedProvider < 0) {
-            state.providers.unshift(provider);
-          } else {
-            state.providers[state.selectedProvider] = provider;
-          }
-          state.selectedProvider = -1;
+          const maxNo = state.selectedProvider >= 0 ? state.providers.length : state.providers.length + 1;
+          upsertProviderAtNo(provider, providerTargetNo(maxNo));
           await persistProviders();
           await loadAll();
         } else if (target.hasAttribute('data-delete-provider')) {
@@ -1400,7 +1526,7 @@
         } else if (target.id === 'fetchProviderModelsBtn') {
           const provider = collectProviderEditor();
           $('modelFetchStatus').textContent = '正在获取模型...';
-          const data = await api('/api/providers/models', { method: 'POST', body: JSON.stringify({ provider }) });
+          const data = await api('/providers/models', { method: 'POST', body: JSON.stringify({ provider }) });
           renderModelChoices(data.models || []);
           $('modelFetchStatus').textContent = `获取到 ${data.count || 0} 个模型，耗时 ${data.latencyMs || 0}ms`;
         } else if (target.id === 'addSelectedModelsBtn') {
@@ -1408,8 +1534,11 @@
         } else if (target.hasAttribute('data-remove-model')) {
           target.closest('[data-model-row]')?.remove();
         } else if (target.id === 'exportConfigBtn') {
-          const blob = new Blob([JSON.stringify({ providers: state.providers }, null, 2)], { type: 'application/json' });
-          const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'ai-api-config.json' });
+          const res = await fetch('/config/export', { headers: { 'Accept': 'application/x-yaml' } });
+          const text = await res.text();
+          if (!res.ok) throw new Error(text || res.statusText);
+          const blob = new Blob([text], { type: 'application/x-yaml' });
+          const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'config.yaml' });
           a.click();
           URL.revokeObjectURL(a.href);
         } else if (target.id === 'importConfigBtn') {
@@ -1428,8 +1557,6 @@
           await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT });
         } else if (target.id === 'runMonitorBtn') {
           await runMonitor();
-        } else if (target.id === 'createAiproxyPageBtn') {
-          openAiproxyEditor();
         } else if (target.id === 'cancelAiproxyEditorBtn') {
           closeAiproxyEditor();
         } else if (target.id === 'saveAiproxyEditorBtn') {
@@ -1440,7 +1567,7 @@
         } else if (target.id === 'refreshAiproxyBtn' || target.id === 'refreshAiproxyPageBtn') {
           await loadAiproxyServices();
         } else if (target.dataset.aiproxyAction) {
-          const data = await api('/api/aiproxy/services/control', { method: 'POST', body: JSON.stringify({ id: target.dataset.aiproxyId, action: target.dataset.aiproxyAction }) });
+          const data = await api('/aiproxy/control', { method: 'POST', body: JSON.stringify({ id: target.dataset.aiproxyId, action: target.dataset.aiproxyAction }) });
           setAiproxyLog(data);
           await loadAiproxyServices();
         }
@@ -1465,14 +1592,31 @@
     $('importConfigFile').addEventListener('change', async (event) => {
       const file = event.target.files[0];
       if (!file) return;
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      state.providers = Array.isArray(parsed) ? parsed : parsed.providers || [];
-      state.selectedProvider = -1;
-      render();
-      event.target.value = '';
+      try {
+        const content = await file.text();
+        const parsed = await api('/config/parse', { method: 'POST', body: JSON.stringify({ content }) });
+        state.providers = parsed.providers || [];
+        state.selectedProvider = -1;
+        render();
+        await persistProviders();
+        await loadAll();
+        $('serverState').textContent = `YAML 已导入并保存：${state.providers.length} 个 provider`;
+      } catch (err) {
+        $('serverState').textContent = err.message;
+        alert(err.message);
+      } finally {
+        event.target.value = '';
+      }
     });
 
+    window.addEventListener('popstate', () => {
+      setActiveTab(tabFromLocation());
+      loadAll().catch(err => {
+        $('serverState').textContent = err.message;
+      });
+    });
+
+    setActiveTab(state.tab);
     loadAll().catch(err => {
       $('serverState').textContent = err.message;
     });

@@ -33,10 +33,12 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_YAML_FILE = BASE_DIR / "config.yaml"
 CONFIG_JSON_FILE = BASE_DIR / "config.json"
 CONFIG_FILE = CONFIG_JSON_FILE if CONFIG_JSON_FILE.exists() else CONFIG_YAML_FILE
-CHECKINS_FILE = BASE_DIR / "checkins.json"
-MONITOR_FILE = BASE_DIR / "monitor.json"
-STATUS_FILE = BASE_DIR / "runtime-status.json"
-HISTORY_FILE = BASE_DIR / "runtime-history.json"
+DATA_DIR = BASE_DIR / "data"
+LOG_DIR = BASE_DIR / "log"
+CHECKINS_FILE = DATA_DIR / "checkins.json"
+MONITOR_FILE = DATA_DIR / "monitor.json"
+STATUS_FILE = DATA_DIR / "runtime-status.json"
+HISTORY_FILE = DATA_DIR / "runtime-history.json"
 DASHBOARD_HTML = BASE_DIR / "dashboard.html"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
 CODEX_DIR = Path("/root/.codex")
@@ -45,8 +47,10 @@ HERMES_CONFIG = Path("/root/.hermes/config.yaml")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 AIPROXY_SERVICE_PREFIX = "ai-api-proxy-"
 AIPROXY_SYSTEMD_SERVICES = ("aiproxy.service",)
-AIPROXY_INSTANCES_FILE = BASE_DIR / "aiproxy-instances.json"
-PROXY_RESTART_LOG = BASE_DIR / "proxy-restart.log"
+AIPROXY_SINGLE_SERVICE = "aiproxy.service"
+AIPROXY_SINGLE_ID = "aiproxy"
+AIPROXY_INSTANCES_FILE = DATA_DIR / "aiproxy-instances.json"
+PROXY_RESTART_LOG = LOG_DIR / "proxy-restart.log"
 DEFAULT_PROXY_BASE = "http://127.0.0.1:18006"
 DEFAULT_MONITOR_PROMPT = "在吗？"
 AIPROXY_HTTP_TRANSIENT_SECONDS = 12
@@ -64,6 +68,7 @@ aiproxy_http_probe_lock = threading.Lock()
 aiproxy_http_probe_state: dict[str, dict[str, Any]] = {}
 
 PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+BACKUP_DIR = BASE_DIR / "backup"
 
 
 def now_iso() -> str:
@@ -89,8 +94,13 @@ def write_json_atomic(path: Path, data: Any) -> None:
 def backup_file(path: Path) -> Path | None:
     if not path.exists():
         return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(f"{path.name}.bak-{stamp}")
+    now = datetime.now()
+    backup_dir = BACKUP_DIR / now.strftime("%Y-%m-%d")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = now.strftime("%Y%m%d-%H%M%S")
+    backup = backup_dir / f"{path.name}.bak-{stamp}"
+    if backup.exists():
+        backup = backup_dir / f"{path.name}.bak-{stamp}-{now.strftime('%f')}"
     backup.write_bytes(path.read_bytes())
     return backup
 
@@ -99,16 +109,26 @@ def active_config_file() -> Path:
     return CONFIG_JSON_FILE if CONFIG_JSON_FILE.exists() else CONFIG_YAML_FILE
 
 
+def config_backup_paths() -> list[Path]:
+    paths: list[Path] = []
+    for pattern in ("config.yaml.bak-*", "config.json.bak-*"):
+        paths.extend(BACKUP_DIR.glob(f"*/{pattern}"))
+    return paths
+
+
+def backup_display_name(path: Path) -> str:
+    try:
+        return path.relative_to(BACKUP_DIR).as_posix()
+    except ValueError:
+        return path.name
+
+
 def list_config_backups() -> list[dict[str, Any]]:
     backups = []
-    patterns = ["config.yaml.bak-*", "config.json.bak-*"]
-    paths = []
-    for pattern in patterns:
-        paths.extend(BASE_DIR.glob(pattern))
-    for path in sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True):
+    for path in sorted(config_backup_paths(), key=lambda item: item.stat().st_mtime, reverse=True):
         stat = path.stat()
         backups.append({
-            "name": path.name,
+            "name": backup_display_name(path),
             "path": str(path),
             "size": stat.st_size,
             "createdAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -116,12 +136,24 @@ def list_config_backups() -> list[dict[str, Any]]:
     return backups
 
 
-def restore_config_backup(name: str) -> Path:
-    safe_name = Path(name).name
-    backup = BASE_DIR / safe_name
-    if not (safe_name.startswith("config.yaml.bak-") or safe_name.startswith("config.json.bak-")) or not backup.exists():
+def resolve_config_backup(name: str) -> Path:
+    raw = str(name or "").strip().replace("\\", "/")
+    if not raw:
         raise ValueError("backup not found")
-    target = CONFIG_JSON_FILE if safe_name.startswith("config.json") else CONFIG_YAML_FILE
+    candidate = (BACKUP_DIR / raw).resolve()
+    backup_root = BACKUP_DIR.resolve()
+    if not (candidate == backup_root or backup_root in candidate.parents):
+        raise ValueError("backup not found")
+    backup_name = candidate.name
+    if not (backup_name.startswith("config.yaml.bak-") or backup_name.startswith("config.json.bak-")) or not candidate.exists():
+        raise ValueError("backup not found")
+    return candidate
+
+
+def restore_config_backup(name: str) -> Path:
+    backup = resolve_config_backup(name)
+    backup_name = backup.name
+    target = CONFIG_JSON_FILE if backup_name.startswith("config.json") else CONFIG_YAML_FILE
     with write_lock:
         current_backup = backup_file(target)
         target.write_bytes(backup.read_bytes())
@@ -220,9 +252,10 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     if "api_key" not in provider and "key" in provider:
         provider["api_key"] = provider.pop("key")
     mode = str(provider.get("api_mode") or "").strip()
-    if mode == "message":
-        mode = "messages"
+    valid_modes = {"codex_responses", "responses", "chat_completions", "messages", "custom_endpoint"}
     provider["api_mode"] = mode or "codex_responses"
+    if provider["api_mode"] not in valid_modes:
+        raise ValueError(f"{label} api_mode must be one of: {', '.join(sorted(valid_modes))}")
     custom_endpoint = str(provider.get("custom_endpoint") or provider.get("endpoint") or "").strip()
     if provider["api_mode"] == "custom_endpoint":
         if not custom_endpoint:
@@ -230,11 +263,21 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
         if not custom_endpoint.startswith("/"):
             custom_endpoint = "/" + custom_endpoint
         if custom_endpoint == "/message":
-            custom_endpoint = "/messages"
+            raise ValueError(f"{label} custom_endpoint must be /messages, not /message")
         provider["custom_endpoint"] = custom_endpoint
     else:
         provider.pop("custom_endpoint", None)
+        custom_endpoint = ""
     provider.pop("endpoint", None)
+    try:
+        provider["auth_mode"] = normalize_auth_mode(provider.get("auth_mode"), provider["api_mode"], custom_endpoint)
+    except ValueError as exc:
+        raise ValueError(f"{label} {exc}") from exc
+    anthropic_version = str(provider.get("anthropic_version") or "").strip()
+    if provider["auth_mode"] == "anthropic":
+        provider["anthropic_version"] = anthropic_version or "2023-06-01"
+    else:
+        provider.pop("anthropic_version", None)
     provider["enabled"] = api_checks.coerce_bool(provider.get("enabled"), True)
     headers = provider.get("headers", {})
     if headers is None:
@@ -261,6 +304,47 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     return provider
 
 
+def provider_auth_mode_for_endpoint(api_mode: str, custom_endpoint: str = "") -> str:
+    mode = str(api_mode or "").strip().lower()
+    endpoint = str(custom_endpoint or "").strip().lower()
+    if mode == "messages" or (mode == "custom_endpoint" and endpoint == "/messages"):
+        return "anthropic"
+    return "bearer"
+
+
+def normalize_auth_mode(value: Any, api_mode: str, custom_endpoint: str = "") -> str:
+    default = provider_auth_mode_for_endpoint(api_mode, custom_endpoint)
+    mode = str(value or default).strip().lower()
+    if mode not in {"bearer", "anthropic"}:
+        raise ValueError("auth_mode must be bearer or anthropic")
+    return mode
+
+
+def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
+    item = dict(provider)
+    # Drop empty optional fields from persisted/exported config. Keep meaningful
+    # falsy values such as headers.User-Agent: "" for the Empty UA preset and
+    # enabled: false for disabled providers.
+    for key in ("remove_headers",):
+        if item.get(key) == []:
+            item.pop(key, None)
+    for key in ("headers", "models"):
+        if item.get(key) == {}:
+            item.pop(key, None)
+    if item.get("auth_mode") == "bearer":
+        item.pop("auth_mode", None)
+    if item.get("anthropic_version") == "2023-06-01":
+        item.pop("anthropic_version", None)
+    for key in ("note", "api_key", "key", "reasoning_effort", "reasoning", "anthropic_version"):
+        if item.get(key) == "":
+            item.pop(key, None)
+    return item
+
+
+def compact_provider_list(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [compact_provider(provider) for provider in providers]
+
+
 def validate_provider_list(providers: list[Any]) -> list[dict[str, Any]]:
     normalized = [validate_provider(provider, index) for index, provider in enumerate(providers, start=1)]
     seen: dict[str, int] = {}
@@ -271,6 +355,20 @@ def validate_provider_list(providers: list[Any]) -> list[dict[str, Any]]:
             raise ValueError(f"provider {name!r} duplicates provider #{seen[key]}")
         seen[key] = index
     return normalized
+
+
+def provider_yaml_text(providers: list[dict[str, Any]]) -> str:
+    normalized = compact_provider_list(validate_provider_list(providers))
+    return yaml.safe_dump(normalized, allow_unicode=True, sort_keys=False)
+
+
+def parse_provider_yaml_text(content: str) -> list[dict[str, Any]]:
+    parsed = yaml.safe_load(content or "")
+    if isinstance(parsed, dict) and isinstance(parsed.get("providers"), list):
+        parsed = parsed["providers"]
+    if not isinstance(parsed, list):
+        raise ValueError("YAML root must be a provider list or {providers: [...]}")
+    return validate_provider_list(parsed)
 
 
 def provider_config_warnings(providers: list[dict[str, Any]]) -> list[str]:
@@ -288,6 +386,7 @@ def provider_config_warnings(providers: list[dict[str, Any]]) -> list[str]:
 def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | None, list[str]]:
     normalized = validate_provider_list(providers)
     warnings = provider_config_warnings(normalized)
+    persisted = compact_provider_list(normalized)
     target = active_config_file()
     if fmt == "json":
         target = CONFIG_JSON_FILE
@@ -298,10 +397,10 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
             tmp_name = f.name
             if target.suffix == ".json":
-                json.dump(normalized, f, ensure_ascii=False, indent=2)
+                json.dump(persisted, f, ensure_ascii=False, indent=2)
                 f.write("\n")
             else:
-                yaml.safe_dump(normalized, f, allow_unicode=True, sort_keys=False)
+                yaml.safe_dump(persisted, f, allow_unicode=True, sort_keys=False)
         os.replace(tmp_name, target)
     return backup, warnings
 
@@ -431,8 +530,6 @@ def provider_by_name() -> dict[str, dict[str, Any]]:
 
 def provider_api_mode(provider: dict[str, Any]) -> str:
     mode = str(provider.get("api_mode") or "").strip().lower()
-    if mode == "message":
-        mode = "messages"
     if mode == "custom_endpoint":
         return "codex_responses"
     return mode or "codex_responses"
@@ -445,11 +542,11 @@ def provider_endpoint(provider: dict[str, Any]) -> str:
         if endpoint and not endpoint.startswith("/"):
             endpoint = "/" + endpoint
         if endpoint == "/message":
-            endpoint = "/messages"
+            return "/message"
         return endpoint or "/responses"
     if mode == "chat_completions":
         return "/chat/completions"
-    if mode in {"messages", "message"}:
+    if mode == "messages":
         return "/messages"
     return "/responses"
 
@@ -528,15 +625,16 @@ def codex_model_catalog_entry(provider: dict[str, Any], model: str, priority: in
     }
 
 
-def write_codex_model_catalog(provider: dict[str, Any]) -> Path | None:
+def write_codex_model_catalog(provider: dict[str, Any]) -> dict[str, str] | None:
     name = str(provider.get("name") or "").strip()
     models = provider_model_names(provider)
     if not name or not models:
         return None
     catalog_path = CODEX_MODEL_CATALOG_DIR / f"{safe_codex_filename(name)}.json"
+    backup = backup_file(catalog_path)
     payload = {"models": [codex_model_catalog_entry(provider, model, index) for index, model in enumerate(models)]}
     write_json_atomic(catalog_path, payload)
-    return catalog_path
+    return {"path": str(catalog_path), "backup": str(backup) if backup else ""}
 
 
 def proxy_provider_url(provider_name: str, proxy_base: str = "http://127.0.0.1:18006") -> str:
@@ -653,7 +751,7 @@ def set_codex_default_model(text: str, provider_name: str, model: str) -> str:
 def cleanup_codex_profiles(active_names: set[str], stale_names: set[str] | None = None) -> dict[str, Any]:
     deleted: list[str] = []
     backups: list[str] = []
-    catalog_deleted: list[str] = []
+    catalog_deleted: list[dict[str, str]] = []
     stale = {name for name in (stale_names or set()) if name and name not in active_names}
     for name in sorted(stale):
         path = CODEX_DIR / f"{name}.config.toml"
@@ -665,8 +763,9 @@ def cleanup_codex_profiles(active_names: set[str], stale_names: set[str] | None 
             deleted.append(str(path))
         catalog_path = CODEX_MODEL_CATALOG_DIR / f"{safe_codex_filename(name)}.json"
         if catalog_path.exists():
+            catalog_backup = backup_file(catalog_path)
             catalog_path.unlink()
-            catalog_deleted.append(str(catalog_path))
+            catalog_deleted.append({"path": str(catalog_path), "backup": str(catalog_backup) if catalog_backup else ""})
     return {"deleted": deleted, "backups": backups, "catalogDeleted": catalog_deleted}
 
 def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", stale_profile_names: set[str] | None = None) -> dict[str, Any]:
@@ -693,16 +792,16 @@ def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_
         model_meta = model_meta_for(provider, model)
         context = model_meta.get("context_length") or model_meta.get("max_model_len") or model_meta.get("max_tokens")
         effort = model_meta.get("reasoning_effort") or provider.get("reasoning_effort") or ""
-        catalog_path = write_codex_model_catalog(provider)
-        if catalog_path:
-            written_catalogs.append(str(catalog_path))
+        catalog_result = write_codex_model_catalog(provider)
+        if catalog_result:
+            written_catalogs.append(catalog_result)
         profile_lines = [f"model = {toml_string(model)}", f"model_provider = {toml_string(name)}"]
         if context:
             profile_lines.append(f'model_context_window = {int(context)}')
         if effort:
             profile_lines.append(f"model_reasoning_effort = {toml_string(effort)}")
-        if catalog_path:
-            profile_lines.append(f"model_catalog_json = {toml_string(str(catalog_path))}")
+        if catalog_result:
+            profile_lines.append(f"model_catalog_json = {toml_string(catalog_result['path'])}")
         profile_lines.extend(["", "[tui.model_availability_nux]"])
         for item in models:
             profile_lines.append(f"{toml_string(item)} = 4")
@@ -1064,12 +1163,8 @@ def aiproxy_unit_path(service_id: str) -> Path:
     return SYSTEMD_DIR / service_name(service_id)
 
 
-def aiproxy_target_service(item: dict[str, Any]) -> str:
-    requested = str(item.get("service") or item.get("id") or "aiproxy").strip()
-    if requested.endswith(".service"):
-        requested = requested[:-len(".service")]
-    service_base = normalize_service_id(requested or "aiproxy")
-    return f"{service_base}.service"
+def aiproxy_target_service(item: dict[str, Any] | None = None) -> str:
+    return AIPROXY_SINGLE_SERVICE
 
 
 def aiproxy_target_unit_path(item: dict[str, Any]) -> Path:
@@ -1123,50 +1218,50 @@ def aiproxy_status(item: dict[str, Any]) -> dict[str, Any]:
     return status
 
 
-def write_aiproxy_service(item: dict[str, Any]) -> dict[str, Any]:
-    target_service = aiproxy_target_service(item)
-    service_id = normalize_service_id(target_service[:-len(".service")])
-    old_service = str(item.get("oldService") or item.get("previousService") or "").strip()
-    if old_service:
-        if old_service.endswith(".service"):
-            old_service = old_service[:-len(".service")]
-        old_service = f"{normalize_service_id(old_service)}.service"
+def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = overrides or {}
+    port = int(source.get("port") or 18006)
+    return {
+        "id": AIPROXY_SINGLE_ID,
+        "name": "AIProxy",
+        "service": AIPROXY_SINGLE_SERVICE,
+        "listen": str(source.get("listen") or "127.0.0.1"),
+        "port": port,
+        "config": str(source.get("config") or active_config_file()),
+        "verbose": api_checks.coerce_bool(source.get("verbose"), False),
+    }
 
-    item = {**item, "id": service_id, "name": str(item.get("name") or service_id), "service": target_service}
-    result_ops: dict[str, Any] = {}
 
-    if old_service and old_service != target_service:
-        stop_code, stop_output = run_systemctl(["stop", old_service])
-        disable_code, disable_output = run_systemctl(["disable", old_service])
-        old_path = SYSTEMD_DIR / old_service
-        old_backup = backup_file(old_path)
-        if old_path.exists():
-            old_path.unlink()
-        result_ops["oldService"] = {
-            "service": old_service,
-            "stopped": stop_code == 0,
-            "stopOutput": stop_output,
-            "disabled": disable_code == 0,
-            "disableOutput": disable_output,
-            "backup": str(old_backup) if old_backup else "",
-            "removedUnit": not old_path.exists(),
-        }
+def ensure_single_aiproxy_service() -> dict[str, Any]:
+    item = preferred_aiproxy_item() or default_aiproxy_item()
+    item = default_aiproxy_item(item)
+    unit_path = SYSTEMD_DIR / AIPROXY_SINGLE_SERVICE
+    if not unit_path.exists():
+        return write_aiproxy_service(item, restart=True)
+    enabled_code, _enabled = run_systemctl(["is-enabled", AIPROXY_SINGLE_SERVICE])
+    if enabled_code != 0:
+        run_systemctl(["enable", AIPROXY_SINGLE_SERVICE])
+    status = aiproxy_status(item)
+    status["ensured"] = True
+    return status
 
-    path = aiproxy_target_unit_path(item)
+
+def write_aiproxy_service(item: dict[str, Any], restart: bool = True) -> dict[str, Any]:
+    item = default_aiproxy_item(item)
+    target_service = AIPROXY_SINGLE_SERVICE
+    service_id = AIPROXY_SINGLE_ID
+
+    path = SYSTEMD_DIR / target_service
     backup = backup_file(path)
     path.write_text(aiproxy_unit_content(item), encoding="utf-8")
     reload_code, reload_output = run_systemctl(["daemon-reload"])
     enable_code, enable_output = run_systemctl(["enable", target_service])
-    restart_code, restart_output = run_systemctl(["restart", target_service])
+    if restart:
+        restart_code, restart_output = run_systemctl(["restart", target_service])
+    else:
+        restart_code, restart_output = run_systemctl(["start", target_service])
 
-    data = load_aiproxy_instances()
-    items = [
-        entry for entry in data.get("items", [])
-        if str(entry.get("service") or "") not in {target_service, old_service}
-        and normalize_service_id(str(entry.get("id") or "")) != service_id
-    ]
-    items.append(item)
-    save_aiproxy_instances(items)
+    save_aiproxy_instances([item])
 
     status = aiproxy_status(item)
     status["backup"] = str(backup) if backup else ""
@@ -1179,37 +1274,21 @@ def write_aiproxy_service(item: dict[str, Any]) -> dict[str, Any]:
         status["appSync"] = sync_app_configs_for_proxy_base(load_provider_list(), current_aiproxy_proxy_base(item))
     except Exception as exc:
         status["appSync"] = {"error": f"{type(exc).__name__}: {exc}", "proxyBase": current_aiproxy_proxy_base(item)}
-    status.update(result_ops)
     return status
 
-
 def control_aiproxy_service(service_id: str, action: str) -> dict[str, Any]:
-    service_id = normalize_service_id(service_id)
     if action not in {"start", "stop", "restart", "enable", "disable"}:
         raise ValueError("unsupported action")
-    item = find_aiproxy_service_item(service_id) or {"id": service_id, "service": f"{service_id}.service"}
-    name = str(item.get("service") or f"{service_id}.service")
-    code, output = run_systemctl([action, name])
+    item = preferred_aiproxy_item() or default_aiproxy_item()
+    item = default_aiproxy_item(item)
+    code, output = run_systemctl([action, AIPROXY_SINGLE_SERVICE])
     status = aiproxy_status(item)
     status["returnCode"] = code
     status["output"] = output
     return status
 
-
 def delete_aiproxy_service(service_id: str) -> dict[str, Any]:
-    service_id = normalize_service_id(service_id)
-    run_systemctl(["stop", service_name(service_id)])
-    run_systemctl(["disable", service_name(service_id)])
-    path = aiproxy_unit_path(service_id)
-    backup = backup_file(path)
-    if path.exists():
-        path.unlink()
-    run_systemctl(["daemon-reload"])
-    data = load_aiproxy_instances()
-    items = [entry for entry in data.get("items", []) if normalize_service_id(str(entry.get("id") or "")) != service_id]
-    save_aiproxy_instances(items)
-    return {"ok": True, "id": service_id, "backup": str(backup) if backup else ""}
-
+    raise ValueError("AIProxy is a required single service and cannot be deleted")
 
 def parse_cli_flag(args: list[str], name: str) -> str:
     prefix = f"{name}="
@@ -1362,43 +1441,37 @@ def discover_aiproxy_unit_items() -> list[dict[str, Any]]:
 
 
 def merged_aiproxy_service_items() -> list[dict[str, Any]]:
+    configured = None
     data = load_aiproxy_instances()
-    by_id: dict[str, dict[str, Any]] = {}
-    for item in discover_aiproxy_unit_items():
-        by_id[normalize_service_id(str(item.get("id") or ""))] = item
-    for name in AIPROXY_SYSTEMD_SERVICES:
-        item = named_aiproxy_service_item(name)
-        if item:
-            by_id[normalize_service_id(str(item.get("id") or ""))] = item
     for item in data.get("items", []):
-        service_id = normalize_service_id(str(item.get("id") or ""))
-        by_id[service_id] = {**by_id.get(service_id, {}), **item}
-    return list(by_id.values())
+        if str(item.get("service") or "") == AIPROXY_SINGLE_SERVICE or normalize_service_id(str(item.get("id") or "")) == AIPROXY_SINGLE_ID:
+            configured = item
+            break
+    discovered = named_aiproxy_service_item(AIPROXY_SINGLE_SERVICE)
+    item = default_aiproxy_item({**(discovered or {}), **(configured or {})})
+    return [item]
+
 
 
 def find_aiproxy_service_item(service_id: str) -> dict[str, Any] | None:
-    raw = str(service_id or "").strip()
-    normalized = normalize_service_id(raw)
-    for item in merged_aiproxy_service_items():
-        item_id = normalize_service_id(str(item.get("id") or ""))
-        service = str(item.get("service") or "")
-        if item_id == normalized or service == raw or service == f"{raw}.service":
-            return item
-    return None
+    return merged_aiproxy_service_items()[0]
+
 
 
 def list_aiproxy_services() -> dict[str, Any]:
     data = load_aiproxy_instances()
-    items = [aiproxy_status(item) for item in merged_aiproxy_service_items()]
+    item = ensure_single_aiproxy_service()
+    items = [item]
     return {
         "items": items,
         "updatedAt": data.get("updatedAt", ""),
         "summary": {
-            "total": len(items),
-            "running": sum(1 for item in items if item.get("activeOk")),
-            "healthy": sum(1 for item in items if item.get("health") == "healthy"),
+            "total": 1,
+            "running": 1 if item.get("activeOk") else 0,
+            "healthy": 1 if item.get("health") == "healthy" else 0,
         },
     }
+
 
 
 def preferred_aiproxy_item(items: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -1655,10 +1728,12 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     headers = provider.get("headers") or {}
     remove_headers = provider.get("remove_headers") or []
     trust_env_proxy = api_checks.coerce_bool(provider.get("trust_env_proxy"), api_checks.DEFAULT_TRUST_ENV_PROXY)
+    auth_mode = normalize_auth_mode(provider.get("auth_mode"), str(provider.get("api_mode") or ""), str(provider.get("custom_endpoint") or ""))
+    anthropic_version = str(provider.get("anthropic_version") or "2023-06-01")
     if not base_url or not api_key:
         raise ValueError("Base URL 和 API Key 必填")
 
-    request_headers = api_checks.build_headers(api_key, None, headers, remove_headers)
+    request_headers = api_checks.build_headers(api_key, None, headers, remove_headers, auth_mode=auth_mode, anthropic_version=anthropic_version)
     started = time.time()
     response: requests.Response | None = None
     with requests.Session() as session:
@@ -1700,17 +1775,24 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     return {"models": sorted(deduped.values(), key=lambda item: item["id"]), "count": len(deduped), "latencyMs": elapsed_ms}
 
 
-HEALTH_UA_LABELS = {
-    "空字符串": "空UA",
-    "Chrome电脑": "Chrome",
+HEALTH_UA_PROFILE_IDS = [5, 6, 4, 2, 3]
+HEALTH_UA_PROFILE_LABELS = {
+    5: "Codex",
+    6: "Claude Code",
+    4: "Empty",
+    2: "Curl",
+    3: "Chrome",
 }
-HEALTH_UA_ORDER = ["Codex", "Claude Code", "空UA", "Curl", "Chrome"]
 
 
 def health_ua_profiles() -> list[tuple[str, Any]]:
-    profiles = [(HEALTH_UA_LABELS.get(name, name), value) for name, value in api_checks.UA_PROFILES.values()]
-    order = {label: index for index, label in enumerate(HEALTH_UA_ORDER)}
-    return sorted((item for item in profiles if item[0] in order), key=lambda item: order[item[0]])
+    profiles: list[tuple[str, Any]] = []
+    for profile_id in HEALTH_UA_PROFILE_IDS:
+        profile = api_checks.UA_PROFILES.get(profile_id)
+        if not profile:
+            continue
+        profiles.append((HEALTH_UA_PROFILE_LABELS[profile_id], profile[1]))
+    return profiles
 
 
 def header_value(headers: dict[str, Any], name: str) -> Any:
@@ -1731,16 +1813,16 @@ def health_configured_ua_label(headers: dict[str, Any], remove_headers: list[Any
     if str(x_app or "").lower() == "cli" or "claude-code/" in ua_text_lower or "claude-cli" in ua_text_lower:
         return "Claude Code"
     if ua is None:
-        return "自定义"
+        return "Default"
 
     ua_text = str(ua)
     if ua_text == "":
-        return "空UA"
+        return "Empty"
     if ua_text == "curl/8.0":
         return "Curl"
     if "Mozilla/5.0" in ua_text:
         return "Chrome"
-    return "自定义"
+    return "Custom"
 
 
 HEALTH_ENDPOINT_CANDIDATES = [
@@ -1750,6 +1832,12 @@ HEALTH_ENDPOINT_CANDIDATES = [
     ("messages", "/messages", "basic"),
 ]
 
+
+def health_endpoint_candidates(provider: dict[str, Any], model: str) -> list[tuple[str, str, str]]:
+    endpoint = provider_endpoint(provider).lower()
+    if endpoint == "/messages":
+        return [("messages", "/messages", "basic")]
+    return [item for item in HEALTH_ENDPOINT_CANDIDATES if item[1] != "/messages"]
 
 def health_result_key(provider_id: str, model: str) -> str:
     return f"{provider_id}::{model}"
@@ -1763,6 +1851,8 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
     headers = provider.get("headers") or {}
     remove_headers = provider.get("remove_headers") or []
     trust_env_proxy = api_checks.coerce_bool(provider.get("trust_env_proxy"), api_checks.DEFAULT_TRUST_ENV_PROXY)
+    auth_mode = normalize_auth_mode(provider.get("auth_mode"), str(provider.get("api_mode") or ""), str(provider.get("custom_endpoint") or ""))
+    anthropic_version = str(provider.get("anthropic_version") or "2023-06-01")
     ua_label = health_configured_ua_label(headers, remove_headers)
     started = time.time()
     result = {
@@ -1808,6 +1898,8 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
         return result
 
     profiles = health_ua_profiles() if all_ua else [(ua_label, None)]
+    if all_ua and ua_label == "Custom":
+        profiles = profiles + [("Custom", None)]
     inner_workers = api_checks.provider_inner_max_workers(name)
 
     def check_one(endpoint_label: str, endpoint: str, variant: str, ua_label: str, user_agent: Any) -> dict[str, Any]:
@@ -1822,6 +1914,8 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
             provider_headers=headers,
             remove_headers=remove_headers,
             trust_env_proxy=trust_env_proxy,
+            auth_mode=auth_mode,
+            anthropic_version=anthropic_version,
         )
         return {
             "ua": ua_label,
@@ -1837,7 +1931,7 @@ def run_provider_model_check(provider: dict[str, Any], model: str, all_ua: bool 
 
     endpoint_trace: list[dict[str, Any]] = []
     last_attempt: dict[str, Any] | None = None
-    for endpoint_label, endpoint, variant in HEALTH_ENDPOINT_CANDIDATES:
+    for endpoint_label, endpoint, variant in health_endpoint_candidates(provider, model):
         if all_ua:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(inner_workers, len(profiles)) or 1) as executor:
                 ua_results = list(executor.map(lambda item: check_one(endpoint_label, endpoint, variant, item[0], item[1]), profiles))
@@ -1979,6 +2073,9 @@ def load_status() -> dict[str, Any]:
     return read_json(STATUS_FILE, {"providers": {}, "proxies": {}, "chains": {}, "updatedAt": ""})
 
 
+DASHBOARD_PAGE_PATHS = {"/", "/dashboard.html", "/config", "/health", "/aiproxy"}
+
+
 def merge_status(kind: str, results: list[dict[str, Any]], key_name: str) -> dict[str, Any]:
     with write_lock:
         status = load_status()
@@ -2030,41 +2127,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         split = urlsplit(self.path)
+        path = split.path
+        accept = self.headers.get("Accept") or ""
+        wants_html = "text/html" in accept.lower()
         try:
-            if split.path in {"/", "/dashboard.html"}:
+            if path in {"/", "/dashboard.html"} or (path in DASHBOARD_PAGE_PATHS and wants_html):
                 self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
-            if split.path == "/api/config":
+            if path == "/config/export":
+                self.send_text(200, provider_yaml_text(load_provider_list()), "application/x-yaml; charset=utf-8")
+                return
+            if path == "/config":
                 providers = load_provider_list()
                 self.send_json(200, {"providers": providers, "publicProviders": [provider_public(p) for p in providers], "configPath": str(active_config_file()), "configFormat": active_config_file().suffix.lstrip(".")})
                 return
-            if split.path == "/api/checkins":
+            if path == "/checkins":
                 self.send_json(200, default_checkins(load_provider_list()))
                 return
-            if split.path == "/api/monitor":
+            if path == "/monitor":
                 self.send_json(200, default_monitor(load_provider_list()))
                 return
-            if split.path == "/api/status":
+            if path == "/status":
                 self.send_json(200, load_status())
                 return
-            if split.path == "/api/history":
+            if path == "/history":
                 self.send_json(200, load_history())
                 return
-            if split.path == "/api/backups":
+            if path == "/backups":
                 self.send_json(200, {"items": list_config_backups()})
                 return
-            if split.path == "/api/app-configs/preview":
+            if path == "/app-configs/preview":
                 query = parse_qs(split.query)
                 proxy_base = (query.get("proxyBase") or [current_aiproxy_proxy_base()])[0]
                 self.send_json(200, app_config_preview(load_provider_list(), proxy_base))
                 return
-            if split.path == "/api/app-configs/custom-providers":
+            if path == "/app-configs/custom-providers":
                 self.send_json(200, load_app_custom_providers())
                 return
-            if split.path == "/api/aiproxy/services":
+            if path == "/aiproxy":
                 self.send_json(200, list_aiproxy_services())
                 return
-            if split.path == "/api/proxy-config":
+            if path == "/proxy-config":
                 cfg = load_proxy_config(active_config_file())
                 self.send_json(200, {
                     "listen": cfg["listen"],
@@ -2080,14 +2183,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         split = urlsplit(self.path)
+        path = split.path
         try:
             payload = self.read_body()
-            if split.path == "/api/config":
+            if path == "/config/parse":
+                content = payload.get("content")
+                if not isinstance(content, str):
+                    raise ValueError("content must be a YAML string")
+                providers = parse_provider_yaml_text(content)
+                self.send_json(200, {"providers": providers, "warnings": provider_config_warnings(providers), "configFormat": "yaml"})
+                return
+            if path == "/config":
                 providers = payload.get("providers")
                 if not isinstance(providers, list):
                     raise ValueError("providers must be an array")
                 before_providers = load_provider_list()
-                backup, warnings = save_provider_list(providers, str(payload.get("format") or "auto"))
+                backup, warnings = save_provider_list(providers, str(payload.get("format") or "yaml"))
                 after_providers = load_provider_list()
                 try:
                     app_sync = auto_sync_app_configs(before_providers, after_providers)
@@ -2097,7 +2208,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "warnings": warnings, "appSync": app_sync, "restart": restart})
                 return
-            if split.path == "/api/checkins":
+            if path == "/checkins":
                 items = payload.get("items")
                 if not isinstance(items, list):
                     raise ValueError("items must be an array")
@@ -2106,7 +2217,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     write_json_atomic(CHECKINS_FILE, data)
                 self.send_json(200, data)
                 return
-            if split.path == "/api/checkins/confirm":
+            if path == "/checkins/confirm":
                 provider_id = str(payload.get("providerId") or "").strip()
                 if not provider_id:
                     raise ValueError("providerId is required")
@@ -2119,7 +2230,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     write_json_atomic(CHECKINS_FILE, data)
                 self.send_json(200, data)
                 return
-            if split.path == "/api/monitor":
+            if path == "/monitor":
                 proxies = payload.get("proxies")
                 chains = payload.get("chains")
                 if not isinstance(proxies, list) or not isinstance(chains, list):
@@ -2129,7 +2240,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     write_json_atomic(MONITOR_FILE, data)
                 self.send_json(200, data)
                 return
-            if split.path == "/api/health/check":
+            if path == "/health":
                 providers = provider_by_name()
                 names = payload.get("providers")
                 if names is None:
@@ -2161,13 +2272,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 status = merge_status("providers", results, "resultKey") if results else load_status()
                 self.send_json(200, {"results": results, "status": status, "allUa": all_ua})
                 return
-            if split.path == "/api/providers/models":
+            if path == "/providers/models":
                 provider = payload.get("provider")
                 if not isinstance(provider, dict):
                     raise ValueError("provider is required")
                 self.send_json(200, fetch_provider_models(provider))
                 return
-            if split.path == "/api/monitor/check":
+            if path == "/monitor/check":
                 monitor = default_monitor(load_provider_list())
                 requested_chain_ids = payload.get("chainIds")
                 chain_id_filter: set[str] | None = None
@@ -2188,16 +2299,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 status = merge_status("chains", chain_results, "chainId")
                 self.send_json(200, {"proxyResults": proxy_results, "chainResults": chain_results, "status": status, "requestedChainIds": sorted(chain_id_filter) if chain_id_filter is not None else None})
                 return
-            if split.path == "/api/backups/restore":
+            if path == "/backups/restore":
                 name = str(payload.get("name") or "").strip()
                 backup = restore_config_backup(name)
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "restart": restart})
                 return
-            if split.path == "/api/history/clear":
+            if path == "/history/clear":
                 self.send_json(200, clear_history())
                 return
-            if split.path == "/api/app-configs/sync":
+            if path == "/app-configs/sync":
                 providers = [provider for provider in load_provider_list() if api_checks.coerce_bool(provider.get("enabled"), True)]
                 proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
                 default_provider = str(payload.get("defaultProvider") or "").strip()
@@ -2210,7 +2321,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "result": result, "restart": restart})
                 return
-            if split.path == "/api/app-configs/custom-providers":
+            if path == "/app-configs/custom-providers":
                 target = str(payload.get("target") or "").strip()
                 items = payload.get("items")
                 if not isinstance(items, list):
@@ -2223,16 +2334,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("target must be codex or hermes")
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "data": load_app_custom_providers()})
                 return
-            if split.path == "/api/aiproxy/services":
+            if path == "/aiproxy":
                 item = payload.get("item")
                 if not isinstance(item, dict):
                     raise ValueError("item is required")
                 self.send_json(200, write_aiproxy_service(item))
                 return
-            if split.path == "/api/aiproxy/services/control":
+            if path == "/aiproxy/control":
                 self.send_json(200, control_aiproxy_service(str(payload.get("id") or ""), str(payload.get("action") or "")))
                 return
-            if split.path == "/api/aiproxy/services/delete":
+            if path == "/aiproxy/delete":
                 self.send_json(200, delete_aiproxy_service(str(payload.get("id") or "")))
                 return
             self.send_json(404, {"error": "not found"})
