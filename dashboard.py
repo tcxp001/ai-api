@@ -91,16 +91,45 @@ def write_json_atomic(path: Path, data: Any) -> None:
     os.replace(tmp_name, path)
 
 
-def backup_file(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    now = datetime.now()
-    backup_dir = BACKUP_DIR / now.strftime("%Y-%m-%d")
-    backup_dir.mkdir(parents=True, exist_ok=True)
+def backup_destination(path: Path, now: datetime) -> Path:
+    """Return the backup path for a file without placing app-managed backups next to it.
+
+    Project config backups stay under ``ai-api/backup`` so the dashboard backup
+    APIs can list and restore them. Codex and Hermes configs are backed up
+    under their own ``backup`` directories instead of polluting
+    ``/root/.codex`` or ``/root/.hermes`` with ``*.bak-*`` files.
+    """
+    path = Path(path)
+    backup_root = BACKUP_DIR
+    relative_parent = Path()
+
+    for source_root, target_root in (
+        (CODEX_DIR, CODEX_DIR / "backup"),
+        (HERMES_CONFIG.parent, HERMES_CONFIG.parent / "backup"),
+        (BASE_DIR, BACKUP_DIR),
+    ):
+        try:
+            relative = path.resolve().relative_to(source_root.resolve())
+        except ValueError:
+            continue
+        backup_root = target_root
+        relative_parent = relative.parent
+        break
+
+    backup_dir = backup_root / now.strftime("%Y-%m-%d") / relative_parent
     stamp = now.strftime("%Y%m%d-%H%M%S")
     backup = backup_dir / f"{path.name}.bak-{stamp}"
     if backup.exists():
         backup = backup_dir / f"{path.name}.bak-{stamp}-{now.strftime('%f')}"
+    return backup
+
+
+def backup_file(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    now = datetime.now()
+    backup = backup_destination(path, now)
+    backup.parent.mkdir(parents=True, exist_ok=True)
     backup.write_bytes(path.read_bytes())
     return backup
 
