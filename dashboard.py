@@ -35,6 +35,7 @@ CONFIG_JSON_FILE = BASE_DIR / "config.json"
 CONFIG_FILE = CONFIG_JSON_FILE if CONFIG_JSON_FILE.exists() else CONFIG_YAML_FILE
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "log"
+SETTINGS_FILE = DATA_DIR / "settings.json"
 CHECKINS_FILE = DATA_DIR / "checkins.json"
 MONITOR_FILE = DATA_DIR / "monitor.json"
 STATUS_FILE = DATA_DIR / "runtime-status.json"
@@ -62,6 +63,9 @@ DEFAULT_PUBLIC_HOST = "192.168.2.10"
 DEFAULT_PORT = 18080
 DEFAULT_DEGRADE_MS = 6000
 MAX_HISTORY_ITEMS = 500
+DEFAULT_AUTO_COMPACT_PERCENT = 70
+MIN_AUTO_COMPACT_PERCENT = 1
+MAX_AUTO_COMPACT_PERCENT = 95
 
 write_lock = threading.Lock()
 aiproxy_http_probe_lock = threading.Lock()
@@ -89,6 +93,53 @@ def write_json_atomic(path: Path, data: Any) -> None:
         tmp_name = f.name
         f.write(encoded)
     os.replace(tmp_name, path)
+
+
+def normalize_auto_compact_percent(value: Any, default: int = DEFAULT_AUTO_COMPACT_PERCENT) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        percent = int(round(float(value)))
+    except (TypeError, ValueError):
+        raise ValueError("autoCompactPercent must be a number")
+    if percent < MIN_AUTO_COMPACT_PERCENT or percent > MAX_AUTO_COMPACT_PERCENT:
+        raise ValueError(f"autoCompactPercent must be between {MIN_AUTO_COMPACT_PERCENT} and {MAX_AUTO_COMPACT_PERCENT}")
+    return percent
+
+
+def load_app_settings() -> dict[str, Any]:
+    raw = read_json(SETTINGS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    try:
+        percent = normalize_auto_compact_percent(raw.get("autoCompactPercent"))
+    except ValueError:
+        percent = DEFAULT_AUTO_COMPACT_PERCENT
+    return {"autoCompactPercent": percent}
+
+
+def save_app_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    current = load_app_settings()
+    if "autoCompactPercent" in settings:
+        current["autoCompactPercent"] = normalize_auto_compact_percent(settings.get("autoCompactPercent"))
+    write_json_atomic(SETTINGS_FILE, current)
+    return current
+
+
+def current_auto_compact_percent(value: Any = None) -> int:
+    if value is not None:
+        return normalize_auto_compact_percent(value)
+    return int(load_app_settings().get("autoCompactPercent") or DEFAULT_AUTO_COMPACT_PERCENT)
+
+
+def auto_compact_token_limit(context_window: int, percent: int) -> int:
+    try:
+        context = int(context_window)
+    except (TypeError, ValueError):
+        context = 0
+    if context <= 0:
+        context = 128000
+    return max(1, int(context * normalize_auto_compact_percent(percent) / 100))
 
 
 def backup_destination(path: Path, now: datetime) -> Path:
@@ -797,11 +848,12 @@ def cleanup_codex_profiles(active_names: set[str], stale_names: set[str] | None 
             catalog_deleted.append({"path": str(catalog_path), "backup": str(catalog_backup) if catalog_backup else ""})
     return {"deleted": deleted, "backups": backups, "catalogDeleted": catalog_deleted}
 
-def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", stale_profile_names: set[str] | None = None) -> dict[str, Any]:
+def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", stale_profile_names: set[str] | None = None, auto_compact_percent: int | None = None) -> dict[str, Any]:
     CODEX_DIR.mkdir(parents=True, exist_ok=True)
     CODEX_MODEL_CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
     backup = backup_file(CODEX_CONFIG)
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
     provider_names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
     content = strip_codex_generated_blocks(existing, provider_names, proxy_base) + generated_codex_provider_block(providers, proxy_base)
     default = next((provider for provider in providers if str(provider.get("name") or "") == default_provider), None)
@@ -819,14 +871,14 @@ def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_
             continue
         models = provider_model_names(provider)
         model_meta = model_meta_for(provider, model)
-        context = model_meta.get("context_length") or model_meta.get("max_model_len") or model_meta.get("max_tokens")
+        context = model_context_window(model_meta)
         effort = model_meta.get("reasoning_effort") or provider.get("reasoning_effort") or ""
         catalog_result = write_codex_model_catalog(provider)
         if catalog_result:
             written_catalogs.append(catalog_result)
         profile_lines = [f"model = {toml_string(model)}", f"model_provider = {toml_string(name)}"]
-        if context:
-            profile_lines.append(f'model_context_window = {int(context)}')
+        profile_lines.append(f'model_context_window = {int(context)}')
+        profile_lines.append(f'model_auto_compact_token_limit = {auto_compact_token_limit(context, compact_percent)}')
         if effort:
             profile_lines.append(f"model_reasoning_effort = {toml_string(effort)}")
         if catalog_result:
@@ -850,6 +902,7 @@ def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_
         "catalogs": written_catalogs,
         "profileBackups": profile_backups,
         "profileCleanup": profile_cleanup,
+        "autoCompactPercent": compact_percent,
     }
 
 def is_proxy_generated_provider(item: Any, proxy_base: str) -> bool:
@@ -882,7 +935,7 @@ def choose_hermes_default_provider(cfg: dict[str, Any], providers: list[dict[str
     return str(providers[0].get("name") or "").strip() if providers else ""
 
 
-def sync_app_configs_for_proxy_base(providers: list[dict[str, Any]], proxy_base: str, stale_names: set[str] | None = None) -> dict[str, Any]:
+def sync_app_configs_for_proxy_base(providers: list[dict[str, Any]], proxy_base: str, stale_names: set[str] | None = None, auto_compact_percent: int | None = None) -> dict[str, Any]:
     enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True)]
     codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
     codex_default = choose_codex_default_provider(enabled, codex_existing)
@@ -892,15 +945,17 @@ def sync_app_configs_for_proxy_base(providers: list[dict[str, Any]], proxy_base:
         if isinstance(loaded, dict):
             hermes_cfg = loaded
     hermes_default = choose_hermes_default_provider(hermes_cfg, enabled)
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
     return {
         "needed": True,
         "proxyBase": proxy_base,
-        "codex": sync_codex_config(enabled, proxy_base, codex_default, stale_names),
-        "hermes": sync_hermes_config(enabled, proxy_base, hermes_default),
+        "settings": {"autoCompactPercent": compact_percent},
+        "codex": sync_codex_config(enabled, proxy_base, codex_default, stale_names, compact_percent),
+        "hermes": sync_hermes_config(enabled, proxy_base, hermes_default, compact_percent),
     }
 
 
-def sync_hermes_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "") -> dict[str, Any]:
+def sync_hermes_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", auto_compact_percent: int | None = None) -> dict[str, Any]:
     cfg: dict[str, Any]
     if HERMES_CONFIG.exists():
         with HERMES_CONFIG.open("r", encoding="utf-8") as f:
@@ -909,6 +964,13 @@ def sync_hermes_config(providers: list[dict[str, Any]], proxy_base: str, default
         cfg = {}
     if not isinstance(cfg, dict):
         raise ValueError("Hermes config root must be an object")
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compression = cfg.get("compression")
+    if not isinstance(compression, dict):
+        compression = {}
+    compression.setdefault("enabled", True)
+    compression["threshold"] = round(compact_percent / 100, 4)
+    cfg["compression"] = compression
     backup = backup_file(HERMES_CONFIG)
     ai_names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
     existing = cfg.get("custom_providers") or []
@@ -929,7 +991,7 @@ def sync_hermes_config(providers: list[dict[str, Any]], proxy_base: str, default
         tmp_name = f.name
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
     os.replace(tmp_name, HERMES_CONFIG)
-    return {"target": str(HERMES_CONFIG), "backup": str(backup) if backup else "", "providers": len(generated), "preserved": len(preserved)}
+    return {"target": str(HERMES_CONFIG), "backup": str(backup) if backup else "", "providers": len(generated), "preserved": len(preserved), "autoCompactPercent": compact_percent, "threshold": compression["threshold"]}
 
 
 def parse_codex_chains(proxy_base: str = "http://127.0.0.1:18006") -> list[dict[str, Any]]:
@@ -1006,6 +1068,7 @@ def app_config_preview(providers: list[dict[str, Any]], proxy_base: str = "http:
     return {
         "codex": {"target": str(CODEX_CONFIG), "exists": CODEX_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "hermes": {"target": str(HERMES_CONFIG), "exists": HERMES_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
+        "settings": load_app_settings(),
         "providers": names,
         "discoveredChains": parse_codex_chains() + parse_hermes_chains(),
     }
@@ -1785,17 +1848,29 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     request_headers = api_checks.build_headers(api_key, None, headers, remove_headers, auth_mode=auth_mode, anthropic_version=anthropic_version)
     started = time.time()
     response: requests.Response | None = None
+    last_exc: Exception | None = None
     with requests.Session() as session:
         session.headers.clear()
         session.trust_env = trust_env_proxy
         for attempt in range(4):
-            response = session.get(f"{base_url}/models", headers=cloudflare_retry_headers(request_headers, attempt), timeout=(10, 25))
+            try:
+                response = session.get(f"{base_url}/models", headers=cloudflare_retry_headers(request_headers, attempt), timeout=(10, 25))
+                last_exc = None
+            except requests.exceptions.RequestException as exc:
+                last_exc = exc
+                response = None
+                if attempt < 3:
+                    time.sleep(0.6 + attempt * 0.4)
+                    continue
+                break
             if response.status_code == 200 or not is_cloudflare_challenge(response):
                 break
             time.sleep(0.6 + attempt * 0.4)
     elapsed_ms = int((time.time() - started) * 1000)
     if response is None:
-        raise ValueError("/models 请求未执行")
+        if last_exc is not None:
+            raise ValueError(f"/models {request_exception_detail(last_exc)}")
+        raise ValueError("/models 599 请求未执行")
     if response.status_code != 200:
         if is_cloudflare_challenge(response):
             raise ValueError(f"/models HTTP {response.status_code}: Cloudflare/WAF 挑战，请重试")
@@ -2100,6 +2175,22 @@ def http_error_detail(response: requests.Response) -> str:
         return f"{base}：{extra}"
     return base
 
+
+def request_exception_detail(exc: Exception, limit: int = 160) -> str:
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        prefix = "408 连接超时"
+    elif isinstance(exc, requests.exceptions.ReadTimeout):
+        prefix = "408 读超时"
+    elif isinstance(exc, requests.exceptions.Timeout):
+        prefix = "408 超时"
+    elif isinstance(exc, requests.exceptions.ConnectionError):
+        prefix = "599 连接失败"
+    else:
+        prefix = f"599 {type(exc).__name__}"
+    detail = api_checks.redact_sensitive(str(exc), limit).strip()
+    return f"{prefix}：{detail}" if detail else prefix
+
+
 def check_responses_completed_stream(url: str, payload: dict[str, Any]) -> tuple[bool, str, int | None]:
     started = time.time()
     event_name = ""
@@ -2117,12 +2208,12 @@ def check_responses_completed_stream(url: str, payload: dict[str, Any]) -> tuple
                 try:
                     body = resp.json()
                 except Exception:
-                    return False, "responses 未完成：非 SSE/非 JSON", int((time.time() - started) * 1000)
+                    return False, "200 responses 未完成：非 SSE/非 JSON", int((time.time() - started) * 1000)
                 response_status = str(body.get("status") or "") if isinstance(body, dict) else ""
                 if isinstance(body, dict) and response_status == "completed":
-                    return True, "response.completed", int((time.time() - started) * 1000)
+                    return True, "200 response.completed", int((time.time() - started) * 1000)
                 detail = response_error_message(body) or response_status or "未收到 response.completed"
-                return False, f"responses 未完成：{detail}", int((time.time() - started) * 1000)
+                return False, f"200 responses 未完成：{detail}", int((time.time() - started) * 1000)
 
             for raw_line in resp.iter_lines(decode_unicode=True):
                 if raw_line is None:
@@ -2154,20 +2245,20 @@ def check_responses_completed_stream(url: str, payload: dict[str, Any]) -> tuple
                     break
                 if item_type in {"response.failed", "response.incomplete"}:
                     detail = response_error_message(item) or item_type
-                    return False, f"responses 失败：{detail}", int((time.time() - started) * 1000)
+                    return False, f"200 responses 失败：{detail}", int((time.time() - started) * 1000)
                 detail = response_error_message(item)
                 if detail:
                     last_detail = detail
     except Exception as exc:
-        return False, api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 160), int((time.time() - started) * 1000)
+        return False, request_exception_detail(exc), int((time.time() - started) * 1000)
 
     elapsed = int((time.time() - started) * 1000)
     if completed:
-        return True, "response.completed", elapsed
+        return True, "200 response.completed", elapsed
     if not event_count:
-        return False, "responses 未完成：无流式事件", elapsed
+        return False, "200 responses 未完成：无流式事件", elapsed
     suffix = last_detail or last_event or "未收到 response.completed"
-    return False, f"responses 未完成：{suffix}", elapsed
+    return False, f"200 responses 未完成：{suffix}", elapsed
 
 
 def check_chat_completed(url: str, payload: dict[str, Any]) -> tuple[bool, str, int | None]:
@@ -2180,17 +2271,17 @@ def check_chat_completed(url: str, payload: dict[str, Any]) -> tuple[bool, str, 
         try:
             body = resp.json()
         except Exception:
-            return False, "chat 未完成：非 JSON", elapsed
+            return False, "200 chat 未完成：非 JSON", elapsed
         choices = body.get("choices") if isinstance(body, dict) else None
         if isinstance(choices, list) and choices:
             finish = str((choices[0] or {}).get("finish_reason") or "") if isinstance(choices[0], dict) else ""
             if finish and finish not in {"stop", "length"}:
-                return False, f"chat 未完成：finish_reason={finish}", elapsed
-            return True, "chat completed", elapsed
+                return False, f"200 chat 未完成：finish_reason={finish}", elapsed
+            return True, "200 chat completed", elapsed
         detail = response_error_message(body) or "缺少 choices"
-        return False, f"chat 未完成：{detail}", elapsed
+        return False, f"200 chat 未完成：{detail}", elapsed
     except Exception as exc:
-        return False, api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 160), int((time.time() - started) * 1000)
+        return False, request_exception_detail(exc), int((time.time() - started) * 1000)
 
 
 def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], prompt: str = DEFAULT_MONITOR_PROMPT) -> dict[str, Any]:
@@ -2212,7 +2303,7 @@ def check_chain(chain: dict[str, Any], proxies: dict[str, dict[str, Any]], promp
         "detail": "",
     }
     if not proxy_url or not provider_id or not model:
-        result["detail"] = "缺 proxy/provider/model"
+        result["detail"] = "400 缺 proxy/provider/model"
         return result
     prompt = str(prompt or DEFAULT_MONITOR_PROMPT).strip() or DEFAULT_MONITOR_PROMPT
     if len(prompt) > 1000:
@@ -2310,7 +2401,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/config":
                 providers = load_provider_list()
-                self.send_json(200, {"providers": providers, "publicProviders": [provider_public(p) for p in providers], "configPath": str(active_config_file()), "configFormat": active_config_file().suffix.lstrip(".")})
+                self.send_json(200, {"providers": providers, "publicProviders": [provider_public(p) for p in providers], "configPath": str(active_config_file()), "configFormat": active_config_file().suffix.lstrip("."), "settings": load_app_settings()})
                 return
             if path == "/checkins":
                 self.send_json(200, default_checkins(load_provider_list()))
@@ -2479,16 +2570,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/history/clear":
                 self.send_json(200, clear_history())
                 return
+            if path == "/app-configs/compact-percent":
+                percent = normalize_auto_compact_percent(payload.get("autoCompactPercent"))
+                settings = save_app_settings({"autoCompactPercent": percent})
+                providers = [provider for provider in load_provider_list() if api_checks.coerce_bool(provider.get("enabled"), True)]
+                proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
+                codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
+                codex_default = choose_codex_default_provider(providers, codex_existing)
+                hermes_cfg = load_hermes_config_data() if HERMES_CONFIG.exists() else {}
+                hermes_default = choose_hermes_default_provider(hermes_cfg, providers)
+                result = {
+                    "proxyBase": proxy_base,
+                    "settings": settings,
+                    "codex": sync_codex_config(providers, proxy_base, codex_default, auto_compact_percent=percent),
+                    "hermes": sync_hermes_config(providers, proxy_base, hermes_default, percent),
+                }
+                self.send_json(200, {"ok": True, "settings": settings, "result": result})
+                return
             if path == "/app-configs/sync":
                 providers = [provider for provider in load_provider_list() if api_checks.coerce_bool(provider.get("enabled"), True)]
                 proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
                 default_provider = str(payload.get("defaultProvider") or "").strip()
                 targets = payload.get("targets") or ["codex", "hermes"]
-                result: dict[str, Any] = {"proxyBase": proxy_base}
+                compact_percent = current_auto_compact_percent()
+                result: dict[str, Any] = {"proxyBase": proxy_base, "settings": {"autoCompactPercent": compact_percent}}
                 if "codex" in targets:
-                    result["codex"] = sync_codex_config(providers, proxy_base, default_provider)
+                    result["codex"] = sync_codex_config(providers, proxy_base, default_provider, auto_compact_percent=compact_percent)
                 if "hermes" in targets:
-                    result["hermes"] = sync_hermes_config(providers, proxy_base, default_provider)
+                    result["hermes"] = sync_hermes_config(providers, proxy_base, default_provider, compact_percent)
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "result": result, "restart": restart})
                 return

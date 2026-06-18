@@ -147,6 +147,7 @@
     .pending { border-color: rgba(37,99,235,.28); background: rgba(37,99,235,.08); color: #2563eb; }
     .muted { border-color: rgba(102,114,123,.25); background: rgba(102,114,123,.08); color: var(--muted); }
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(460px, 520px); gap: 14px; align-items: start; }
+    .editor-stack { display: grid; gap: 14px; align-content: start; min-width: 0; }
     .editor { display: grid; gap: 12px; min-width: 0; overflow: hidden; }
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
@@ -161,7 +162,7 @@
     .save-result-row strong { flex: 0 0 96px; color: #344047; }
     .save-result-row span { min-width: 0; overflow-wrap: anywhere; }
     .mini-table { display: grid; gap: 8px; min-width: 0; }
-    .mini-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 104px 32px; gap: 6px; align-items: center; min-width: 0; }
+    .mini-row { display: grid; grid-template-columns: minmax(0, 1fr) 122px 104px 32px; gap: 6px; align-items: center; min-width: 0; }
     .header-row { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) 32px; }
     .mini-row > * { min-width: 0; }
     .mini-row button { min-height: 34px; padding: 0; }
@@ -180,6 +181,10 @@
     .service-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; justify-self: end; flex-wrap: wrap; }
     .service-actions button { flex: 0 0 auto; min-height: 30px; padding: 0 8px; font-size: 12px; }
     .aiproxy-editor { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; }
+    .settings-card { display: grid; gap: 10px; }
+    .settings-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+    .setting-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .setting-row button { white-space: nowrap; }
     .aiproxy-editor-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
     .aiproxy-editor .actions { justify-content: flex-end; }
     .service-log { max-height: 180px; overflow: auto; }
@@ -192,8 +197,9 @@
       .stats { grid-template-columns: 1fr; }
       .span-3, .span-4, .span-6, .span-8, .span-12 { grid-column: 1 / -1; }
       .actions button { flex: 1 1 auto; }
-      .mini-row { grid-template-columns: minmax(0, 1fr) 82px 92px 30px; }
+      .mini-row { grid-template-columns: minmax(0, 1fr) 108px 92px 30px; }
       .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
+      .setting-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -240,11 +246,25 @@
           </div>
           <div id="saveResult" hidden></div>
         </section>
-        <aside class="panel editor">
-          <div>
-            <h2 id="providerEditorTitle" hidden></h2>
-          </div>
-          <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
+        <aside class="editor-stack">
+          <section class="panel settings-card">
+            <div class="settings-card-head">
+              <div>
+                <h2>全局上下文压缩</h2>
+                <div class="subtle">Hermes 使用百分比；Codex 按每个 profile 的上下文换算 token 阈值。</div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="field"><label for="autoCompactPercent">压缩阈值 (%)</label><input id="autoCompactPercent" type="number" min="1" max="95" step="1" value="70"></div>
+              <button id="saveCompactPercentBtn" type="button">保存比例</button>
+            </div>
+            <div id="autoCompactSaveState" class="subtle"></div>
+          </section>
+          <section class="panel editor">
+            <div>
+              <h2 id="providerEditorTitle" hidden></h2>
+            </div>
+            <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
           <div class="field"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
@@ -269,9 +289,10 @@
             <div id="modelChoices" class="model-picker" hidden></div>
             <div id="modelRows" class="mini-table"></div>
           </div>
-          <div class="actions">
-            <button id="applyProviderBtn" class="primary" type="button">保存</button>
-          </div>
+            <div class="actions">
+              <button id="applyProviderBtn" class="primary" type="button">保存</button>
+            </div>
+          </section>
         </aside>
       </div>
     </section>
@@ -368,6 +389,7 @@
       healthSelection: null,
       appSync: {},
       customProviders: { codex: { items: [] }, hermes: { items: [] } },
+      settings: { autoCompactPercent: 70 },
       aiproxy: { items: [] },
       configPath: 'config.yaml',
       fetchedModels: [],
@@ -512,6 +534,7 @@
         api('/aiproxy').catch(err => ({ items: [], error: err.message }))
       ]);
       state.providers = config.providers || [];
+      state.settings = config.settings || { autoCompactPercent: 70 };
       state.configPath = config.configPath || 'config.yaml';
       sortProvidersByEnabled();
       state.monitor = monitor;
@@ -527,10 +550,73 @@
     }
 
     function render() {
+      renderCompactSettings();
       renderProviders();
       renderHealth();
       renderMonitor();
       renderAiproxy();
+    }
+
+    function autoCompactPercentValue(value = state.settings?.autoCompactPercent) {
+      const percent = Math.round(Number(value || 70));
+      if (!Number.isFinite(percent)) return 70;
+      return Math.min(Math.max(percent, 1), 95);
+    }
+
+    function renderCompactSettings() {
+      const percent = autoCompactPercentValue();
+      const input = $('autoCompactPercent');
+      if (input && document.activeElement !== input) input.value = percent;
+    }
+
+    function setCompactSaveState(text = '') {
+      const el = $('autoCompactSaveState');
+      if (!el) return;
+      el.textContent = text;
+    }
+
+    function markCompactPercentDirty() {
+      const input = $('autoCompactPercent');
+      if (!input) return;
+      const raw = Number(input.value || 70);
+      if (!Number.isFinite(raw)) {
+        setCompactSaveState('请输入数字');
+        return;
+      }
+      const value = Math.round(raw);
+      const current = autoCompactPercentValue();
+      setCompactSaveState(value === current ? '' : '未保存');
+    }
+
+    function collectAutoCompactPercent() {
+      const input = $('autoCompactPercent');
+      const raw = Number(input?.value || 70);
+      if (!Number.isFinite(raw)) throw new Error('压缩阈值必须是数字');
+      const percent = Math.round(raw);
+      if (percent < 1 || percent > 95) throw new Error('压缩阈值必须在 1-95% 之间');
+      return percent;
+    }
+
+    async function saveCompactPercent() {
+      const percent = collectAutoCompactPercent();
+      const btn = $('saveCompactPercentBtn');
+      if (btn) btn.disabled = true;
+      const originalText = btn?.textContent || '';
+      try {
+        if (btn) btn.textContent = '保存中...';
+        setCompactSaveState('保存中...');
+        $('serverState').textContent = `正在保存上下文压缩比例 ${percent}%...`;
+        const data = await api('/app-configs/compact-percent', { method: 'POST', body: JSON.stringify({ autoCompactPercent: percent }) });
+        state.settings = data.settings || { autoCompactPercent: percent };
+        renderCompactSettings();
+        setCompactSaveState('已同步到 Hermes/Codex');
+        $('serverState').textContent = `上下文压缩比例已保存：${autoCompactPercentValue(state.settings.autoCompactPercent)}%`;
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = originalText || '保存比例';
+        }
+      }
     }
 
     function compactProviderForPersist(provider) {
@@ -693,6 +779,8 @@
       if (appSync.needed === false) return `无需同步（${appSync.reason || '配置未变化'}，${appSync.proxyBase || ''}）`;
       const parts = [];
       if (appSync.proxyBase) parts.push(`代理地址 ${appSync.proxyBase}`);
+      const compactPercent = appSync.settings?.autoCompactPercent || appSync.codex?.autoCompactPercent || appSync.hermes?.autoCompactPercent;
+      if (compactPercent) parts.push(`上下文压缩 ${compactPercent}%`);
       if (appSync.codex) parts.push(`Codex ${appSync.codex.providers ?? 0} 个 provider，profiles ${(appSync.codex.profiles || []).length} 个，备份 ${appSync.codex.backup ? '已创建' : '无'}`);
       if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers ?? 0} 个 provider，备份 ${appSync.hermes.backup ? '已创建' : '无'}`);
       return parts.join('；') || '已同步';
@@ -1591,6 +1679,8 @@
           URL.revokeObjectURL(a.href);
         } else if (target.id === 'importConfigBtn') {
           $('importConfigFile').click();
+        } else if (target.id === 'saveCompactPercentBtn') {
+          await saveCompactPercent();
         } else if (target.id === 'selectAllHealthBtn') {
           setHealthSelection(true);
         } else if (target.id === 'clearAllHealthBtn') {
@@ -1627,6 +1717,7 @@
 
     $('headerPreset').addEventListener('change', updateCustomUaInput);
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
+    $('autoCompactPercent').addEventListener('input', markCompactPercentDirty);
 
     const chainProviderSelect = $('chainProvider');
     if (chainProviderSelect) {
