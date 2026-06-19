@@ -2,7 +2,7 @@
 
 本地公益服 Provider 管理与 AIProxy 工具。
 
-用途：维护多个上游 API Provider，并通过本地固定入口给 Codex / Hermes 使用。
+用途：维护多个上游 API Provider，并通过本地固定入口给 Codex 使用。
 
 ## 文件
 

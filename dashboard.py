@@ -44,7 +44,6 @@ DASHBOARD_HTML = BASE_DIR / "dashboard.html"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
 CODEX_DIR = Path("/root/.codex")
 CODEX_MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
-HERMES_CONFIG = Path("/root/.hermes/config.yaml")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 AIPROXY_SERVICE_PREFIX = "ai-api-proxy-"
 AIPROXY_SYSTEMD_SERVICES = ("aiproxy.service",)
@@ -146,9 +145,9 @@ def backup_destination(path: Path, now: datetime) -> Path:
     """Return the backup path for a file without placing app-managed backups next to it.
 
     Project config backups stay under ``ai-api/backup`` so the dashboard backup
-    APIs can list and restore them. Codex and Hermes configs are backed up
-    under their own ``backup`` directories instead of polluting
-    ``/root/.codex`` or ``/root/.hermes`` with ``*.bak-*`` files.
+    APIs can list and restore them. Codex configs are backed up under their
+    own ``backup`` directory instead of polluting ``/root/.codex`` with
+    ``*.bak-*`` files.
     """
     path = Path(path)
     backup_root = BACKUP_DIR
@@ -156,7 +155,6 @@ def backup_destination(path: Path, now: datetime) -> Path:
 
     for source_root, target_root in (
         (CODEX_DIR, CODEX_DIR / "backup"),
-        (HERMES_CONFIG.parent, HERMES_CONFIG.parent / "backup"),
         (BASE_DIR, BACKUP_DIR),
     ):
         try:
@@ -459,7 +457,7 @@ def provider_config_warnings(providers: list[dict[str, Any]]) -> list[str]:
             warnings.append(f"{name}: api_key 为空；仅在上游不需要鉴权时可忽略")
         models = provider.get("models") or {}
         if not isinstance(models, dict) or not models:
-            warnings.append(f"{name}: models 为空；Codex/Hermes 可能无法选择模型")
+            warnings.append(f"{name}: models 为空；Codex 可能无法选择模型")
     return warnings
 
 
@@ -913,85 +911,19 @@ def is_proxy_generated_provider(item: Any, proxy_base: str) -> bool:
     return bool(proxy_prefix and base_url.startswith(proxy_prefix) and base_url.endswith("/v1"))
 
 
-def hermes_custom_provider(provider: dict[str, Any], proxy_base: str) -> dict[str, Any]:
-    name = str(provider.get("name") or "").strip()
-    item: dict[str, Any] = {
-        "name": name,
-        "base_url": proxy_provider_url(name, proxy_base),
-        "api_mode": provider_api_mode(provider),
-    }
-    models = provider.get("models")
-    if models:
-        item["models"] = models
-    return item
-
-
-def choose_hermes_default_provider(cfg: dict[str, Any], providers: list[dict[str, Any]]) -> str:
-    names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
-    model = cfg.get("model") if isinstance(cfg, dict) else {}
-    current = str((model or {}).get("provider") or "") if isinstance(model, dict) else ""
-    if current in names:
-        return current
-    return str(providers[0].get("name") or "").strip() if providers else ""
-
 
 def sync_app_configs_for_proxy_base(providers: list[dict[str, Any]], proxy_base: str, stale_names: set[str] | None = None, auto_compact_percent: int | None = None) -> dict[str, Any]:
     enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True)]
     codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
     codex_default = choose_codex_default_provider(enabled, codex_existing)
-    hermes_cfg: dict[str, Any] = {}
-    if HERMES_CONFIG.exists():
-        loaded = yaml.safe_load(HERMES_CONFIG.read_text(encoding="utf-8")) or {}
-        if isinstance(loaded, dict):
-            hermes_cfg = loaded
-    hermes_default = choose_hermes_default_provider(hermes_cfg, enabled)
     compact_percent = current_auto_compact_percent(auto_compact_percent)
     return {
         "needed": True,
         "proxyBase": proxy_base,
         "settings": {"autoCompactPercent": compact_percent},
         "codex": sync_codex_config(enabled, proxy_base, codex_default, stale_names, compact_percent),
-        "hermes": sync_hermes_config(enabled, proxy_base, hermes_default, compact_percent),
     }
 
-
-def sync_hermes_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", auto_compact_percent: int | None = None) -> dict[str, Any]:
-    cfg: dict[str, Any]
-    if HERMES_CONFIG.exists():
-        with HERMES_CONFIG.open("r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    else:
-        cfg = {}
-    if not isinstance(cfg, dict):
-        raise ValueError("Hermes config root must be an object")
-    compact_percent = current_auto_compact_percent(auto_compact_percent)
-    compression = cfg.get("compression")
-    if not isinstance(compression, dict):
-        compression = {}
-    compression.setdefault("enabled", True)
-    compression["threshold"] = round(compact_percent / 100, 4)
-    cfg["compression"] = compression
-    backup = backup_file(HERMES_CONFIG)
-    ai_names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
-    existing = cfg.get("custom_providers") or []
-    if not isinstance(existing, list):
-        existing = []
-    preserved = [item for item in existing if not (isinstance(item, dict) and (str(item.get("name") or "") in ai_names or is_proxy_generated_provider(item, proxy_base)))]
-    generated = [hermes_custom_provider(provider, proxy_base) for provider in providers if str(provider.get("name") or "").strip()]
-    cfg["custom_providers"] = preserved + generated
-    if default_provider:
-        cfg.setdefault("model", {})
-        if isinstance(cfg["model"], dict):
-            cfg["model"]["provider"] = default_provider
-            provider = next((p for p in providers if str(p.get("name")) == default_provider), None)
-            if provider and first_model(provider):
-                cfg["model"]["default"] = first_model(provider)
-    HERMES_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=HERMES_CONFIG.parent, delete=False) as f:
-        tmp_name = f.name
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
-    os.replace(tmp_name, HERMES_CONFIG)
-    return {"target": str(HERMES_CONFIG), "backup": str(backup) if backup else "", "providers": len(generated), "preserved": len(preserved), "autoCompactPercent": compact_percent, "threshold": compression["threshold"]}
 
 
 def parse_codex_chains(proxy_base: str = "http://127.0.0.1:18006") -> list[dict[str, Any]]:
@@ -1026,36 +958,11 @@ def parse_codex_chains(proxy_base: str = "http://127.0.0.1:18006") -> list[dict[
     return chains
 
 
-def parse_hermes_chains() -> list[dict[str, Any]]:
-    if not HERMES_CONFIG.exists():
-        return []
-    with HERMES_CONFIG.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    chains = []
-    for item in cfg.get("custom_providers") or []:
-        if not isinstance(item, dict):
-            continue
-        base_url = str(item.get("base_url") or "")
-        match = re.search(r"/([^/]+)/v1/?$", base_url.rstrip("/"))
-        if not match:
-            continue
-        provider_id = match.group(1)
-        chains.append({
-            "id": f"hermes-{provider_id}",
-            "name": f"Hermes -> {provider_id}",
-            "client": "hermes",
-            "proxyId": "local-18006",
-            "providerId": provider_id,
-            "model": "",
-            "enabled": True,
-        })
-    return chains
-
 
 def merge_discovered_chains(configured: list[dict[str, Any]], providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     provider_lookup = {str(p.get("name")): p for p in providers}
     merged = {str(chain.get("id")): dict(chain) for chain in configured if chain.get("id")}
-    for chain in parse_codex_chains() + parse_hermes_chains():
+    for chain in parse_codex_chains():
         provider = provider_lookup.get(str(chain.get("providerId")))
         if provider:
             chain["model"] = first_model(provider)
@@ -1067,10 +974,9 @@ def app_config_preview(providers: list[dict[str, Any]], proxy_base: str = "http:
     names = [str(provider.get("name") or "").strip() for provider in providers if provider.get("name")]
     return {
         "codex": {"target": str(CODEX_CONFIG), "exists": CODEX_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
-        "hermes": {"target": str(HERMES_CONFIG), "exists": HERMES_CONFIG.exists(), "providers": len(names), "proxyBase": proxy_base},
         "settings": load_app_settings(),
         "providers": names,
-        "discoveredChains": parse_codex_chains() + parse_hermes_chains(),
+        "discoveredChains": parse_codex_chains(),
     }
 
 
@@ -1105,12 +1011,6 @@ def app_configs_need_proxy_sync(providers: list[dict[str, Any]], proxy_base: str
     try:
         codex_items = {str(item.get("name") or "").strip(): str(item.get("base_url") or "").rstrip("/") for item in load_codex_custom_providers()}
         if any(codex_items.get(name) != url.rstrip("/") for name, url in expected.items()):
-            return True
-    except Exception:
-        return True
-    try:
-        hermes_items = {str(item.get("name") or "").strip(): str(item.get("base_url") or "").rstrip("/") for item in load_hermes_custom_providers()}
-        if any(hermes_items.get(name) != url.rstrip("/") for name, url in expected.items()):
             return True
     except Exception:
         return True
@@ -1149,33 +1049,6 @@ def load_codex_custom_providers() -> list[dict[str, Any]]:
     return providers
 
 
-def load_hermes_config_data() -> dict[str, Any]:
-    if not HERMES_CONFIG.exists():
-        return {}
-    with HERMES_CONFIG.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    if not isinstance(cfg, dict):
-        raise ValueError("Hermes config root must be an object")
-    return cfg
-
-
-def load_hermes_custom_providers() -> list[dict[str, Any]]:
-    cfg = load_hermes_config_data()
-    items = cfg.get("custom_providers") or []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def save_hermes_custom_providers(items: list[dict[str, Any]]) -> Path | None:
-    cfg = load_hermes_config_data()
-    backup = backup_file(HERMES_CONFIG)
-    cfg["custom_providers"] = items
-    HERMES_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=HERMES_CONFIG.parent, delete=False) as f:
-        tmp_name = f.name
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
-    os.replace(tmp_name, HERMES_CONFIG)
-    return backup
-
 
 def save_codex_custom_providers(items: list[dict[str, Any]]) -> Path | None:
     existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
@@ -1201,7 +1074,6 @@ def save_codex_custom_providers(items: list[dict[str, Any]]) -> Path | None:
 def load_app_custom_providers() -> dict[str, Any]:
     return {
         "codex": {"target": str(CODEX_CONFIG), "items": load_codex_custom_providers()},
-        "hermes": {"target": str(HERMES_CONFIG), "items": load_hermes_custom_providers()},
     }
 
 
@@ -2466,7 +2338,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     app_sync = auto_sync_app_configs(before_providers, after_providers)
                 except Exception as exc:
                     app_sync = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
-                    warnings.append(f"Codex/Hermes 同步失败：{app_sync['error']}")
+                    warnings.append(f"Codex 同步失败：{app_sync['error']}")
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "warnings": warnings, "appSync": app_sync, "restart": restart})
                 return
@@ -2577,13 +2449,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
                 codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
                 codex_default = choose_codex_default_provider(providers, codex_existing)
-                hermes_cfg = load_hermes_config_data() if HERMES_CONFIG.exists() else {}
-                hermes_default = choose_hermes_default_provider(hermes_cfg, providers)
                 result = {
                     "proxyBase": proxy_base,
                     "settings": settings,
                     "codex": sync_codex_config(providers, proxy_base, codex_default, auto_compact_percent=percent),
-                    "hermes": sync_hermes_config(providers, proxy_base, hermes_default, percent),
                 }
                 self.send_json(200, {"ok": True, "settings": settings, "result": result})
                 return
@@ -2591,13 +2460,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 providers = [provider for provider in load_provider_list() if api_checks.coerce_bool(provider.get("enabled"), True)]
                 proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
                 default_provider = str(payload.get("defaultProvider") or "").strip()
-                targets = payload.get("targets") or ["codex", "hermes"]
+                targets = payload.get("targets") or ["codex"]
+                if not isinstance(targets, list):
+                    raise ValueError("targets must be an array")
+                unsupported_targets = [str(target) for target in targets if str(target) != "codex"]
+                if unsupported_targets:
+                    raise ValueError("target must be codex")
                 compact_percent = current_auto_compact_percent()
                 result: dict[str, Any] = {"proxyBase": proxy_base, "settings": {"autoCompactPercent": compact_percent}}
                 if "codex" in targets:
                     result["codex"] = sync_codex_config(providers, proxy_base, default_provider, auto_compact_percent=compact_percent)
-                if "hermes" in targets:
-                    result["hermes"] = sync_hermes_config(providers, proxy_base, default_provider, compact_percent)
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "result": result, "restart": restart})
                 return
@@ -2608,10 +2480,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("items must be an array")
                 if target == "codex":
                     backup = save_codex_custom_providers(items)
-                elif target == "hermes":
-                    backup = save_hermes_custom_providers(items)
                 else:
-                    raise ValueError("target must be codex or hermes")
+                    raise ValueError("target must be codex")
                 self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "data": load_app_custom_providers()})
                 return
             if path == "/aiproxy":

@@ -251,7 +251,7 @@
             <div class="settings-card-head">
               <div>
                 <h2>全局上下文压缩</h2>
-                <div class="subtle">Hermes 使用百分比；Codex 按每个 profile 的上下文换算 token 阈值。</div>
+                <div class="subtle">Codex 按每个 profile 的上下文换算 token 阈值。</div>
               </div>
             </div>
             <div class="setting-row">
@@ -388,7 +388,7 @@
       healthRun: null,
       healthSelection: null,
       appSync: {},
-      customProviders: { codex: { items: [] }, hermes: { items: [] } },
+      customProviders: { codex: { items: [] } },
       settings: { autoCompactPercent: 70 },
       aiproxy: { items: [] },
       configPath: 'config.yaml',
@@ -609,7 +609,7 @@
         const data = await api('/app-configs/compact-percent', { method: 'POST', body: JSON.stringify({ autoCompactPercent: percent }) });
         state.settings = data.settings || { autoCompactPercent: percent };
         renderCompactSettings();
-        setCompactSaveState('已同步到 Hermes/Codex');
+        setCompactSaveState('已同步到 Codex');
         $('serverState').textContent = `上下文压缩比例已保存：${autoCompactPercentValue(state.settings.autoCompactPercent)}%`;
       } finally {
         if (btn) {
@@ -779,10 +779,9 @@
       if (appSync.needed === false) return `无需同步（${appSync.reason || '配置未变化'}，${appSync.proxyBase || ''}）`;
       const parts = [];
       if (appSync.proxyBase) parts.push(`代理地址 ${appSync.proxyBase}`);
-      const compactPercent = appSync.settings?.autoCompactPercent || appSync.codex?.autoCompactPercent || appSync.hermes?.autoCompactPercent;
+      const compactPercent = appSync.settings?.autoCompactPercent || appSync.codex?.autoCompactPercent;
       if (compactPercent) parts.push(`上下文压缩 ${compactPercent}%`);
       if (appSync.codex) parts.push(`Codex ${appSync.codex.providers ?? 0} 个 provider，profiles ${(appSync.codex.profiles || []).length} 个，备份 ${appSync.codex.backup ? '已创建' : '无'}`);
-      if (appSync.hermes) parts.push(`Hermes ${appSync.hermes.providers ?? 0} 个 provider，备份 ${appSync.hermes.backup ? '已创建' : '无'}`);
       return parts.join('；') || '已同步';
     }
 

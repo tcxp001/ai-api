@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Multi-provider OpenAI-compatible header injection proxy.
 
-Hermes can point custom providers at local URLs such as:
+Clients can point custom providers at local URLs such as:
 
     http://127.0.0.1:18006/provider-a/v1
 
@@ -73,10 +73,9 @@ def normalize_auth_mode(value: Any, api_mode: str, custom_endpoint: str = "") ->
 
 DEFAULT_POOL_MAXSIZE = 20
 DEFAULT_CONNECT_TIMEOUT = 30
-# Hermes' codex stream stale detector kills local requests after ~120s without
+# Some client stream stale detectors kill local requests after ~120s without
 # stream bytes. Keep the proxy read timeout slightly lower so the proxy closes
-# upstream sockets first, instead of letting Hermes disconnect and leaving long
-# lived broken streams behind.
+# upstream sockets first instead of leaving long-lived broken streams behind.
 DEFAULT_READ_TIMEOUT = 115
 TRANSPORT_RETRY_EXCEPTIONS = (
     requests.exceptions.ConnectionError,
@@ -244,7 +243,7 @@ def should_discard_upstream_response(resp: Any) -> bool:
 
     Provider gateways often close or poison keep-alive sockets after 5xx/Cloudflare
     errors. Reusing those sessions causes repeated RemoteDisconnected,
-    InvalidChunkLength, CLOSE-WAIT, and BrokenPipe errors in later Hermes turns.
+    InvalidChunkLength, CLOSE-WAIT, and BrokenPipe errors in later client turns.
     """
     try:
         status = int(getattr(resp, "status_code", 0) or 0)
@@ -1191,7 +1190,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Multi-provider header injection proxy for Hermes/OpenAI-compatible APIs")
+    parser = argparse.ArgumentParser(description="Multi-provider header injection proxy for OpenAI-compatible APIs")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to YAML/JSON config")
     parser.add_argument("--listen", help="Override listen host")
     parser.add_argument("--port", type=int, help="Override listen port")
@@ -1224,7 +1223,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    print(f"Hermes header proxy listening on http://{cfg['listen']}:{cfg['port']} verbose={cfg.get('verbose', False)}")
+    print(f"Header proxy listening on http://{cfg['listen']}:{cfg['port']} verbose={cfg.get('verbose', False)}")
     print("providers:")
     for name, provider in sorted(cfg["providers"].items()):
         h = {k: redact_header(k, v) for k, v in provider["headers"].items()}
