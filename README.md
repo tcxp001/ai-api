@@ -44,9 +44,11 @@ cp config.example.yaml config.yaml
 
 常用 `api_mode`：
 
-- `codex_responses`：OpenAI `/responses`
-- `chat_completions`：OpenAI `/chat/completions`
-- `messages`：Anthropic `/messages`
+- `codex_responses`：上游原生支持 OpenAI `/responses`。
+- `chat_completions`：上游只支持 OpenAI `/chat/completions`；当 Codex 调用本地 `/responses` 时，代理会自动转换请求/响应，并支持 Responses 工具调用 ↔ Chat `tool_calls`，包含流式 `response.function_call_arguments.*` 事件。
+- `messages`：上游为 Anthropic `/messages`。
+
+因此可给 Codex 配置多个本地入口，例如 `http://127.0.0.1:18006/DS/v1`、`http://127.0.0.1:18006/bohe/v1`，每个 provider 独立选择自己的 `api_mode`，不需要像单全局 provider 那样切换。
 
 ## 启动管理台
 
@@ -77,6 +79,15 @@ http://127.0.0.1:18006/{provider}/v1
 ```text
 http://127.0.0.1:18006/provider-a/v1
 ```
+
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+当前回归测试覆盖 Codex `/responses` ↔ Chat `/chat/completions` 的工具调用转换、命名空间工具恢复、流式 `tool_calls` SSE 转换，以及 `/responses` 流式 fallback 到 `/chat/completions`。
 
 ## 目录约定
 
