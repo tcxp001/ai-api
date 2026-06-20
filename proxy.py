@@ -361,6 +361,147 @@ def canonicalize_tool_arguments(value: Any) -> str:
     return canonical_json_string(value)
 
 
+def is_openai_o_series(model: str) -> bool:
+    model = str(model or "")
+    return len(model) > 1 and model[0] == "o" and model[1].isdigit()
+
+
+def supports_reasoning_effort(model: str) -> bool:
+    model = str(model or "").lower()
+    if is_openai_o_series(model):
+        return True
+    if model.startswith("gpt-"):
+        rest = model[4:]
+        return bool(rest and rest[0].isdigit() and rest[0] >= "5")
+    return False
+
+
+def _extract_reasoning_detail_part_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value if value else None
+    if not isinstance(value, dict):
+        return None
+    for key in ("text", "content", "summary"):
+        text = value.get(key)
+        if isinstance(text, str) and text:
+            return text
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        joined = "\n\n".join(
+            part
+            for part in (_extract_reasoning_detail_part_text(item) for item in parts)
+            if part
+        )
+        return joined or None
+    return None
+
+
+def _extract_reasoning_details_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value if value else None
+    if isinstance(value, list):
+        joined = "\n\n".join(
+            part
+            for part in (_extract_reasoning_detail_part_text(item) for item in value)
+            if part
+        )
+        return joined or None
+    if isinstance(value, dict):
+        return _extract_reasoning_detail_part_text(value)
+    return None
+
+
+def extract_reasoning_field_text(value: Any) -> str | None:
+    """Best-effort extraction for OpenAI-compatible reasoning fields."""
+    if not isinstance(value, dict):
+        return None
+    for key in ("reasoning_content", "reasoning"):
+        text = value.get(key)
+        if isinstance(text, str) and text:
+            return text
+    reasoning = value.get("reasoning")
+    if isinstance(reasoning, dict):
+        for key in ("content", "text", "summary"):
+            text = reasoning.get(key)
+            if isinstance(text, str) and text:
+                return text
+    details = value.get("reasoning_details")
+    if details is not None:
+        return _extract_reasoning_details_text(details)
+    return None
+
+
+def extract_reasoning_summary_text(value: Any) -> str | None:
+    """Extract Responses reasoning item summary text."""
+    if not isinstance(value, dict):
+        return None
+    for key in ("reasoning_content", "content", "text"):
+        text = value.get(key)
+        if isinstance(text, str) and text:
+            return text
+    summary = value.get("summary")
+    if isinstance(summary, str):
+        return summary if summary else None
+    if isinstance(summary, list):
+        parts: list[str] = []
+        for part in summary:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("content")
+                if text:
+                    parts.append(str(text))
+            elif isinstance(part, str) and part:
+                parts.append(part)
+        joined = "\n\n".join(parts)
+        return joined or None
+    return None
+
+
+def append_reasoning_content(message: dict[str, Any], reasoning: str | None) -> bool:
+    reasoning = str(reasoning or "").strip()
+    if not reasoning:
+        return False
+    existing = message.get("reasoning_content")
+    if isinstance(existing, str) and existing.strip():
+        message["reasoning_content"] = existing + "\n\n" + reasoning
+    else:
+        message["reasoning_content"] = reasoning
+    return True
+
+
+def attach_reasoning_content_field(item: dict[str, Any], reasoning: str | None) -> None:
+    reasoning = str(reasoning or "").strip()
+    if reasoning:
+        item["reasoning_content"] = reasoning
+
+
+THINK_OPEN_TAG = "<think>"
+THINK_CLOSE_TAG = "</think>"
+
+
+def split_leading_think_block(text: str) -> tuple[str, str] | None:
+    """Split a leading <think>...</think> block into (reasoning, answer)."""
+    text = str(text or "")
+    leading_ws_len = len(text) - len(text.lstrip())
+    after_ws = text[leading_ws_len:]
+    if not after_ws.startswith(THINK_OPEN_TAG):
+        return None
+    body_start = leading_ws_len + len(THINK_OPEN_TAG)
+    close_start = text.find(THINK_CLOSE_TAG, body_start)
+    if close_start < 0:
+        return None
+    answer_start = close_start + len(THINK_CLOSE_TAG)
+    return text[body_start:close_start].strip(), text[answer_start:].lstrip()
+
+
+def strip_leading_think_open_tag(text: str) -> str | None:
+    text = str(text or "")
+    leading_ws_len = len(text) - len(text.lstrip())
+    after_ws = text[leading_ws_len:]
+    if after_ws.startswith(THINK_OPEN_TAG):
+        return after_ws[len(THINK_OPEN_TAG):].strip()
+    return None
+
+
 def short_sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
@@ -572,9 +713,9 @@ def build_codex_tool_context_from_request(body_json: dict[str, Any]) -> dict[str
 def responses_content_to_chat(content: Any) -> Any:
     """Normalize Responses API message content for Chat Completions providers.
 
-    Codex/Responses commonly sends text parts as {"type": "input_text", ...}.
-    Prefer plain strings for text-only content, and only keep a content-part
-    list when non-text parts (for example images) are present.
+    Text-only content is collapsed to a plain string. Multimodal parts are
+    translated to OpenAI Chat content parts, preserving images, files and audio
+    instead of forwarding Responses-only type names.
     """
 
     def normalize_part(part: Any) -> tuple[Any | None, str | None, bool]:
@@ -589,12 +730,31 @@ def responses_content_to_chat(content: Any) -> Any:
             text = "" if part.get("text") is None else str(part.get("text"))
             return {"type": "text", "text": text}, text, True
 
+        if part_type == "refusal":
+            text = "" if part.get("refusal") is None else str(part.get("refusal"))
+            return {"type": "text", "text": text}, text, True
+
         if part_type == "input_image":
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
                 return {"type": "image_url", "image_url": image_url}, None, False
             if image_url:
                 return {"type": "image_url", "image_url": {"url": str(image_url)}}, None, False
+            return None, None, False
+
+        if part_type == "input_file":
+            file_obj: dict[str, Any] = {}
+            for key in ("file_id", "file_data", "filename"):
+                if part.get(key) is not None:
+                    file_obj[key] = part.get(key)
+            if file_obj and ("file_id" in file_obj or "file_data" in file_obj):
+                return {"type": "file", "file": file_obj}, None, False
+            return None, None, False
+
+        if part_type == "input_audio":
+            input_audio = part.get("input_audio")
+            if input_audio is not None:
+                return {"type": "input_audio", "input_audio": input_audio}, None, False
             return None, None, False
 
         # Unknown Responses-only blocks are more likely to break chat providers
@@ -614,7 +774,7 @@ def responses_content_to_chat(content: Any) -> Any:
             if not is_text:
                 all_text = False
         if all_text:
-            return "".join(text_parts)
+            return "\n".join(text_parts)
         return parts if parts else ""
 
     if isinstance(content, dict):
@@ -697,46 +857,125 @@ def responses_tool_output_to_chat_content(item: dict[str, Any]) -> str:
 
 def append_responses_input_as_chat_messages(input_value: Any, messages: list[dict[str, Any]], tool_context: dict[str, Any] | None) -> None:
     pending_tool_calls: list[dict[str, Any]] = []
+    pending_reasoning: list[str] = []
+    last_assistant_index: int | None = None
+
+    def append_pending_reasoning(reasoning: str | None, unique: bool = False) -> None:
+        reasoning = str(reasoning or "").strip()
+        if not reasoning:
+            return
+        if unique and any(reasoning in existing for existing in pending_reasoning):
+            return
+        pending_reasoning.append(reasoning)
+
+    def take_pending_reasoning() -> str:
+        text = "\n\n".join(part for part in pending_reasoning if str(part).strip()).strip()
+        pending_reasoning.clear()
+        return text
+
+    def attach_pending_reasoning_to_assistant(message: dict[str, Any]) -> None:
+        reasoning = take_pending_reasoning()
+        if reasoning:
+            append_reasoning_content(message, reasoning)
+
+    def attach_reasoning_to_last_assistant(reasoning: str | None) -> bool:
+        reasoning = str(reasoning or "").strip()
+        if not reasoning:
+            return True
+        if last_assistant_index is None:
+            return False
+        if not (0 <= last_assistant_index < len(messages)):
+            return False
+        message = messages[last_assistant_index]
+        if message.get("role") != "assistant":
+            return False
+        return append_reasoning_content(message, reasoning)
+
+    def update_last_assistant_index(message: dict[str, Any]) -> None:
+        nonlocal last_assistant_index
+        role = message.get("role")
+        if role == "assistant":
+            last_assistant_index = len(messages)
+        elif role == "tool":
+            # Tool results belong to the preceding assistant tool-call turn; keep
+            # the assistant index so a trailing reasoning item can still backfill.
+            pass
+        else:
+            last_assistant_index = None
+
+    def ensure_tool_call_reasoning_content(message: dict[str, Any]) -> None:
+        if message.get("role") != "assistant":
+            return
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return
+        existing = message.get("reasoning_content")
+        if not (isinstance(existing, str) and existing.strip()):
+            message["reasoning_content"] = "tool call"
 
     def flush_pending_tool_calls() -> None:
+        nonlocal last_assistant_index
         if not pending_tool_calls:
             return
-        messages.append({"role": "assistant", "content": None, "tool_calls": list(pending_tool_calls)})
+        message = {"role": "assistant", "content": None, "tool_calls": list(pending_tool_calls)}
+        attach_pending_reasoning_to_assistant(message)
+        last_assistant_index = len(messages)
+        messages.append(message)
         pending_tool_calls.clear()
+
+    def append_message(message: dict[str, Any]) -> None:
+        if message.get("role") == "assistant":
+            attach_pending_reasoning_to_assistant(message)
+        elif pending_reasoning:
+            # Reasoning items are assistant-side state. A user/system turn starts
+            # a new segment, so do not leak stale reasoning across roles.
+            pending_reasoning.clear()
+        update_last_assistant_index(message)
+        messages.append(message)
 
     def append_item(item: Any) -> None:
         if not isinstance(item, dict):
             flush_pending_tool_calls()
-            messages.append({"role": "user", "content": responses_content_to_chat(item)})
+            append_message({"role": "user", "content": responses_content_to_chat(item)})
             return
 
         item_type = str(item.get("type") or "")
         if item_type == "function_call":
+            append_pending_reasoning(extract_reasoning_field_text(item), unique=True)
             pending_tool_calls.append(responses_function_call_to_chat_tool_call(item, tool_context))
             return
         if item_type == "custom_tool_call":
+            append_pending_reasoning(extract_reasoning_field_text(item), unique=True)
             pending_tool_calls.append(responses_custom_tool_call_to_chat_tool_call(item))
             return
         if item_type == "tool_search_call":
+            append_pending_reasoning(extract_reasoning_field_text(item), unique=True)
             pending_tool_calls.append(responses_tool_search_call_to_chat_tool_call(item))
             return
         if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
             flush_pending_tool_calls()
             call_id = str(item.get("call_id") or item.get("id") or "")
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": responses_tool_output_to_chat_content(item)})
+            message = {"role": "tool", "tool_call_id": call_id, "content": responses_tool_output_to_chat_content(item)}
+            update_last_assistant_index(message)
+            messages.append(message)
             return
         if item_type == "reasoning":
-            # Chat-only upstreams cannot consume Responses reasoning items as
-            # first-class blocks. Drop them instead of creating invalid roles.
+            reasoning = extract_reasoning_summary_text(item)
+            attached_to_previous = not pending_tool_calls and attach_reasoning_to_last_assistant(reasoning)
+            if not attached_to_previous:
+                append_pending_reasoning(reasoning)
             return
 
         flush_pending_tool_calls()
         if item_type in {"input_text", "input_image", "input_file", "input_audio"}:
             role = responses_role_to_chat_role(str(item.get("role") or "user"))
-            messages.append({"role": role, "content": responses_content_to_chat([item])})
+            append_message({"role": role, "content": responses_content_to_chat([item])})
             return
         if item.get("role") is not None or item.get("content") is not None:
-            messages.append(responses_input_item_to_chat_message(item))
+            message = responses_input_item_to_chat_message(item)
+            if message.get("role") == "assistant":
+                append_pending_reasoning(extract_reasoning_field_text(item))
+            append_message(message)
 
     if isinstance(input_value, list):
         for input_item in input_value:
@@ -744,6 +983,34 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
     elif input_value is not None:
         append_item(input_value)
     flush_pending_tool_calls()
+    for message in messages:
+        ensure_tool_call_reasoning_content(message)
+
+
+def collapse_chat_system_messages_to_head(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    system_chunks: list[str] = []
+    rest: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") != "system":
+            rest.append(message)
+            continue
+        content = message.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = "\n".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("text") is not None
+            )
+        if text.strip():
+            system_chunks.append(text)
+        elif content not in (None, "", []):
+            rest.append(message)
+    if not system_chunks:
+        return rest
+    return [{"role": "system", "content": "\n\n".join(system_chunks)}] + rest
 
 
 def instruction_text(value: Any) -> str:
@@ -805,9 +1072,13 @@ def responses_payload_to_chat(body_json: dict[str, Any], tool_context: dict[str,
     if tool_context is None:
         tool_context = build_codex_tool_context_from_request(body_json)
 
+    model_name = str(body_json.get("model") or "")
     chat: dict[str, Any] = {"model": body_json.get("model")}
     if body_json.get("max_output_tokens") is not None:
-        chat["max_tokens"] = body_json.get("max_output_tokens")
+        if is_openai_o_series(model_name):
+            chat["max_completion_tokens"] = body_json.get("max_output_tokens")
+        else:
+            chat["max_tokens"] = body_json.get("max_output_tokens")
     elif body_json.get("max_tokens") is not None:
         chat["max_tokens"] = body_json.get("max_tokens")
     if body_json.get("max_completion_tokens") is not None:
@@ -820,6 +1091,13 @@ def responses_payload_to_chat(body_json: dict[str, Any], tool_context: dict[str,
         if key in body_json and key not in chat:
             chat[key] = body_json.get(key)
 
+    reasoning = body_json.get("reasoning") if isinstance(body_json.get("reasoning"), dict) else None
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if isinstance(effort, str) and effort.strip() and supports_reasoning_effort(model_name):
+        normalized_effort = effort.strip()
+        if normalized_effort.lower() not in {"none", "off", "disabled"}:
+            chat["reasoning_effort"] = normalized_effort
+
     messages: list[dict[str, Any]] = []
     instructions = instruction_text(body_json.get("instructions")) if body_json.get("instructions") is not None else ""
     if instructions:
@@ -827,6 +1105,7 @@ def responses_payload_to_chat(body_json: dict[str, Any], tool_context: dict[str,
 
     if "input" in body_json:
         append_responses_input_as_chat_messages(body_json.get("input"), messages, tool_context)
+    messages = collapse_chat_system_messages_to_head(messages)
     if not messages:
         messages.append({"role": "user", "content": ""})
     chat["messages"] = messages
@@ -855,46 +1134,372 @@ def normalize_anthropic_content(value: Any) -> Any:
     return str(value or "")
 
 
-def responses_payload_to_anthropic_messages(body_json: dict[str, Any]) -> dict[str, Any]:
+def normalize_anthropic_input_schema(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    normalized = dict(schema)
+    if normalized.get("type") == "object" and not isinstance(normalized.get("properties"), dict):
+        normalized["properties"] = {}
+    return normalized
+
+
+def anthropic_image_source_from_responses_image_url(image_url: Any) -> dict[str, Any] | None:
+    if isinstance(image_url, dict):
+        url = image_url.get("url") or image_url.get("image_url")
+    else:
+        url = image_url
+    url = str(url or "").strip()
+    if not url:
+        return None
+    if url.startswith("data:"):
+        # data:<media_type>;base64,<data>
+        try:
+            meta, data = url[5:].split(",", 1)
+            media_type, encoding = meta.split(";", 1)
+        except ValueError:
+            return None
+        if encoding.lower() != "base64" or not media_type or not data:
+            return None
+        return {"type": "base64", "media_type": media_type, "data": data}
+    if url.startswith(("http://", "https://")):
+        # Newer Anthropic-compatible gateways may accept URL image sources.
+        # Keeping this as a source block is more useful than silently dropping it.
+        return {"type": "url", "url": url}
+    return None
+
+
+def responses_content_to_anthropic_blocks(content: Any, *, assistant: bool = False) -> list[dict[str, Any]]:
+    """Convert Responses message content to Anthropic content blocks."""
+
+    def convert_part(part: Any) -> list[dict[str, Any]]:
+        if isinstance(part, str):
+            return [{"type": "text", "text": part}]
+        if not isinstance(part, dict):
+            return [{"type": "text", "text": str(part)}]
+
+        part_type = str(part.get("type") or "").strip()
+        if part_type in {"input_text", "output_text", "text"} or "text" in part:
+            return [{"type": "text", "text": "" if part.get("text") is None else str(part.get("text"))}]
+
+        if not assistant and part_type == "input_image":
+            source = anthropic_image_source_from_responses_image_url(part.get("image_url") or part.get("url"))
+            return [{"type": "image", "source": source}] if source else []
+
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    if isinstance(content, list):
+        for part in content:
+            blocks.extend(convert_part(part))
+    else:
+        blocks.extend(convert_part(content))
+    return blocks
+
+
+def anthropic_blocks_to_content_value(blocks: list[dict[str, Any]]) -> Any:
+    if not blocks:
+        return ""
+    return blocks
+
+
+def anthropic_content_value_to_blocks(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [dict(value)]
+    if value is None:
+        return []
+    return [{"type": "text", "text": str(value)}]
+
+
+def append_anthropic_message(messages: list[dict[str, Any]], role: str, content: Any) -> None:
+    role = role if role in {"user", "assistant"} else "user"
+    if messages and messages[-1].get("role") == role:
+        combined = anthropic_content_value_to_blocks(messages[-1].get("content"))
+        combined.extend(anthropic_content_value_to_blocks(content))
+        messages[-1]["content"] = anthropic_blocks_to_content_value(combined)
+        return
+    messages.append({"role": role, "content": content})
+
+
+def responses_content_to_system_text(content: Any) -> str:
+    blocks = responses_content_to_anthropic_blocks(content)
+    return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text" and block.get("text") is not None)
+
+
+def parse_tool_arguments_object_or_wrapped(arguments: Any) -> dict[str, Any]:
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return {}
+        try:
+            parsed = json.loads(arguments)
+            if isinstance(parsed, dict):
+                return parsed
+            return {"input": parsed}
+        except Exception:
+            return {"input": arguments}
+    return {"input": arguments}
+
+
+def responses_tool_output_to_anthropic_content(item: dict[str, Any]) -> str:
+    output = item.get("output") if "output" in item else item.get("content")
+    if output is None:
+        return "(empty)"
+    if isinstance(output, str):
+        return output if output else "(empty)"
+    return canonical_json_string(output)
+
+
+def responses_function_tool_to_anthropic_tool(tool: dict[str, Any], name: str) -> dict[str, Any] | None:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    description = function.get("description") if function else tool.get("description")
+    parameters = function.get("parameters") if function else tool.get("parameters")
+    return {
+        "name": name,
+        "description": "" if description is None else str(description),
+        "input_schema": normalize_anthropic_input_schema(parameters),
+    }
+
+
+def responses_custom_tool_to_anthropic_tool(tool: Any) -> dict[str, Any] | None:
+    name = responses_tool_name(tool)
+    if not name:
+        return None
+    return {
+        "name": name,
+        "description": responses_custom_tool_description(tool),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                CUSTOM_TOOL_INPUT_FIELD: {
+                    "type": "string",
+                    "description": CUSTOM_TOOL_INPUT_DESCRIPTION,
+                }
+            },
+            "required": [CUSTOM_TOOL_INPUT_FIELD],
+        },
+    }
+
+
+def responses_tool_search_to_anthropic_tool() -> dict[str, Any]:
+    return {
+        "name": TOOL_SEARCH_PROXY_NAME,
+        "description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query for tools or connectors to load."},
+                "limit": {"type": "integer", "description": "Maximum number of tool groups to return."},
+            },
+            "required": ["query"],
+        },
+    }
+
+
+def responses_tools_to_anthropic_tools(tools: Any, tool_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(tool: dict[str, Any] | None) -> None:
+        if not isinstance(tool, dict):
+            return
+        name = str(tool.get("name") or "").strip()
+        if not name or name in seen:
+            return
+        seen.add(name)
+        out.append(tool)
+
+    if not isinstance(tools, list):
+        return out
+    for tool in tools:
+        if isinstance(tool, str):
+            add(responses_custom_tool_to_anthropic_tool({"type": "custom", "name": tool}))
+            continue
+        if not isinstance(tool, dict):
+            continue
+        tool_type = str(tool.get("type") or "")
+        if tool_type == "function":
+            name = responses_tool_name(tool)
+            if name:
+                add(responses_function_tool_to_anthropic_tool(tool, name))
+        elif tool_type == "namespace":
+            namespace = str(tool.get("name") or "").strip()
+            children = tool.get("tools") if isinstance(tool.get("tools"), list) else tool.get("children")
+            if namespace and isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict) and child.get("type") == "function":
+                        child_name = responses_tool_name(child)
+                        if child_name:
+                            add(responses_function_tool_to_anthropic_tool(child, chat_name_for_response_function(tool_context, child_name, namespace)))
+        elif tool_type == "custom":
+            add(responses_custom_tool_to_anthropic_tool(tool))
+        elif tool_type == "tool_search":
+            add(responses_tool_search_to_anthropic_tool())
+        elif tool_type in {"web_search", "web_search_preview", "web_search_20250305", "google_search"}:
+            add({"type": "web_search_20250305", "name": "web_search"})
+    return out
+
+
+def responses_tool_choice_to_anthropic(tool_choice: Any, tool_context: dict[str, Any] | None = None) -> Any:
+    if isinstance(tool_choice, str):
+        if tool_choice == "required":
+            return {"type": "any"}
+        if tool_choice in {"auto", "none"}:
+            return {"type": tool_choice}
+        return tool_choice
+    if isinstance(tool_choice, dict):
+        tool_type = str(tool_choice.get("type") or "")
+        if tool_type == "function":
+            name = str(tool_choice.get("name") or "")
+            namespace = str(tool_choice.get("namespace") or "") or None
+            if not name and isinstance(tool_choice.get("function"), dict):
+                name = str(tool_choice["function"].get("name") or "")
+            if name:
+                return {"type": "tool", "name": chat_name_for_response_function(tool_context, name, namespace)}
+        if tool_type == "custom":
+            name = str(tool_choice.get("name") or "")
+            if name:
+                return {"type": "tool", "name": name}
+        if tool_type == "tool_search":
+            return {"type": "tool", "name": TOOL_SEARCH_PROXY_NAME}
+    return tool_choice
+
+
+def responses_stop_to_anthropic_stop_sequences(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value] if value else None
+    if isinstance(value, list):
+        stops = [str(item) for item in value if str(item)]
+        return stops or None
+    return [str(value)] if str(value) else None
+
+
+def anthropic_thinking_from_responses_reasoning(reasoning: Any, max_tokens: int) -> dict[str, Any] | None:
+    if not isinstance(reasoning, dict):
+        return None
+    effort = str(reasoning.get("effort") or "").strip().lower()
+    if not effort or effort == "low" or max_tokens <= 1024:
+        return None
+    default_budget = {"medium": 4096, "high": 10240, "xhigh": 32768, "max": 32768}.get(effort, 4096)
+    budget = min(default_budget, max(1024, max_tokens // 2))
+    if budget >= max_tokens:
+        return None
+    return {"type": "enabled", "budget_tokens": budget}
+
+
+def responses_payload_to_anthropic_messages(body_json: dict[str, Any], tool_context: dict[str, Any] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"model": body_json.get("model")}
     if body_json.get("max_output_tokens") is not None:
         payload["max_tokens"] = body_json.get("max_output_tokens")
     elif body_json.get("max_tokens") is not None:
         payload["max_tokens"] = body_json.get("max_tokens")
     else:
-        payload["max_tokens"] = 1024
+        payload["max_tokens"] = 8192
 
-    for key in ("stream", "temperature", "top_p", "stop"):
+    for key in ("stream", "temperature", "top_p"):
         if key in body_json:
             payload[key] = body_json.get(key)
+    stop_sequences = responses_stop_to_anthropic_stop_sequences(body_json.get("stop"))
+    if stop_sequences:
+        payload["stop_sequences"] = stop_sequences
+    if isinstance(body_json.get("metadata"), dict):
+        payload["metadata"] = body_json.get("metadata")
 
     system_parts: list[str] = []
     instructions = body_json.get("instructions")
     if instructions:
-        system_parts.append(str(instructions))
+        system_parts.append(instruction_text(instructions))
 
     messages: list[dict[str, Any]] = []
     input_value = body_json.get("input")
+
+    def append_input_item(item: Any) -> None:
+        if not isinstance(item, dict):
+            append_anthropic_message(messages, "user", anthropic_blocks_to_content_value(responses_content_to_anthropic_blocks(item)))
+            return
+
+        item_type = str(item.get("type") or "")
+        role = responses_role_to_chat_role(str(item.get("role") or "user"))
+        if role == "system":
+            text = responses_content_to_system_text(item.get("content", ""))
+            if text:
+                system_parts.append(text)
+            return
+
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or item.get("id") or "call_0")
+            name = str(item.get("name") or "")
+            namespace = str(item.get("namespace") or "") or None
+            append_anthropic_message(messages, "assistant", [{
+                "type": "tool_use",
+                "id": call_id,
+                "name": chat_name_for_response_function(tool_context, name, namespace),
+                "input": parse_tool_arguments_object_or_wrapped(item.get("arguments")),
+            }])
+            return
+        if item_type == "custom_tool_call":
+            call_id = str(item.get("call_id") or item.get("id") or "call_0")
+            append_anthropic_message(messages, "assistant", [{
+                "type": "tool_use",
+                "id": call_id,
+                "name": str(item.get("name") or ""),
+                "input": {CUSTOM_TOOL_INPUT_FIELD: str(item.get("input") or "")},
+            }])
+            return
+        if item_type == "tool_search_call":
+            call_id = str(item.get("call_id") or item.get("id") or "call_0")
+            append_anthropic_message(messages, "assistant", [{
+                "type": "tool_use",
+                "id": call_id,
+                "name": TOOL_SEARCH_PROXY_NAME,
+                "input": parse_tool_arguments_object_or_wrapped(item.get("arguments")),
+            }])
+            return
+        if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            append_anthropic_message(messages, "user", [{
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": responses_tool_output_to_anthropic_content(item),
+            }])
+            return
+        if item_type == "reasoning":
+            return
+
+        if item_type in {"input_text", "input_image", "input_file", "input_audio"}:
+            append_anthropic_message(messages, role if role in {"user", "assistant"} else "user", anthropic_blocks_to_content_value(responses_content_to_anthropic_blocks([item], assistant=(role == "assistant"))))
+            return
+
+        content = item.get("content", item)
+        append_anthropic_message(messages, role if role in {"user", "assistant"} else "user", anthropic_blocks_to_content_value(responses_content_to_anthropic_blocks(content, assistant=(role == "assistant"))))
+
     if isinstance(input_value, list):
         for item in input_value:
-            message = responses_input_item_to_chat_message(item)
-            role = str(message.get("role") or "user")
-            content = message.get("content", "")
-            if role == "system":
-                if content:
-                    system_parts.append(str(content))
-                continue
-            if role not in {"user", "assistant"}:
-                role = "user"
-            messages.append({"role": role, "content": normalize_anthropic_content(content)})
+            append_input_item(item)
     elif input_value is not None:
-        messages.append({"role": "user", "content": normalize_anthropic_content(responses_content_to_chat(input_value))})
+        append_input_item(input_value)
     else:
         messages.append({"role": "user", "content": ""})
 
     if system_parts:
-        payload["system"] = "\n\n".join(system_parts)
+        payload["system"] = "\n\n".join(part for part in system_parts if part)
     payload["messages"] = messages or [{"role": "user", "content": ""}]
+
+    anthropic_tools = responses_tools_to_anthropic_tools(body_json.get("tools"), tool_context)
+    if anthropic_tools:
+        payload["tools"] = anthropic_tools
+    if "tool_choice" in body_json and anthropic_tools:
+        payload["tool_choice"] = responses_tool_choice_to_anthropic(body_json.get("tool_choice"), tool_context)
+    max_tokens_for_thinking = _coerce_positive_int(payload.get("max_tokens")) or 0
+    thinking = anthropic_thinking_from_responses_reasoning(body_json.get("reasoning"), max_tokens_for_thinking)
+    if thinking:
+        payload["thinking"] = thinking
     return {k: v for k, v in payload.items() if v is not None}
 
 
@@ -933,21 +1538,154 @@ def normalize_anthropic_messages_payload(body_json: dict[str, Any]) -> dict[str,
     return {k: v for k, v in payload.items() if v is not None}
 
 
-def anthropic_payload_text(payload: dict[str, Any]) -> str:
-    content = payload.get("content")
-    if isinstance(content, str):
-        return content
+def anthropic_content_blocks_from_value(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, dict):
-                if part.get("type") in {"text", "output_text"} or "text" in part:
-                    parts.append(str(part.get("text") or ""))
-            elif part is not None:
-                parts.append(str(part))
-        return "".join(parts)
-    return ""
+        return [item for item in content if isinstance(item, dict)]
+    if isinstance(content, dict):
+        return [content]
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if content is None:
+        return []
+    return [{"type": "text", "text": str(content)}]
 
+
+def anthropic_payload_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for block in anthropic_content_blocks_from_value(payload.get("content")):
+        if block.get("type") in {"text", "output_text"} or "text" in block:
+            parts.append(str(block.get("text") or ""))
+    return "".join(parts)
+
+
+def default_error_type_for_status(status: int) -> str:
+    if status in {400, 422}:
+        return "invalid_request_error"
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 404:
+        return "not_found_error"
+    if status == 408:
+        return "timeout_error"
+    if status == 409:
+        return "conflict_error"
+    if status == 429:
+        return "rate_limit_error"
+    if status >= 500:
+        return "upstream_error"
+    return "upstream_error"
+
+
+def strip_html_error_text(text: str) -> str:
+    text = str(text or "")
+    if "<" not in text or ">" not in text:
+        return text
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _error_field(value: Any, *keys: str) -> Any:
+    if not isinstance(value, dict):
+        return None
+    for key in keys:
+        if value.get(key) is not None:
+            return value.get(key)
+    return None
+
+
+def extract_error_object_from_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = _error_field(error, "message", "detail", "error")
+            error_type = _error_field(error, "type", "status")
+            code = _error_field(error, "code")
+            param = _error_field(error, "param")
+            return {
+                "message": str(message or ""),
+                "type": str(error_type or "") if error_type is not None else "",
+                "code": code,
+                "param": param,
+            }
+        message = _error_field(payload, "message", "detail", "error")
+        error_type = _error_field(payload, "type", "status")
+        code = _error_field(payload, "code")
+        param = _error_field(payload, "param")
+        if message is not None or error_type is not None or code is not None:
+            return {
+                "message": str(message or ""),
+                "type": str(error_type or "") if error_type is not None else "",
+                "code": code,
+                "param": param,
+            }
+    if isinstance(payload, str):
+        return {"message": payload, "type": "", "code": None, "param": None}
+    return {"message": "", "type": "", "code": None, "param": None}
+
+
+def extract_error_from_sse_text(text: str) -> dict[str, Any] | None:
+    data_parts: list[str] = []
+    for line in str(text or "").splitlines():
+        if line.startswith("data:"):
+            data = line[5:].strip()
+            if data and data != "[DONE]":
+                data_parts.append(data)
+    for data in data_parts:
+        try:
+            parsed = json.loads(data)
+        except Exception:
+            continue
+        extracted = extract_error_object_from_payload(parsed)
+        if extracted.get("message") or extracted.get("type") or extracted.get("code") is not None:
+            return extracted
+    return None
+
+
+def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "") -> dict[str, Any]:
+    status = int(getattr(resp, "status_code", 0) or 0)
+    raw_text = ""
+    try:
+        raw_text = resp.text
+    except Exception:
+        try:
+            raw_text = resp.content.decode("utf-8", errors="replace")
+        except Exception:
+            raw_text = ""
+
+    extracted: dict[str, Any] | None = None
+    content_type = str(resp.headers.get("Content-Type") or "").lower()
+    if "text/event-stream" in content_type or "data:" in raw_text[:200]:
+        extracted = extract_error_from_sse_text(raw_text)
+
+    if extracted is None:
+        try:
+            extracted = extract_error_object_from_payload(resp.json())
+        except Exception:
+            extracted = extract_error_object_from_payload(strip_html_error_text(raw_text))
+
+    message = str((extracted or {}).get("message") or "").strip()
+    if not message:
+        message = str(getattr(resp, "reason", "") or "").strip() or f"HTTP {status}"
+    message = compact_body(strip_html_error_text(message), limit=2000)
+    source = upstream_route_path or "upstream"
+    if not message.lower().startswith("upstream "):
+        message = f"upstream {source} returned {status}: {message}"
+
+    error_type = str((extracted or {}).get("type") or "").strip() or default_error_type_for_status(status)
+    code = (extracted or {}).get("code")
+    if code is None:
+        code = "upstream_error"
+    param = (extracted or {}).get("param")
+    return {
+        "message": message,
+        "type": error_type,
+        "param": param,
+        "code": code,
+    }
 
 
 def chat_usage_to_responses_usage(usage: Any) -> Any:
@@ -956,6 +1694,8 @@ def chat_usage_to_responses_usage(usage: Any) -> Any:
     input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
     completion_details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
     reasoning_tokens = int(
@@ -964,21 +1704,111 @@ def chat_usage_to_responses_usage(usage: Any) -> Any:
         or usage.get("reasoning_tokens")
         or 0
     )
-    return {
+    cached_tokens = int(
+        input_details.get("cached_tokens")
+        or prompt_details.get("cached_tokens")
+        or usage.get("cache_read_input_tokens")
+        or usage.get("cached_tokens")
+        or 0
+    )
+    result: dict[str, Any] = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
     }
+    if cached_tokens:
+        result["input_tokens_details"] = {"cached_tokens": cached_tokens}
+    return result
+
+
+def anthropic_stop_reason_to_responses_status(stop_reason: Any) -> str:
+    if stop_reason == "max_tokens":
+        return "incomplete"
+    return "completed"
 
 
 def messages_payload_to_responses(payload: dict[str, Any], model: str = "", tool_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(payload.get("choices"), list):
         return chat_payload_to_responses(payload, model=model, tool_context=tool_context)
+
     response_id = str(payload.get("id") or f"resp_{int(time.time() * 1000)}")
     response_model = model or str(payload.get("model") or "")
+    created_at = int(payload.get("created_at") or payload.get("created") or time.time())
+    status = anthropic_stop_reason_to_responses_status(payload.get("stop_reason"))
     usage = chat_usage_to_responses_usage(payload.get("usage"))
-    return response_payload_from_text(response_id, response_model, anthropic_payload_text(payload), usage)
+
+    output: list[dict[str, Any]] = []
+    output_text_parts: list[str] = []
+    pending_message_parts: list[dict[str, Any]] = []
+    message_index = 0
+
+    def flush_message() -> None:
+        nonlocal message_index, pending_message_parts
+        if not pending_message_parts:
+            return
+        output.append({
+            "id": f"msg_{message_index}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": list(pending_message_parts),
+        })
+        message_index += 1
+        pending_message_parts = []
+
+    for block in anthropic_content_blocks_from_value(payload.get("content")):
+        block_type = str(block.get("type") or "")
+        if block_type in {"text", "output_text"} or "text" in block:
+            text = str(block.get("text") or "")
+            pending_message_parts.append({"type": "output_text", "text": text, "annotations": []})
+            output_text_parts.append(text)
+            continue
+        if block_type == "thinking":
+            flush_message()
+            thinking = str(block.get("thinking") or block.get("text") or "")
+            if thinking:
+                output.append({
+                    "id": f"rs_{len(output)}",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": thinking}],
+                })
+            continue
+        if block_type == "tool_use":
+            flush_message()
+            call_id = str(block.get("id") or f"call_{len(output)}")
+            name = str(block.get("name") or "")
+            arguments = canonicalize_tool_arguments(block.get("input"))
+            item_id = response_tool_call_item_id_from_chat_name(call_id, name, tool_context)
+            item = response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context)
+            output.append(item)
+            continue
+
+    flush_message()
+    output_text = "".join(output_text_parts)
+    if not output:
+        output.append({
+            "id": "msg_0",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "", "annotations": []}],
+        })
+
+    response: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": status,
+        "model": response_model,
+        "output_text": output_text,
+        "output": output,
+        "usage": usage,
+    }
+    if status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return response
 
 
 def chat_payload_choice(chat_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1034,14 +1864,40 @@ def response_payload_from_text(response_id: str, model: str, text: str, usage: A
     }
 
 
+def chat_reasoning_text(message: dict[str, Any]) -> str | None:
+    reasoning = extract_reasoning_field_text(message)
+    if reasoning:
+        return reasoning
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        split = split_leading_think_block(content)
+        if split and split[0]:
+            return split[0]
+    return None
+
+
+def chat_reasoning_to_response_output_item(reasoning: str | None, response_id: str) -> dict[str, Any] | None:
+    reasoning = str(reasoning or "").strip()
+    if not reasoning:
+        return None
+    return {
+        "id": f"rs_{response_id}",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": reasoning}],
+    }
+
+
 def chat_message_to_response_output_item(message: dict[str, Any], item_id: str = "msg_0") -> tuple[dict[str, Any] | None, str]:
     content = message.get("content", "") if isinstance(message, dict) else ""
     response_parts: list[dict[str, Any]] = []
     text_parts: list[str] = []
     if isinstance(content, str):
-        if content:
-            response_parts.append({"type": "output_text", "text": content, "annotations": []})
-            text_parts.append(content)
+        split = split_leading_think_block(content)
+        text_content = split[1] if split else content
+        if text_content:
+            response_parts.append({"type": "output_text", "text": text_content, "annotations": []})
+            text_parts.append(text_content)
     elif isinstance(content, list):
         for part in content:
             if isinstance(part, dict):
@@ -1126,10 +1982,11 @@ def response_tool_call_item_from_chat_name(
     chat_name: str,
     arguments: str,
     tool_context: dict[str, Any] | None = None,
+    reasoning: str | None = None,
 ) -> dict[str, Any]:
     spec = tool_context_lookup(tool_context, chat_name)
     if spec and spec.get("kind") == "custom":
-        return {
+        item = {
             "id": item_id,
             "type": "custom_tool_call",
             "status": status,
@@ -1137,14 +1994,18 @@ def response_tool_call_item_from_chat_name(
             "name": str(spec.get("name") or chat_name),
             "input": custom_tool_input_from_chat_arguments(arguments),
         }
+        attach_reasoning_content_field(item, reasoning)
+        return item
     if spec and spec.get("kind") == "tool_search":
-        return {
+        item = {
             "type": "tool_search_call",
             "call_id": call_id,
             "status": status,
             "execution": "client",
             "arguments": parse_tool_arguments_object(arguments),
         }
+        attach_reasoning_content_field(item, reasoning)
+        return item
     item = {
         "id": item_id,
         "type": "function_call",
@@ -1156,6 +2017,7 @@ def response_tool_call_item_from_chat_name(
     namespace = str((spec or {}).get("namespace") or "")
     if namespace:
         item["namespace"] = namespace
+    attach_reasoning_content_field(item, reasoning)
     return item
 
 
@@ -1164,6 +2026,7 @@ def chat_tool_call_to_response_item(
     index: int,
     tool_context: dict[str, Any] | None = None,
     status: str = "completed",
+    reasoning: str | None = None,
 ) -> dict[str, Any] | None:
     call_id = str(tool_call.get("id") or f"call_{index}")
     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
@@ -1172,12 +2035,13 @@ def chat_tool_call_to_response_item(
         return None
     arguments = canonicalize_tool_arguments(function.get("arguments"))
     item_id = response_tool_call_item_id_from_chat_name(call_id, chat_name, tool_context)
-    return response_tool_call_item_from_chat_name(item_id, status, call_id, chat_name, arguments, tool_context)
+    return response_tool_call_item_from_chat_name(item_id, status, call_id, chat_name, arguments, tool_context, reasoning=reasoning)
 
 
 def chat_legacy_function_call_to_response_item(
     function_call: dict[str, Any],
     tool_context: dict[str, Any] | None = None,
+    reasoning: str | None = None,
 ) -> dict[str, Any] | None:
     name = str(function_call.get("name") or "")
     if not name:
@@ -1185,7 +2049,7 @@ def chat_legacy_function_call_to_response_item(
     call_id = str(function_call.get("id") or "call_0")
     arguments = canonicalize_tool_arguments(function_call.get("arguments"))
     item_id = response_tool_call_item_id_from_chat_name(call_id, name, tool_context)
-    return response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context)
+    return response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context, reasoning=reasoning)
 
 
 def chat_payload_to_responses(
@@ -1202,6 +2066,11 @@ def chat_payload_to_responses(
     status = response_status_from_finish_reason(finish_reason)
 
     output: list[dict[str, Any]] = []
+    reasoning = chat_reasoning_text(message)
+    reasoning_item = chat_reasoning_to_response_output_item(reasoning, response_id)
+    if reasoning_item is not None:
+        output.append(reasoning_item)
+
     message_item, output_text = chat_message_to_response_output_item(message, item_id="msg_0")
     if message_item is not None:
         output.append(message_item)
@@ -1211,11 +2080,21 @@ def chat_payload_to_responses(
         for index, tool_call in enumerate(tool_calls):
             if not isinstance(tool_call, dict):
                 continue
-            item = chat_tool_call_to_response_item(tool_call, index, tool_context=tool_context, status="completed")
+            item = chat_tool_call_to_response_item(
+                tool_call,
+                index,
+                tool_context=tool_context,
+                status="completed",
+                reasoning=reasoning,
+            )
             if item is not None:
                 output.append(item)
     elif isinstance(message, dict) and isinstance(message.get("function_call"), dict):
-        item = chat_legacy_function_call_to_response_item(message["function_call"], tool_context=tool_context)
+        item = chat_legacy_function_call_to_response_item(
+            message["function_call"],
+            tool_context=tool_context,
+            reasoning=reasoning,
+        )
         if item is not None:
             output.append(item)
 
@@ -1398,6 +2277,30 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
+    def _send_responses_error_stream(self, status: int, error: dict[str, Any], model: str = "") -> None:
+        self._send_response_stream_headers(status)
+        if self.command == "HEAD":
+            return
+        response = {
+            "id": f"resp_{int(time.time() * 1000)}",
+            "object": "response",
+            "created_at": int(time.time()),
+            "status": "failed",
+            "model": model,
+            "output": [],
+            "output_text": "",
+            "error": error,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        self._write_sse_event("response.failed", {"type": "response.failed", "response": response})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
     def _send_chat_payload_as_responses_stream(
         self,
         status: int,
@@ -1469,6 +2372,49 @@ class ProxyHandler(BaseHTTPRequestHandler):
         })
         return final_item, "".join(text_parts)
 
+    def _emit_response_reasoning_item_stream(self, output_index: int, item: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(item.get("id") or f"rs_{output_index}")
+        summary = item.get("summary")
+        if isinstance(summary, list):
+            summary_text = "".join(
+                str(part.get("text") or part.get("content") or "") if isinstance(part, dict) else str(part or "")
+                for part in summary
+            )
+        else:
+            summary_text = str(summary or item.get("text") or item.get("content") or "")
+        self._write_sse_event("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {"id": item_id, "type": "reasoning", "status": "in_progress", "summary": []},
+        })
+        if summary_text:
+            self._write_sse_event("response.reasoning_summary_text.delta", {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": 0,
+                "delta": summary_text,
+            })
+        final_item = {
+            "id": item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
+        }
+        self._write_sse_event("response.reasoning_summary_text.done", {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": item_id,
+            "output_index": output_index,
+            "summary_index": 0,
+            "text": summary_text,
+        })
+        self._write_sse_event("response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": output_index,
+            "item": final_item,
+        })
+        return final_item
+
     def _emit_response_tool_item_stream(self, output_index: int, item: dict[str, Any]) -> dict[str, Any]:
         final_item = dict(item)
         final_item["status"] = "completed"
@@ -1531,6 +2477,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 final_output.append(final_item)
                 if text:
                     output_text_parts.append(text)
+            elif item.get("type") == "reasoning":
+                final_output.append(self._emit_response_reasoning_item_stream(output_index, item))
             else:
                 final_output.append(self._emit_response_tool_item_stream(output_index, item))
 
@@ -1555,12 +2503,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         response_id = f"resp_{int(time.time() * 1000)}"
         response_model = model
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         started = False
         text_started = False
         text_output_index = -1
+        reasoning_started = False
+        reasoning_done = False
+        reasoning_output_index = -1
+        reasoning_item_id = "rs_0"
         next_output_index = 0
         usage: Any = None
+        finish_reason: Any = None
         tool_states: dict[int, dict[str, Any]] = {}
+        inline_mode = "detecting"  # detecting | reasoning | text
+        inline_buffer = ""
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
@@ -1575,12 +2531,72 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._write_response_stream_start(response_id, response_model, start_text_item=False)
                 started = True
 
+        def allocate_output_index() -> int:
+            nonlocal next_output_index
+            output_index = next_output_index
+            next_output_index += 1
+            return output_index
+
+        def ensure_reasoning_item() -> None:
+            nonlocal reasoning_started, reasoning_output_index, reasoning_item_id
+            ensure_started(None)
+            if reasoning_started:
+                return
+            reasoning_output_index = allocate_output_index()
+            reasoning_item_id = f"rs_{reasoning_output_index}"
+            self._write_sse_event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": reasoning_output_index,
+                "item": {"id": reasoning_item_id, "type": "reasoning", "status": "in_progress", "summary": []},
+            })
+            reasoning_started = True
+
+        def emit_reasoning_delta(piece: str) -> None:
+            piece = str(piece or "")
+            if not piece:
+                return
+            ensure_reasoning_item()
+            reasoning_parts.append(piece)
+            self._write_sse_event("response.reasoning_summary_text.delta", {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": reasoning_item_id,
+                "output_index": reasoning_output_index,
+                "summary_index": 0,
+                "delta": piece,
+            })
+
+        def finalize_reasoning() -> None:
+            nonlocal reasoning_done
+            if not reasoning_started or reasoning_done:
+                return
+            summary_text = "".join(reasoning_parts)
+            item = {
+                "id": reasoning_item_id,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
+            }
+            self._write_sse_event("response.reasoning_summary_text.done", {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": reasoning_item_id,
+                "output_index": reasoning_output_index,
+                "summary_index": 0,
+                "text": summary_text,
+            })
+            self._write_sse_event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": reasoning_output_index,
+                "item": item,
+            })
+            reasoning_done = True
+
         def ensure_text_item() -> None:
-            nonlocal text_started, text_output_index, next_output_index
+            nonlocal text_started, text_output_index
             if text_started:
                 return
-            text_output_index = next_output_index
-            next_output_index += 1
+            finalize_reasoning()
+            ensure_started(None)
+            text_output_index = allocate_output_index()
             self._write_sse_event("response.output_item.added", {
                 "type": "response.output_item.added",
                 "output_index": text_output_index,
@@ -1595,8 +2611,116 @@ class ProxyHandler(BaseHTTPRequestHandler):
             })
             text_started = True
 
+        def emit_text_delta(piece: str) -> None:
+            piece = str(piece or "")
+            if not piece:
+                return
+            ensure_text_item()
+            text_parts.append(piece)
+            self._write_sse_event("response.output_text.delta", {
+                "type": "response.output_text.delta",
+                "item_id": "msg_0",
+                "output_index": text_output_index,
+                "content_index": 0,
+                "delta": piece,
+            })
+
+        def leading_think_prefix_decision(buffer: str) -> str:
+            trimmed = buffer.lstrip()
+            if not trimmed:
+                return "need_more"
+            if trimmed.startswith(THINK_OPEN_TAG):
+                return "reasoning"
+            if THINK_OPEN_TAG.startswith(trimmed):
+                return "need_more"
+            return "text"
+
+        def drain_complete_inline_think() -> None:
+            nonlocal inline_mode, inline_buffer
+            split = split_leading_think_block(inline_buffer)
+            if not split:
+                return
+            reasoning, answer = split
+            inline_mode = "text"
+            inline_buffer = ""
+            if reasoning:
+                emit_reasoning_delta(reasoning)
+                finalize_reasoning()
+            if answer:
+                emit_text_delta(answer)
+
+        def flush_inline_at_boundary() -> None:
+            nonlocal inline_mode, inline_buffer
+            if inline_mode == "text":
+                return
+            buffered = inline_buffer
+            inline_buffer = ""
+            if inline_mode == "detecting":
+                inline_mode = "text"
+                if buffered:
+                    finalize_reasoning()
+                    emit_text_delta(buffered)
+                return
+            inline_mode = "text"
+            split = split_leading_think_block(buffered)
+            if split:
+                reasoning, answer = split
+                if reasoning:
+                    emit_reasoning_delta(reasoning)
+                    finalize_reasoning()
+                if answer:
+                    emit_text_delta(answer)
+                return
+            reasoning = strip_leading_think_open_tag(buffered)
+            if reasoning is None:
+                reasoning = buffered
+            if reasoning:
+                emit_reasoning_delta(reasoning)
+                finalize_reasoning()
+
+        def process_content_piece(piece: str) -> None:
+            nonlocal inline_mode, inline_buffer
+            piece = str(piece or "")
+            if not piece:
+                return
+            if inline_mode == "text":
+                finalize_reasoning()
+                emit_text_delta(piece)
+                return
+            inline_buffer += piece
+            if inline_mode == "detecting":
+                decision = leading_think_prefix_decision(inline_buffer)
+                if decision == "need_more":
+                    return
+                if decision == "reasoning":
+                    inline_mode = "reasoning"
+                    drain_complete_inline_think()
+                    return
+                inline_mode = "text"
+                text = inline_buffer
+                inline_buffer = ""
+                finalize_reasoning()
+                emit_text_delta(text)
+                return
+            if inline_mode == "reasoning":
+                drain_complete_inline_think()
+
+        def current_reasoning_text() -> str:
+            return "".join(reasoning_parts).strip()
+
+        def append_reasoning_to_active_tools(piece: str) -> None:
+            piece = str(piece or "")
+            if not piece.strip():
+                return
+            for state in tool_states.values():
+                if state.get("done"):
+                    continue
+                if not state.get("reasoning_content"):
+                    state["reasoning_content"] = piece.strip()
+                else:
+                    state["reasoning_content"] = str(state.get("reasoning_content") or "") + piece
+
         def state_for_tool_call(raw_tool_call: dict[str, Any]) -> dict[str, Any]:
-            nonlocal next_output_index
             try:
                 tool_index = int(raw_tool_call.get("index") or 0)
             except Exception:
@@ -1605,20 +2729,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if state is None:
                 state = {
                     "index": tool_index,
-                    "output_index": next_output_index,
+                    "output_index": None,
                     "call_id": str(raw_tool_call.get("id") or f"call_{tool_index}"),
                     "chat_name": "",
                     "arguments_parts": [],
+                    "streamed_arguments_len": 0,
+                    "reasoning_content": current_reasoning_text(),
                     "added": False,
+                    "done": False,
                 }
-                next_output_index += 1
                 tool_states[tool_index] = state
             if raw_tool_call.get("id"):
                 state["call_id"] = str(raw_tool_call.get("id"))
             function = raw_tool_call.get("function") if isinstance(raw_tool_call.get("function"), dict) else {}
             if function.get("name"):
                 state["chat_name"] = str(function.get("name") or "")
+            if not state.get("reasoning_content") and current_reasoning_text():
+                state["reasoning_content"] = current_reasoning_text()
             return state
+
+        def emit_pending_tool_argument_delta(state: dict[str, Any]) -> None:
+            if not state.get("added") or state.get("stream_item_type") != "function_call":
+                return
+            arguments = "".join(state.get("arguments_parts") or [])
+            streamed_len = int(state.get("streamed_arguments_len") or 0)
+            if len(arguments) <= streamed_len:
+                return
+            piece = arguments[streamed_len:]
+            state["streamed_arguments_len"] = len(arguments)
+            self._write_sse_event("response.function_call_arguments.delta", {
+                "type": "response.function_call_arguments.delta",
+                "item_id": str(state.get("item_id") or f"fc_{state.get('call_id', '')}"),
+                "output_index": int(state["output_index"]),
+                "delta": piece,
+            })
 
         def ensure_tool_added(state: dict[str, Any]) -> None:
             if state.get("added"):
@@ -1626,17 +2770,30 @@ class ProxyHandler(BaseHTTPRequestHandler):
             chat_name = str(state.get("chat_name") or "")
             if not chat_name:
                 return
+            finalize_reasoning()
+            ensure_started(None)
+            output_index = allocate_output_index()
+            state["output_index"] = output_index
             call_id = str(state.get("call_id") or f"call_{state.get('index', 0)}")
             item_id = response_tool_call_item_id_from_chat_name(call_id, chat_name, tool_context)
-            item = response_tool_call_item_from_chat_name(item_id, "in_progress", call_id, chat_name, "", tool_context)
+            item = response_tool_call_item_from_chat_name(
+                item_id,
+                "in_progress",
+                call_id,
+                chat_name,
+                "",
+                tool_context,
+                reasoning=state.get("reasoning_content"),
+            )
             self._write_sse_event("response.output_item.added", {
                 "type": "response.output_item.added",
-                "output_index": int(state["output_index"]),
+                "output_index": output_index,
                 "item": item,
             })
             state["item_id"] = item_id
             state["stream_item_type"] = item.get("type")
             state["added"] = True
+            emit_pending_tool_argument_delta(state)
 
         for raw_line in resp.iter_lines(decode_unicode=False):
             if not raw_line:
@@ -1661,42 +2818,45 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if not isinstance(choice, dict):
                     continue
                 delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
+                reasoning_delta = extract_reasoning_field_text(delta)
+                if reasoning_delta:
+                    emit_reasoning_delta(reasoning_delta)
+                    append_reasoning_to_active_tools(reasoning_delta)
                 content = delta.get("content")
                 if content:
-                    ensure_text_item()
-                    piece = str(content)
-                    text_parts.append(piece)
-                    self._write_sse_event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "item_id": "msg_0",
-                        "output_index": text_output_index,
-                        "content_index": 0,
-                        "delta": piece,
-                    })
+                    process_content_piece(str(content))
                 raw_tool_calls = delta.get("tool_calls")
                 if isinstance(raw_tool_calls, list):
+                    flush_inline_at_boundary()
+                    if current_reasoning_text():
+                        finalize_reasoning()
                     for raw_tool_call in raw_tool_calls:
                         if not isinstance(raw_tool_call, dict):
                             continue
                         state = state_for_tool_call(raw_tool_call)
                         function = raw_tool_call.get("function") if isinstance(raw_tool_call.get("function"), dict) else {}
                         arg_delta = function.get("arguments")
+                        if arg_delta is not None:
+                            state.setdefault("arguments_parts", []).append(str(arg_delta))
                         ensure_tool_added(state)
                         if arg_delta is not None:
-                            piece = str(arg_delta)
-                            state["arguments_parts"].append(piece)
-                            ensure_tool_added(state)
-                            if state.get("added") and state.get("stream_item_type") == "function_call":
-                                self._write_sse_event("response.function_call_arguments.delta", {
-                                    "type": "response.function_call_arguments.delta",
-                                    "item_id": str(state.get("item_id") or f"fc_{state.get('call_id', '')}"),
-                                    "output_index": int(state["output_index"]),
-                                    "delta": piece,
-                                })
+                            emit_pending_tool_argument_delta(state)
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice.get("finish_reason")
 
         ensure_started(None)
+        flush_inline_at_boundary()
+        finalize_reasoning()
         final_output_pairs: list[tuple[int, dict[str, Any]]] = []
         final_text = "".join(text_parts)
+        if reasoning_started:
+            summary_text = "".join(reasoning_parts)
+            final_output_pairs.append((reasoning_output_index, {
+                "id": reasoning_item_id,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
+            }))
         if text_started:
             part = {"type": "output_text", "text": final_text, "annotations": []}
             item = {"id": "msg_0", "type": "message", "status": "completed", "role": "assistant", "content": [part]}
@@ -1721,15 +2881,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
             })
             final_output_pairs.append((text_output_index, item))
 
-        for _tool_index, state in sorted(tool_states.items(), key=lambda kv: int(kv[1].get("output_index", kv[0]))):
+        for _tool_index, state in sorted(tool_states.items(), key=lambda kv: int(kv[1].get("output_index") if kv[1].get("output_index") is not None else kv[0])):
             chat_name = str(state.get("chat_name") or "")
             if not chat_name:
                 continue
             ensure_tool_added(state)
+            if state.get("output_index") is None:
+                continue
             call_id = str(state.get("call_id") or f"call_{state.get('index', 0)}")
             arguments = canonicalize_tool_arguments("".join(state.get("arguments_parts") or []))
             item_id = str(state.get("item_id") or response_tool_call_item_id_from_chat_name(call_id, chat_name, tool_context))
-            final_item = response_tool_call_item_from_chat_name(item_id, "completed", call_id, chat_name, arguments, tool_context)
+            final_item = response_tool_call_item_from_chat_name(
+                item_id,
+                "completed",
+                call_id,
+                chat_name,
+                arguments,
+                tool_context,
+                reasoning=state.get("reasoning_content"),
+            )
+            state["done"] = True
             if final_item.get("type") == "function_call":
                 self._write_sse_event("response.function_call_arguments.done", {
                     "type": "response.function_call_arguments.done",
@@ -1745,97 +2916,383 @@ class ProxyHandler(BaseHTTPRequestHandler):
             final_output_pairs.append((int(state["output_index"]), final_item))
 
         final_output = [item for _output_index, item in sorted(final_output_pairs, key=lambda pair: pair[0])]
+        status = response_status_from_finish_reason(finish_reason)
         completed = {
             "id": response_id,
             "object": "response",
             "created_at": int(time.time()),
-            "status": "completed",
+            "status": status,
             "model": response_model,
             "output_text": final_text,
             "output": final_output,
             "usage": chat_usage_to_responses_usage(usage),
         }
+        if status == "incomplete":
+            completed["incomplete_details"] = {"reason": "max_output_tokens"}
         self._write_sse_event("response.completed", {"type": "response.completed", "response": completed})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
-    def _send_messages_stream_as_responses(self, resp: requests.Response, model: str = "") -> None:
+    def _send_messages_stream_as_responses(
+        self,
+        resp: requests.Response,
+        model: str = "",
+        tool_context: dict[str, Any] | None = None,
+    ) -> None:
         response_id = f"resp_{int(time.time() * 1000)}"
         response_model = model
-        text_parts: list[str] = []
         started = False
+        completed_sent = False
+        next_output_index = 0
+        block_states: dict[Any, dict[str, Any]] = {}
+        final_output_pairs: list[tuple[int, dict[str, Any]]] = []
+        output_text_parts: list[str] = []
+        usage: dict[str, Any] = {}
+        stop_reason = ""
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
             return
 
+        def merge_usage(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+            ):
+                if value.get(key) is not None:
+                    usage[key] = value.get(key)
+
         def ensure_started(chunk: dict[str, Any] | None = None) -> None:
             nonlocal started, response_id, response_model
-            if chunk:
+            if isinstance(chunk, dict):
                 response_id = str(chunk.get("id") or response_id)
                 response_model = str(chunk.get("model") or response_model)
+                merge_usage(chunk.get("usage"))
             if not started:
-                self._write_response_stream_start(response_id, response_model)
+                self._write_response_stream_start(response_id, response_model, start_text_item=False)
                 started = True
+
+        def allocate_output_index() -> int:
+            nonlocal next_output_index
+            output_index = next_output_index
+            next_output_index += 1
+            return output_index
+
+        def emit_text_delta(state: dict[str, Any], piece: str) -> None:
+            if not piece:
+                return
+            state.setdefault("text_parts", []).append(piece)
+            self._write_sse_event("response.output_text.delta", {
+                "type": "response.output_text.delta",
+                "item_id": str(state["item_id"]),
+                "output_index": int(state["output_index"]),
+                "content_index": 0,
+                "delta": piece,
+            })
+
+        def emit_reasoning_delta(state: dict[str, Any], piece: str) -> None:
+            if not piece:
+                return
+            state.setdefault("summary_parts", []).append(piece)
+            self._write_sse_event("response.reasoning_summary_text.delta", {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": str(state["item_id"]),
+                "output_index": int(state["output_index"]),
+                "summary_index": 0,
+                "delta": piece,
+            })
+
+        def start_message_block(key: Any, initial_text: str = "") -> dict[str, Any]:
+            ensure_started(None)
+            output_index = allocate_output_index()
+            item_id = f"msg_{output_index}"
+            state = {"kind": "message", "output_index": output_index, "item_id": item_id, "text_parts": [], "done": False}
+            block_states[key] = state
+            self._write_sse_event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+            })
+            self._write_sse_event("response.content_part.added", {
+                "type": "response.content_part.added",
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            })
+            emit_text_delta(state, initial_text)
+            return state
+
+        def start_reasoning_block(key: Any, initial_text: str = "") -> dict[str, Any]:
+            ensure_started(None)
+            output_index = allocate_output_index()
+            item_id = f"rs_{output_index}"
+            state = {"kind": "reasoning", "output_index": output_index, "item_id": item_id, "summary_parts": [], "done": False}
+            block_states[key] = state
+            self._write_sse_event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {"id": item_id, "type": "reasoning", "status": "in_progress", "summary": []},
+            })
+            emit_reasoning_delta(state, initial_text)
+            return state
+
+        def start_tool_block(key: Any, block: dict[str, Any]) -> dict[str, Any]:
+            ensure_started(None)
+            output_index = allocate_output_index()
+            call_id = str(block.get("id") or f"call_{output_index}")
+            name = str(block.get("name") or "")
+            item_id = response_tool_call_item_id_from_chat_name(call_id, name, tool_context)
+            item = response_tool_call_item_from_chat_name(item_id, "in_progress", call_id, name, "", tool_context)
+            state = {
+                "kind": "function_call",
+                "output_index": output_index,
+                "item_id": item_id,
+                "call_id": call_id,
+                "name": name,
+                "arguments_parts": [],
+                "stream_item_type": item.get("type"),
+                "done": False,
+            }
+            block_states[key] = state
+            self._write_sse_event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": item,
+            })
+            initial_input = block.get("input")
+            if initial_input not in (None, {}, ""):
+                piece = canonicalize_tool_arguments(initial_input)
+                state["arguments_parts"].append(piece)
+                if state.get("stream_item_type") == "function_call":
+                    self._write_sse_event("response.function_call_arguments.delta", {
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": piece,
+                    })
+            return state
+
+        def start_block(key: Any, block: dict[str, Any]) -> dict[str, Any] | None:
+            block_type = str(block.get("type") or "")
+            if block_type == "text":
+                return start_message_block(key, str(block.get("text") or ""))
+            if block_type == "thinking":
+                return start_reasoning_block(key, str(block.get("thinking") or ""))
+            if block_type == "tool_use":
+                return start_tool_block(key, block)
+            return None
+
+        def finalize_state(state: dict[str, Any]) -> None:
+            if state.get("done"):
+                return
+            state["done"] = True
+            output_index = int(state["output_index"])
+            item_id = str(state["item_id"])
+            kind = str(state.get("kind") or "")
+            if kind == "message":
+                text = "".join(state.get("text_parts") or [])
+                part = {"type": "output_text", "text": text, "annotations": []}
+                item = {"id": item_id, "type": "message", "status": "completed", "role": "assistant", "content": [part]}
+                self._write_sse_event("response.output_text.done", {
+                    "type": "response.output_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "text": text,
+                })
+                self._write_sse_event("response.content_part.done", {
+                    "type": "response.content_part.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "part": part,
+                })
+                self._write_sse_event("response.output_item.done", {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                })
+                final_output_pairs.append((output_index, item))
+                output_text_parts.append(text)
+                return
+            if kind == "reasoning":
+                summary_text = "".join(state.get("summary_parts") or [])
+                item = {
+                    "id": item_id,
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
+                }
+                self._write_sse_event("response.reasoning_summary_text.done", {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "text": summary_text,
+                })
+                self._write_sse_event("response.output_item.done", {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                })
+                final_output_pairs.append((output_index, item))
+                return
+            if kind == "function_call":
+                arguments = canonicalize_tool_arguments("".join(state.get("arguments_parts") or []))
+                call_id = str(state.get("call_id") or f"call_{output_index}")
+                name = str(state.get("name") or "")
+                final_item = response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context)
+                if final_item.get("type") == "function_call":
+                    self._write_sse_event("response.function_call_arguments.done", {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "arguments": arguments,
+                    })
+                self._write_sse_event("response.output_item.done", {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": final_item,
+                })
+                final_output_pairs.append((output_index, final_item))
+
+        def finalize_all_open() -> None:
+            for state in sorted(block_states.values(), key=lambda item: int(item.get("output_index", 0))):
+                finalize_state(state)
+
+        def send_completed() -> None:
+            nonlocal completed_sent
+            if completed_sent:
+                return
+            ensure_started(None)
+            finalize_all_open()
+            final_output = [item for _output_index, item in sorted(final_output_pairs, key=lambda pair: pair[0])]
+            final_text = "".join(output_text_parts)
+            status = anthropic_stop_reason_to_responses_status(stop_reason)
+            completed: dict[str, Any] = {
+                "id": response_id,
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": status,
+                "model": response_model,
+                "output_text": final_text,
+                "output": final_output,
+                "usage": chat_usage_to_responses_usage(usage),
+            }
+            if status == "incomplete":
+                completed["incomplete_details"] = {"reason": "max_output_tokens"}
+            self._write_sse_event("response.completed", {"type": "response.completed", "response": completed})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            completed_sent = True
+
+        def block_key_from_chunk(chunk: dict[str, Any]) -> Any:
+            index = chunk.get("index")
+            if index is None:
+                return f"auto_{len(block_states)}"
+            try:
+                return int(index)
+            except Exception:
+                return str(index)
 
         for raw_line in resp.iter_lines(decode_unicode=False):
             if not raw_line:
                 continue
             line = raw_line.decode("utf-8", errors="replace")
             data = line[5:].strip() if line.startswith("data:") else ""
-            if not data or data == "[DONE]":
+            if not data:
                 continue
+            if data == "[DONE]":
+                break
             try:
                 chunk = json.loads(data)
             except Exception:
                 continue
-            ensure_started(chunk.get("message") if isinstance(chunk.get("message"), dict) else chunk)
-
-            # OpenAI Chat Completions stream shape.
-            choices = chunk.get("choices") if isinstance(chunk, dict) else None
-            if isinstance(choices, list):
-                for choice in choices:
-                    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
-                    content = delta.get("content") if isinstance(delta, dict) else ""
-                    if content:
-                        piece = str(content)
-                        text_parts.append(piece)
-                        self._write_sse_event("response.output_text.delta", {
-                            "type": "response.output_text.delta",
-                            "item_id": "msg_0",
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": piece,
-                        })
+            if not isinstance(chunk, dict):
                 continue
 
-            # Anthropic Messages stream shape.
-            event_type = str(chunk.get("type") or "") if isinstance(chunk, dict) else ""
-            piece = ""
+            # Some OpenAI-compatible gateways return Chat Completions SSE even
+            # on a /messages-shaped route. Preserve the previous text behavior.
+            choices = chunk.get("choices")
+            if isinstance(choices, list):
+                ensure_started(chunk)
+                merge_usage(chunk.get("usage"))
+                chat_state = block_states.get("chat_text")
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                    content = delta.get("content")
+                    if content:
+                        if chat_state is None or chat_state.get("done"):
+                            chat_state = start_message_block("chat_text")
+                        emit_text_delta(chat_state, str(content))
+                continue
+
+            event_type = str(chunk.get("type") or "")
+            if event_type == "message_start":
+                message = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+                ensure_started(message)
+                continue
             if event_type == "content_block_start":
                 block = chunk.get("content_block") if isinstance(chunk.get("content_block"), dict) else {}
-                if block.get("type") == "text":
-                    piece = str(block.get("text") or "")
-            elif event_type == "content_block_delta":
+                key = block_key_from_chunk(chunk)
+                start_block(key, block)
+                continue
+            if event_type == "content_block_delta":
+                key = block_key_from_chunk(chunk)
                 delta = chunk.get("delta") if isinstance(chunk.get("delta"), dict) else {}
-                if delta.get("type") == "text_delta":
-                    piece = str(delta.get("text") or "")
-            elif event_type == "message_start" and isinstance(chunk.get("message"), dict):
-                message = chunk["message"]
-                response_id = str(message.get("id") or response_id)
-                response_model = str(message.get("model") or response_model)
-            if piece:
-                text_parts.append(piece)
-                self._write_sse_event("response.output_text.delta", {
-                    "type": "response.output_text.delta",
-                    "item_id": "msg_0",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": piece,
-                })
+                delta_type = str(delta.get("type") or "")
+                state = block_states.get(key)
+                if state is None:
+                    if delta_type == "text_delta":
+                        state = start_message_block(key)
+                    elif delta_type == "thinking_delta":
+                        state = start_reasoning_block(key)
+                if state is None:
+                    continue
+                if delta_type == "text_delta":
+                    emit_text_delta(state, str(delta.get("text") or ""))
+                elif delta_type == "thinking_delta":
+                    emit_reasoning_delta(state, str(delta.get("thinking") or ""))
+                elif delta_type == "input_json_delta":
+                    piece = str(delta.get("partial_json") or "")
+                    if piece:
+                        state.setdefault("arguments_parts", []).append(piece)
+                        if state.get("stream_item_type") == "function_call":
+                            self._write_sse_event("response.function_call_arguments.delta", {
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": str(state.get("item_id") or ""),
+                                "output_index": int(state.get("output_index") or 0),
+                                "delta": piece,
+                            })
+                continue
+            if event_type == "content_block_stop":
+                key = block_key_from_chunk(chunk)
+                state = block_states.get(key)
+                if state is not None:
+                    finalize_state(state)
+                continue
+            if event_type == "message_delta":
+                delta = chunk.get("delta") if isinstance(chunk.get("delta"), dict) else {}
+                if delta.get("stop_reason"):
+                    stop_reason = str(delta.get("stop_reason") or "")
+                merge_usage(chunk.get("usage"))
+                continue
+            if event_type == "message_stop":
+                send_completed()
+                break
 
-        ensure_started(None)
-        self._write_response_stream_done(response_id, response_model, "".join(text_parts), emit_text=False)
+        if not completed_sent:
+            send_completed()
 
     def _send_text(self, status: int, text: str) -> None:
         self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
@@ -1938,12 +3395,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             upstream_route_path = "/messages" if provider_api_mode == "messages" else "/chat/completions"
             url = base_url + upstream_path
             if auth_mode == "anthropic" and provider_api_mode == "messages":
-                body_json = responses_payload_to_anthropic_messages(body_json)
+                conversion_tool_context = build_codex_tool_context_from_request(body_json)
+                body_json = responses_payload_to_anthropic_messages(body_json, conversion_tool_context)
                 convert_response_from = "messages"
             else:
                 conversion_tool_context = build_codex_tool_context_from_request(body_json)
                 body_json = responses_payload_to_chat(body_json, conversion_tool_context)
-                convert_response_from = "messages" if provider_api_mode == "messages" else "chat"
+                convert_response_from = "chat"
             body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
         elif self.command == "POST" and upstream_route_path == "/messages" and auth_mode == "anthropic" and isinstance(body_json, dict):
             body_json = normalize_anthropic_messages_payload(body_json)
@@ -2019,6 +3477,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
         elapsed = time.time() - started
         self.server.log_if_verbose(self, "%s %s %s -> HTTP %s %.2fs", provider_name, self.command, proxied_path, resp.status_code, elapsed)
 
+        if convert_response_from and resp.status_code >= 400:
+            try:
+                response_model = str((body_json or {}).get("model") or "")
+                error_source = "/messages" if convert_response_from == "messages" else "/chat/completions"
+                error = upstream_error_to_openai_error(resp, error_source)
+                if isinstance(body_json, dict) and body_json.get("stream"):
+                    self._send_responses_error_stream(resp.status_code, error, model=response_model)
+                else:
+                    self._send_json(resp.status_code, {"error": error})
+                return
+            finally:
+                resp.close()
+                if should_discard_upstream_response(resp):
+                    self.server.session_pool.discard(session)
+                else:
+                    self.server.session_pool.release(provider_name, provider, session)
+
         if convert_response_from and resp.status_code < 400:
             try:
                 response_model = str((body_json or {}).get("model") or "")
@@ -2027,7 +3502,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if convert_response_from == "chat":
                             self._send_chat_stream_as_responses(resp, model=response_model, tool_context=conversion_tool_context)
                         else:
-                            self._send_messages_stream_as_responses(resp, model=response_model)
+                            self._send_messages_stream_as_responses(resp, model=response_model, tool_context=conversion_tool_context)
                     else:
                         payload = resp.json()
                         converted = (
