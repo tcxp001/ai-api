@@ -12,7 +12,6 @@
       context_length: 400000
       reasoning_effort: high
   headers: {}
-  remove_headers: []
   enabled: true
 
 - name: provider-b
@@ -28,7 +27,6 @@
       reasoning_effort: high
   headers:
     User-Agent: ''
-  remove_headers: []
   enabled: true
 
 - name: provider-c
@@ -44,5 +42,4 @@
   headers:
     Originator: codex_cli_rs
     User-Agent: codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color
-  remove_headers: []
   enabled: false
