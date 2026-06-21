@@ -1677,6 +1677,16 @@ def stream_error_to_openai_error(error_payload: Any, upstream_route_path: str = 
     }
 
 
+def empty_stream_to_openai_error(upstream_route_path: str = "") -> dict[str, Any]:
+    source = upstream_route_path or "upstream"
+    return {
+        "message": f"upstream {source} stream ended without response events",
+        "type": "upstream_error",
+        "param": None,
+        "code": "upstream_empty_stream",
+    }
+
+
 def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "") -> dict[str, Any]:
     status = int(getattr(resp, "status_code", 0) or 0)
     raw_text = ""
@@ -2552,6 +2562,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         tool_states: dict[int, dict[str, Any]] = {}
         inline_mode = "detecting"  # detecting | reasoning | text
         inline_buffer = ""
+        saw_response_event = False
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
@@ -2843,6 +2854,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 chunk = json.loads(data)
             except Exception:
                 continue
+            saw_response_event = True
             if isinstance(chunk, dict) and chunk.get("usage") is not None:
                 usage = chunk.get("usage")
             stream_error = extract_stream_error_object_from_chunk(chunk)
@@ -2884,6 +2896,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             emit_pending_tool_argument_delta(state)
                 if choice.get("finish_reason") is not None:
                     finish_reason = choice.get("finish_reason")
+
+        if not saw_response_event:
+            self._write_responses_failed_stream(empty_stream_to_openai_error("/chat/completions"), model=response_model)
+            return
 
         ensure_started(None)
         flush_inline_at_boundary()
@@ -2990,6 +3006,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         output_text_parts: list[str] = []
         usage: dict[str, Any] = {}
         stop_reason = ""
+        saw_response_event = False
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
@@ -3269,6 +3286,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Some OpenAI-compatible gateways return Chat Completions SSE even
             # on a /messages-shaped route. Preserve the previous text behavior.
             choices = chunk.get("choices")
+            event_type = str(chunk.get("type") or "")
+            if isinstance(choices, list) or (event_type and event_type != "ping"):
+                saw_response_event = True
             if isinstance(choices, list):
                 ensure_started(chunk)
                 merge_usage(chunk.get("usage"))
@@ -3284,7 +3304,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         emit_text_delta(chat_state, str(content))
                 continue
 
-            event_type = str(chunk.get("type") or "")
             if event_type == "message_start":
                 message = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
                 ensure_started(message)
@@ -3339,6 +3358,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 break
 
         if not completed_sent:
+            if not saw_response_event:
+                self._write_responses_failed_stream(empty_stream_to_openai_error("/messages"), model=response_model)
+                return
             send_completed()
 
     def _send_text(self, status: int, text: str) -> None:
