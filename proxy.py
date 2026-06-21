@@ -1639,10 +1639,42 @@ def extract_error_from_sse_text(text: str) -> dict[str, Any] | None:
             parsed = json.loads(data)
         except Exception:
             continue
-        extracted = extract_error_object_from_payload(parsed)
+        extracted = extract_stream_error_object_from_chunk(parsed)
         if extracted.get("message") or extracted.get("type") or extracted.get("code") is not None:
             return extracted
     return None
+
+
+def extract_stream_error_object_from_chunk(chunk: Any) -> dict[str, Any] | None:
+    if not isinstance(chunk, dict):
+        return None
+    if isinstance(chunk.get("error"), (dict, str)):
+        return extract_error_object_from_payload(chunk)
+    if str(chunk.get("type") or "").strip().lower() == "error":
+        return extract_error_object_from_payload(chunk)
+    return None
+
+
+def stream_error_to_openai_error(error_payload: Any, upstream_route_path: str = "") -> dict[str, Any]:
+    extracted = extract_error_object_from_payload(error_payload)
+    message = str(extracted.get("message") or "").strip()
+    if not message:
+        message = "stream error"
+    message = compact_body(strip_html_error_text(message), limit=2000)
+    source = upstream_route_path or "upstream"
+    if not message.lower().startswith("upstream "):
+        message = f"upstream {source} stream error: {message}"
+
+    error_type = str(extracted.get("type") or "").strip() or "upstream_error"
+    code = extracted.get("code")
+    if code is None:
+        code = "upstream_error"
+    return {
+        "message": message,
+        "type": error_type,
+        "param": extracted.get("param"),
+        "code": code,
+    }
 
 
 def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "") -> dict[str, Any]:
@@ -2281,6 +2313,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._send_response_stream_headers(status)
         if self.command == "HEAD":
             return
+        self._write_responses_failed_stream(error, model=model)
+
+    def _write_responses_failed_stream(self, error: dict[str, Any], model: str = "") -> None:
         response = {
             "id": f"resp_{int(time.time() * 1000)}",
             "object": "response",
@@ -2810,6 +2845,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 continue
             if isinstance(chunk, dict) and chunk.get("usage") is not None:
                 usage = chunk.get("usage")
+            stream_error = extract_stream_error_object_from_chunk(chunk)
+            if stream_error:
+                response_model = str(chunk.get("model") or response_model) if isinstance(chunk, dict) else response_model
+                error = stream_error_to_openai_error(stream_error, "/chat/completions")
+                self._write_responses_failed_stream(error, model=response_model)
+                return
             ensure_started(chunk if isinstance(chunk, dict) else None)
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             if not isinstance(choices, list):
@@ -3218,6 +3259,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 continue
             if not isinstance(chunk, dict):
                 continue
+            stream_error = extract_stream_error_object_from_chunk(chunk)
+            if stream_error:
+                response_model = str(chunk.get("model") or response_model)
+                error = stream_error_to_openai_error(stream_error, "/messages")
+                self._write_responses_failed_stream(error, model=response_model)
+                return
 
             # Some OpenAI-compatible gateways return Chat Completions SSE even
             # on a /messages-shaped route. Preserve the previous text behavior.

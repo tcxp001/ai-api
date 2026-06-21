@@ -173,6 +173,46 @@ class CodexChatConversionTests(unittest.TestCase):
         self.assertIn('"call_id":"call_1"', output)
         self.assertIn("data: [DONE]", output)
 
+    def test_chat_stream_to_responses_maps_embedded_sse_error(self):
+        class FakeResp:
+            status_code = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def iter_lines(self, decode_unicode=False):
+                for line in [
+                    b'data: {"error":{"message":"stream exploded","type":"server_error","code":"boom"}}',
+                    b"data: [DONE]",
+                ]:
+                    yield line
+
+        class FakeProxyHandler(proxy.ProxyHandler):
+            def __init__(self):
+                pass
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, key, value):
+                pass
+
+            def end_headers(self):
+                pass
+
+        handler = FakeProxyHandler()
+        handler.command = "POST"
+        handler.wfile = io.BytesIO()
+        handler.close_connection = False
+        handler._send_chat_stream_as_responses(FakeResp(), model="gpt-5.4")
+        output = handler.wfile.getvalue().decode()
+
+        self.assertIn("event: response.failed", output)
+        self.assertIn('"status":"failed"', output)
+        self.assertIn('"type":"server_error"', output)
+        self.assertIn('"code":"boom"', output)
+        self.assertIn("upstream /chat/completions stream error: stream exploded", output)
+        self.assertNotIn("event: response.completed", output)
+        self.assertIn("data: [DONE]", output)
+
     def test_proxy_chat_completions_endpoint_conversion(self):
         seen = []
 
@@ -390,6 +430,46 @@ class CodexChatConversionTests(unittest.TestCase):
         self.assertIn('"call_id":"toolu_1"', output)
         self.assertIn('"input_tokens":4', output)
         self.assertIn('"output_tokens":5', output)
+
+    def test_anthropic_messages_stream_to_responses_maps_embedded_sse_error(self):
+        class FakeResp:
+            status_code = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def iter_lines(self, decode_unicode=False):
+                chunks = [
+                    {"type": "ping"},
+                    {"type": "error", "error": {"type": "rate_limit_error", "message": "Concurrency limit exceeded"}},
+                ]
+                for chunk in chunks:
+                    yield ("data: " + json.dumps(chunk, separators=(",", ":"))).encode()
+
+        class FakeProxyHandler(proxy.ProxyHandler):
+            def __init__(self):
+                pass
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, key, value):
+                pass
+
+            def end_headers(self):
+                pass
+
+        handler = FakeProxyHandler()
+        handler.command = "POST"
+        handler.wfile = io.BytesIO()
+        handler.close_connection = False
+        handler._send_messages_stream_as_responses(FakeResp(), model="claude-sonnet")
+        output = handler.wfile.getvalue().decode()
+
+        self.assertIn("event: response.failed", output)
+        self.assertIn('"status":"failed"', output)
+        self.assertIn('"type":"rate_limit_error"', output)
+        self.assertIn("upstream /messages stream error: Concurrency limit exceeded", output)
+        self.assertNotIn("event: response.completed", output)
+        self.assertIn("data: [DONE]", output)
 
     def test_proxy_messages_mode_anthropic_receives_tool_use(self):
         seen = []
