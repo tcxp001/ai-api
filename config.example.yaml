@@ -7,6 +7,8 @@
   base_url: https://example-a.invalid/v1
   api_key: ${PROVIDER_A_API_KEY}
   api_mode: codex_responses
+  request_max_retries: 4
+  stream_max_retries: 5
   models:
     gpt-5.5:
       context_length: 400000
@@ -21,6 +23,8 @@
   # /{provider}/v1/responses，proxy.py 会自动做 Responses ↔ Chat 转换，
   # 包括 function_call/function_call_output ↔ tool_calls/tool 消息以及流式工具参数事件。
   api_mode: chat_completions
+  request_max_retries: 4
+  stream_max_retries: 5
   models:
     gpt-5.5:
       context_length: 400000
@@ -33,6 +37,8 @@
   base_url: https://example-c.invalid/v1
   api_key: ${PROVIDER_C_API_KEY}
   api_mode: codex_responses
+  request_max_retries: 4
+  stream_max_retries: 5
   models:
     gpt-5.5:
       context_length: 400000

@@ -65,6 +65,12 @@ MAX_HISTORY_ITEMS = 500
 DEFAULT_AUTO_COMPACT_PERCENT = 70
 MIN_AUTO_COMPACT_PERCENT = 1
 MAX_AUTO_COMPACT_PERCENT = 95
+CODEX_REQUEST_MAX_RETRIES_DEFAULT = 4
+CODEX_STREAM_MAX_RETRIES_DEFAULT = 5
+CODEX_RETRY_MAX = 100
+CODEX_HIGH_RETRY_PROVIDER_NAMES = {"any", "any2"}
+CODEX_HIGH_REQUEST_MAX_RETRIES = 20
+CODEX_HIGH_STREAM_MAX_RETRIES = 50
 
 write_lock = threading.Lock()
 aiproxy_http_probe_lock = threading.Lock()
@@ -327,6 +333,20 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     provider["name"] = name
     provider["base_url"] = base_url.rstrip("/")
     provider.pop("url", None)
+    request_default, stream_default = codex_retry_defaults(name)
+    try:
+        provider["request_max_retries"] = normalize_codex_retry(
+            provider.get("request_max_retries"),
+            request_default,
+            "request_max_retries",
+        )
+        provider["stream_max_retries"] = normalize_codex_retry(
+            provider.get("stream_max_retries"),
+            stream_default,
+            "stream_max_retries",
+        )
+    except ValueError as exc:
+        raise ValueError(f"{label} {exc}") from exc
     if "api_key" not in provider and "key" in provider:
         provider["api_key"] = provider.pop("key")
     mode = str(provider.get("api_mode") or "").strip()
@@ -396,6 +416,27 @@ def normalize_auth_mode(value: Any, api_mode: str, custom_endpoint: str = "") ->
     if mode not in {"bearer", "anthropic"}:
         raise ValueError("auth_mode must be bearer or anthropic")
     return mode
+
+
+def codex_retry_defaults(provider_name: str) -> tuple[int, int]:
+    name = str(provider_name or "").strip().lower()
+    if name in CODEX_HIGH_RETRY_PROVIDER_NAMES:
+        return CODEX_HIGH_REQUEST_MAX_RETRIES, CODEX_HIGH_STREAM_MAX_RETRIES
+    return CODEX_REQUEST_MAX_RETRIES_DEFAULT, CODEX_STREAM_MAX_RETRIES_DEFAULT
+
+
+def normalize_codex_retry(value: Any, default: int, field_name: str) -> int:
+    if value is None or value == "":
+        return int(default)
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        retry = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be an integer")
+    if retry < 0 or retry > CODEX_RETRY_MAX:
+        raise ValueError(f"{field_name} must be between 0 and {CODEX_RETRY_MAX}")
+    return retry
 
 
 def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
@@ -733,11 +774,24 @@ def generated_codex_provider_block(providers: list[dict[str, Any]], proxy_base: 
         name = str(provider.get("name") or "").strip()
         if not name:
             continue
+        request_default, stream_default = codex_retry_defaults(name)
+        request_retries = normalize_codex_retry(
+            provider.get("request_max_retries"),
+            request_default,
+            "request_max_retries",
+        )
+        stream_retries = normalize_codex_retry(
+            provider.get("stream_max_retries"),
+            stream_default,
+            "stream_max_retries",
+        )
         lines.extend([
             f'[model_providers.{toml_string(name)}]',
             f'name = {toml_string(name)}',
             f'base_url = {toml_string(proxy_provider_url(name, proxy_base))}',
             f'wire_api = {toml_string(codex_wire_api(provider))}',
+            f"request_max_retries = {request_retries}",
+            f"stream_max_retries = {stream_retries}",
             "",
         ])
     lines.append(CODEX_SYNC_END)
@@ -995,6 +1049,16 @@ def app_sync_projection(providers: list[dict[str, Any]], proxy_base: str = DEFAU
             "first_model": first_model(provider),
             "models": provider.get("models") or {},
             "reasoning_effort": provider.get("reasoning_effort") or "",
+            "request_max_retries": normalize_codex_retry(
+                provider.get("request_max_retries"),
+                codex_retry_defaults(name)[0],
+                "request_max_retries",
+            ),
+            "stream_max_retries": normalize_codex_retry(
+                provider.get("stream_max_retries"),
+                codex_retry_defaults(name)[1],
+                "stream_max_retries",
+            ),
         })
     return projection
 
