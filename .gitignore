@@ -23,6 +23,7 @@ venv/
 .env
 .env.*
 .DS_Store
+AGENTS.md
 
 # Local planning docs
 docs/
