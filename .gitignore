@@ -27,5 +27,8 @@ venv/
 # Local planning docs
 docs/
 
+# Local-only tests
+tests/
+
 # Local manual backups
 *.bak-*
