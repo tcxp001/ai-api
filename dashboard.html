@@ -290,13 +290,8 @@
             <div id="modelRows" class="mini-table"></div>
           </div>
           <div class="field provider-edit-spaced">
-            <label for="providerRequestMaxRetries">Codex request_max_retries</label>
-            <input id="providerRequestMaxRetries" type="number" min="0" max="100" step="1" value="4">
-          </div>
-          <div class="field provider-edit-spaced">
             <label for="providerStreamMaxRetries">Codex stream_max_retries</label>
             <input id="providerStreamMaxRetries" type="number" min="0" max="100" step="1" value="5">
-            <div class="subtle">默认使用 Codex 原始值 4 / 5；Provider any、any2 默认使用 20 / 50。</div>
           </div>
             <div class="actions">
               <button id="applyProviderBtn" class="primary" type="button">保存</button>
@@ -425,10 +420,8 @@
     const firstModel = (p) => modelNames(p)[0] || '';
     const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
     const DEFAULT_MONITOR_PROMPT = '在吗？';
-    const CODEX_REQUEST_MAX_RETRIES_DEFAULT = 4;
     const CODEX_STREAM_MAX_RETRIES_DEFAULT = 5;
     const CODEX_RETRY_MAX = 100;
-    const CODEX_HIGH_RETRY_PROVIDER_NAMES = new Set(['any', 'any2']);
     function providerByName(name) {
       const key = String(name || '').toLowerCase();
       return (state.providers || []).find(p => String(p.name || '').toLowerCase() === key) || null;
@@ -639,18 +632,11 @@
       if (item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers) && !Object.keys(item.headers).length) delete item.headers;
       if (item.models && typeof item.models === 'object' && !Array.isArray(item.models) && !Object.keys(item.models).length) delete item.models;
       if (item.auth_mode === 'bearer') delete item.auth_mode;
+      delete item.request_max_retries;
       ['note', 'api_key', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
         if (item[key] === '') delete item[key];
       });
       return item;
-    }
-
-    function codexRetryDefaults(providerName) {
-      const name = String(providerName || '').trim().toLowerCase();
-      if (CODEX_HIGH_RETRY_PROVIDER_NAMES.has(name)) {
-        return { request: 20, stream: 50 };
-      }
-      return { request: CODEX_REQUEST_MAX_RETRIES_DEFAULT, stream: CODEX_STREAM_MAX_RETRIES_DEFAULT };
     }
 
     function providerRetryValue(provider, key, fallback) {
@@ -665,11 +651,8 @@
     }
 
     function updateRetryDefaultsForProviderName() {
-      const defaults = codexRetryDefaults($('providerName')?.value || '');
-      const requestInput = $('providerRequestMaxRetries');
       const streamInput = $('providerStreamMaxRetries');
-      if (requestInput && requestInput.dataset.autoDefault !== '0') requestInput.value = defaults.request;
-      if (streamInput && streamInput.dataset.autoDefault !== '0') streamInput.value = defaults.stream;
+      if (streamInput && streamInput.dataset.autoDefault !== '0') streamInput.value = CODEX_STREAM_MAX_RETRIES_DEFAULT;
     }
 
     function collectRetryInput(id, label, fallback) {
@@ -1082,10 +1065,7 @@
       $('providerApiKey').value = providerApiKey(p);
       $('providerMode').value = normalizeEndpointMode(p?.api_mode);
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
-      const retryDefaults = codexRetryDefaults(p?.name || '');
-      $('providerRequestMaxRetries').value = providerRetryValue(p, 'request_max_retries', retryDefaults.request);
-      $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', retryDefaults.stream);
-      $('providerRequestMaxRetries').dataset.autoDefault = hasRetryConfig(p, 'request_max_retries') ? '0' : '1';
+      $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT);
       $('providerStreamMaxRetries').dataset.autoDefault = hasRetryConfig(p, 'stream_max_retries') ? '0' : '1';
       updateCustomEndpointInput();
       if (p) {
@@ -1111,7 +1091,6 @@
       const endpointMode = normalizeEndpointMode($('providerMode').value);
       const customEndpoint = normalizeEndpoint($('providerCustomEndpoint').value);
       const providerName = $('providerName').value.trim();
-      const retryDefaults = codexRetryDefaults(providerName);
       if (headerPreset === 'custom' && !customUa) throw new Error('Custom User-Agent is required');
       if (endpointMode === 'custom_endpoint' && !customEndpoint) throw new Error('自定义 Endpoint 必填');
       if (customEndpoint === '/message') throw new Error('Endpoint must be /messages, not /message');
@@ -1127,8 +1106,7 @@
         models: rowsToModels(),
         headers: headerConfig.headers,
         remove_headers: headerConfig.remove_headers,
-        request_max_retries: collectRetryInput('providerRequestMaxRetries', 'request_max_retries', retryDefaults.request),
-        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', retryDefaults.stream)
+        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT)
       };
       if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
       else delete item.custom_endpoint;
@@ -1776,7 +1754,6 @@
     $('headerPreset').addEventListener('change', updateCustomUaInput);
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
     $('providerName').addEventListener('input', updateRetryDefaultsForProviderName);
-    $('providerRequestMaxRetries').addEventListener('input', () => { $('providerRequestMaxRetries').dataset.autoDefault = '0'; });
     $('providerStreamMaxRetries').addEventListener('input', () => { $('providerStreamMaxRetries').dataset.autoDefault = '0'; });
     $('autoCompactPercent').addEventListener('input', markCompactPercentDirty);
 
