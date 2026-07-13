@@ -974,7 +974,7 @@
     }
 
     function modelRowHtml(row, i) {
-      return `<div class="mini-row" data-model-row="${i}"><input data-model-name value="${esc(row.name || '')}" placeholder="模型名称"><input data-model-context type="number" min="0" step="100000" value="${esc(row.context || '')}" placeholder="上下文"><select data-model-effort><option value="">默认</option>${['minimal','low','medium','high','xhigh','none'].map(v => `<option value="${v}" ${row.effort === v ? 'selected' : ''}>${v}</option>`).join('')}</select><button data-remove-model="${i}" type="button">x</button></div>`;
+      return `<div class="mini-row" data-model-row="${i}"><input data-model-name value="${esc(row.name || '')}" placeholder="模型名称"><input data-model-context type="number" min="0" step="100000" value="${esc(row.context || '')}" placeholder="上下文"><select data-model-effort><option value="">默认</option>${['minimal','low','medium','high','xhigh','max','none'].map(v => `<option value="${v}" ${row.effort === v ? 'selected' : ''}>${v}</option>`).join('')}</select><button data-remove-model="${i}" type="button">x</button></div>`;
     }
 
     function renderModelChoices(models) {
