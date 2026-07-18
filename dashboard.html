@@ -1587,7 +1587,8 @@
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('服务地址端口必须是 1-65535');
       const loopbackHosts = ['127.0.0.1', 'localhost', '::1', '[::1]'];
       const listen = loopbackHosts.includes(host) ? '127.0.0.1' : '0.0.0.0';
-      return { listen, port, url: `${url.protocol}//${url.host}` };
+      const normalizedHost = host.includes(':') ? `[${host}]` : host;
+      return { listen, port, url: `${url.protocol}//${normalizedHost}:${port}` };
     }
 
     function openAiproxyEditor(item = null) {
@@ -1627,15 +1628,25 @@
       const item = collectAiproxyEditor();
       $('serverState').textContent = 'AIProxy 服务保存并重启中';
       const data = await api('/aiproxy', { method: 'POST', body: JSON.stringify({ item }) });
-      setAiproxyLog(data);
       closeAiproxyEditor();
       await loadAiproxyServices();
       await loadAll();
+      setAiproxyLog(data);
     }
 
     function setAiproxyLog(data) {
-      const action = data?.returnCode === 0 ? '完成' : '返回';
-      $('serverState').textContent = `AIProxy 操作${action}`;
+      const failures = [];
+      if (data?.returnCode !== 0) failures.push('服务重启失败');
+      if (data?.appSync?.error) failures.push('Codex 配置同步失败');
+      if (data?.claudeFunctions?.error || data?.claudeFunctions?.ok === false) failures.push('Claude Code 函数同步失败');
+      if (failures.length) {
+        $('serverState').textContent = failures.join('；');
+        return;
+      }
+      const reloadHint = data?.claudeFunctions?.changed || data?.claudeFunctions?.sourceAdded
+        ? '；Claude Code 函数已更新，当前终端请执行 source ~/.bashrc'
+        : '';
+      $('serverState').textContent = `AIProxy 操作完成；Codex 与 Claude Code 配置已同步${reloadHint}`;
     }
 
     async function loadAiproxyServices() {
@@ -1761,8 +1772,8 @@
           await loadAiproxyServices();
         } else if (target.dataset.aiproxyAction) {
           const data = await api('/aiproxy/control', { method: 'POST', body: JSON.stringify({ id: target.dataset.aiproxyId, action: target.dataset.aiproxyAction }) });
-          setAiproxyLog(data);
           await loadAiproxyServices();
+          setAiproxyLog(data);
         }
       } catch (err) {
         $('serverState').textContent = err.message;

@@ -1420,6 +1420,23 @@ def aiproxy_status(item: dict[str, Any]) -> dict[str, Any]:
     return status
 
 
+def normalize_aiproxy_url(value: Any, port: int) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    with_scheme = text if re.match(r"^https?://", text, re.IGNORECASE) else f"http://{text}"
+    try:
+        parsed = urlsplit(with_scheme)
+        host = parsed.hostname or ""
+        explicit_port = parsed.port
+    except ValueError:
+        return text
+    if parsed.scheme.lower() != "http" or not host:
+        return text
+    normalized_host = f"[{host}]" if ":" in host else host
+    return f"http://{normalized_host}:{explicit_port or port}"
+
+
 def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     source = overrides or {}
     port = int(source.get("port") or 18006)
@@ -1429,7 +1446,7 @@ def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, A
         "service": AIPROXY_SINGLE_SERVICE,
         "listen": str(source.get("listen") or "127.0.0.1"),
         "port": port,
-        "url": str(source.get("url") or source.get("publicUrl") or "").strip().rstrip("/"),
+        "url": normalize_aiproxy_url(source.get("url") or source.get("publicUrl"), port),
         "config": str(source.get("config") or CONFIG_YAML_FILE),
         "verbose": api_checks.coerce_bool(source.get("verbose"), False),
     }
@@ -1473,10 +1490,16 @@ def write_aiproxy_service(item: dict[str, Any], restart: bool = True) -> dict[st
     status["restart"] = {"returnCode": restart_code, "output": restart_output}
     status["returnCode"] = restart_code
     status["output"] = restart_output
+    providers = load_provider_list()
+    proxy_base = current_aiproxy_proxy_base(item)
     try:
-        status["appSync"] = sync_app_configs_for_proxy_base(load_provider_list(), current_aiproxy_proxy_base(item))
+        status["appSync"] = sync_app_configs_for_proxy_base(providers, proxy_base)
     except Exception as exc:
-        status["appSync"] = {"error": f"{type(exc).__name__}: {exc}", "proxyBase": current_aiproxy_proxy_base(item)}
+        status["appSync"] = {"error": f"{type(exc).__name__}: {exc}", "proxyBase": proxy_base}
+    try:
+        status["claudeFunctions"] = sync_claude_code_functions(providers, proxy_base)
+    except Exception as exc:
+        status["claudeFunctions"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "proxyBase": proxy_base}
     return status
 
 def control_aiproxy_service(service_id: str, action: str) -> dict[str, Any]:
