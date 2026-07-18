@@ -44,6 +44,11 @@ DASHBOARD_HTML = BASE_DIR / "dashboard.html"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
 CODEX_DIR = Path("/root/.codex")
 CODEX_MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
+SHELL_HOME = Path.home()
+CLAUDE_FUNCTIONS_FILE = BASE_DIR / "claude-code-functions.sh"
+BASHRC_FILE = SHELL_HOME / ".bashrc"
+CLAUDE_FUNCTIONS_SOURCE_START = "# >>> ai-api Claude Code functions"
+CLAUDE_FUNCTIONS_SOURCE_END = "# <<< ai-api Claude Code functions"
 SYSTEMD_DIR = Path("/etc/systemd/system")
 AIPROXY_SERVICE_PREFIX = "ai-api-proxy-"
 AIPROXY_SYSTEMD_SERVICES = ("aiproxy.service",)
@@ -93,6 +98,14 @@ def write_json_atomic(path: Path, data: Any) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
         tmp_name = f.name
         f.write(encoded)
+    os.replace(tmp_name, path)
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
+        tmp_name = f.name
+        f.write(content)
     os.replace(tmp_name, path)
 
 
@@ -658,6 +671,184 @@ def provider_endpoint(provider: dict[str, Any]) -> str:
     if mode == "messages":
         return "/messages"
     return "/responses"
+
+
+def claude_code_function_name(provider_name: str) -> str:
+    encoded: list[str] = []
+    for char in str(provider_name or "").strip():
+        if char.isalnum():
+            encoded.append(char)
+        elif char == "_":
+            encoded.append("_u")
+        elif char == "-":
+            encoded.append("_d")
+        elif char == ".":
+            encoded.append("_p")
+    return "cc" + ("".join(encoded) or "provider")
+
+
+def provider_uses_messages_endpoint(provider: dict[str, Any]) -> bool:
+    return provider_endpoint(provider).lower() == "/messages"
+
+
+def claude_code_function_block(provider: dict[str, Any], proxy_base: str = DEFAULT_PROXY_BASE) -> tuple[str, dict[str, Any]]:
+    provider_name = str(provider.get("name") or "").strip()
+    function_name = claude_code_function_name(provider_name)
+    models = provider_model_names(provider)
+    local_base_url = f"{proxy_base.rstrip('/')}/{provider_name}"
+    lines = [
+        f"# Provider: {provider_name}",
+        f"{function_name}() {{",
+    ]
+
+    if not models:
+        lines.extend([
+            f"  printf '%s\\n' {shlex.quote(f'Provider {provider_name} 尚未配置模型，请先在 ai-api Provider 维护页添加模型。')} >&2",
+            "  return 2",
+            "}",
+        ])
+        return "\n".join(lines), {
+            "provider": provider_name,
+            "function": function_name,
+            "models": [],
+            "defaultModel": "",
+        }
+
+    lines.extend([
+        f"  local model={shlex.quote(models[0])}",
+        "",
+        '  if [[ "${1:-}" == "-m" || "${1:-}" == "--model" ]]; then',
+        '    case "${2:-}" in',
+        "      list)",
+        "        printf '%s\\n' \\",
+    ])
+    for index, model in enumerate(models, start=1):
+        suffix = "（默认）" if index == 1 else ""
+        continuation = " \\" if index < len(models) else ""
+        lines.append(f"          {shlex.quote(f'{index}. {model}{suffix}')}{continuation}")
+    lines.extend([
+        "        return",
+        "        ;;",
+    ])
+    for index, model in enumerate(models, start=1):
+        lines.extend([
+            f"      {index}|{shlex.quote(model)})",
+            f"        model={shlex.quote(model)}",
+            "        ;;",
+        ])
+    lines.extend([
+        "      *)",
+        '        printf \'未知模型：%s\\n\' "${2:-未指定}" >&2',
+        f"        printf '%s\\n' {shlex.quote(f'执行 {function_name} -m list 查看可用模型。')} >&2",
+        "        return 2",
+        "        ;;",
+        "    esac",
+        "    shift 2",
+        "  fi",
+        "",
+        "  command env \\",
+        f"    ANTHROPIC_BASE_URL={shlex.quote(local_base_url)} \\",
+        "    ANTHROPIC_AUTH_TOKEN=local-ai-api \\",
+        '    ANTHROPIC_MODEL="$model" \\',
+        "    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \\",
+        '    claude "$@"',
+        "}",
+    ])
+    return "\n".join(lines), {
+        "provider": provider_name,
+        "function": function_name,
+        "models": models,
+        "defaultModel": models[0],
+    }
+
+
+def generated_claude_code_functions(
+    providers: list[dict[str, Any]],
+    proxy_base: str = DEFAULT_PROXY_BASE,
+) -> tuple[str, list[dict[str, Any]]]:
+    blocks: list[str] = []
+    items: list[dict[str, Any]] = []
+    for provider in providers:
+        if not api_checks.coerce_bool(provider.get("enabled"), True):
+            continue
+        if not provider_uses_messages_endpoint(provider):
+            continue
+        provider_name = str(provider.get("name") or "").strip()
+        if not provider_name:
+            continue
+        block, item = claude_code_function_block(provider, proxy_base)
+        blocks.append(block)
+        items.append(item)
+
+    header = "\n".join([
+        "# Generated by ai-api. Manual changes will be overwritten.",
+        "# Reload the current shell with: source ~/.bashrc",
+    ])
+    content = header + "\n"
+    if blocks:
+        content += "\n" + "\n\n".join(blocks) + "\n"
+    return content, items
+
+
+def claude_functions_source_line(path: Path | None = None) -> str:
+    quoted_path = shlex.quote(str(path or CLAUDE_FUNCTIONS_FILE))
+    return f"[ -f {quoted_path} ] && source {quoted_path}"
+
+
+def ensure_claude_functions_sourced() -> tuple[bool, Path | None]:
+    text = BASHRC_FILE.read_text(encoding="utf-8") if BASHRC_FILE.exists() else ""
+    source_line = claude_functions_source_line()
+    expected_block = "\n".join([
+        CLAUDE_FUNCTIONS_SOURCE_START,
+        source_line,
+        CLAUDE_FUNCTIONS_SOURCE_END,
+    ])
+    if expected_block in text:
+        return False, None
+
+    managed_pattern = re.compile(
+        rf"(?ms)^{re.escape(CLAUDE_FUNCTIONS_SOURCE_START)}\n.*?^{re.escape(CLAUDE_FUNCTIONS_SOURCE_END)}\n?"
+    )
+    updated = managed_pattern.sub("", text)
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    if updated:
+        updated += "\n"
+    updated += expected_block + "\n"
+    backup = backup_file(BASHRC_FILE)
+    write_text_atomic(BASHRC_FILE, updated)
+    return True, backup
+
+
+def sync_claude_code_functions(
+    providers: list[dict[str, Any]],
+    proxy_base: str | None = None,
+) -> dict[str, Any]:
+    base_url = (proxy_base or current_aiproxy_proxy_base()).rstrip("/")
+    content, items = generated_claude_code_functions(providers, base_url)
+    previous = CLAUDE_FUNCTIONS_FILE.read_text(encoding="utf-8") if CLAUDE_FUNCTIONS_FILE.exists() else ""
+    functions_changed = previous != content
+    should_write = bool(items) or CLAUDE_FUNCTIONS_FILE.exists()
+    if should_write and functions_changed:
+        write_text_atomic(CLAUDE_FUNCTIONS_FILE, content)
+
+    source_added = False
+    bashrc_backup: Path | None = None
+    if items:
+        source_added, bashrc_backup = ensure_claude_functions_sourced()
+
+    return {
+        "ok": True,
+        "path": str(CLAUDE_FUNCTIONS_FILE),
+        "bashrc": str(BASHRC_FILE),
+        "functions": items,
+        "count": len(items),
+        "changed": functions_changed and should_write,
+        "sourceAdded": source_added,
+        "bashrcBackup": str(bashrc_backup) if bashrc_backup else "",
+        "reloadCommand": "source ~/.bashrc",
+        "proxyBase": base_url,
+    }
 
 
 def codex_wire_api(provider: dict[str, Any]) -> str:
@@ -2382,12 +2573,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 backup, warnings = save_provider_list(providers, str(payload.get("format") or "yaml"))
                 after_providers = load_provider_list()
                 try:
+                    claude_functions = sync_claude_code_functions(after_providers)
+                except Exception as exc:
+                    claude_functions = {"ok": False, "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
+                    warnings.append(f"Claude Code 函数同步失败：{claude_functions['error']}")
+                try:
                     app_sync = auto_sync_app_configs(before_providers, after_providers)
                 except Exception as exc:
                     app_sync = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
                     warnings.append(f"Codex 同步失败：{app_sync['error']}")
                 restart = restart_after_config_write()
-                self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "warnings": warnings, "appSync": app_sync, "restart": restart})
+                self.send_json(200, {
+                    "ok": True,
+                    "backup": str(backup) if backup else "",
+                    "warnings": warnings,
+                    "claudeFunctions": claude_functions,
+                    "appSync": app_sync,
+                    "restart": restart,
+                })
                 return
             if path == "/checkins":
                 items = payload.get("items")

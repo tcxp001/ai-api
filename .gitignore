@@ -8,6 +8,7 @@ monitor.json
 runtime-status.json
 runtime-history.json
 aiproxy-instances.json
+claude-code-functions.sh
 
 # Logs
 *.log

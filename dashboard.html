@@ -800,10 +800,29 @@
       };
       row('保存结果', data.ok ? '配置已保存并完成原子写入' : '保存失败', !!data.ok);
       row('配置备份', data.backup ? `已创建：${data.backup}` : '没有旧配置文件可备份', data.backup ? true : null);
+      row('Claude 函数', claudeFunctionsSummary(data.claudeFunctions), data.claudeFunctions?.ok !== false);
       row('应用同步', appSyncSummary(data.appSync), !data.appSync?.error);
       row('AIProxy 重启', restartSummary(data.restart), data.restart?.ok !== false);
       if (data.warnings?.length) row('保存警告', data.warnings.join('；'), false);
       return rows.join('');
+    }
+
+    function claudeFunctionsSummary(result) {
+      if (!result) return '未返回同步结果';
+      if (result.ok === false || result.error) return `同步失败：${result.error || '未知错误'}`;
+      const functions = Array.isArray(result.functions) ? result.functions : [];
+      if (!functions.length) return '没有已启用的 /messages Provider，无需生成函数';
+      const names = functions.map(item => {
+        const modelCount = Array.isArray(item.models) ? item.models.length : 0;
+        const defaultModel = item.defaultModel || '未配置模型';
+        return `${item.function}（默认 ${defaultModel}，${modelCount} 个模型）`;
+      });
+      const parts = [
+        `${result.changed ? '已更新' : '无需更新'} ${result.path || 'claude-code-functions.sh'}`,
+        names.join('、')
+      ];
+      if (result.sourceAdded) parts.push(`已加入 ~/.bashrc；当前终端执行 ${result.reloadCommand || 'source ~/.bashrc'} 后生效`);
+      return parts.join('；');
     }
 
     function appSyncSummary(appSync) {

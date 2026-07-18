@@ -3445,11 +3445,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     headers.pop(existing, None)
             if api_key:
                 headers["x-api-key"] = api_key
-            headers["anthropic-version"] = str(provider.get("anthropic_version") or DEFAULT_ANTHROPIC_VERSION)
+            if not any(existing.lower() == "anthropic-version" for existing in headers):
+                headers["anthropic-version"] = str(provider.get("anthropic_version") or DEFAULT_ANTHROPIC_VERSION)
         elif api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
+        native_messages_passthrough = (
+            self.command == "POST"
+            and route_path == "/messages"
+            and upstream_route_path == "/messages"
+        )
+        if native_messages_passthrough:
+            body_json = None
+        else:
+            body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
         convert_response_from = ""
         conversion_tool_context: dict[str, Any] | None = None
         provider_api_mode = str(provider.get("api_mode") or "").strip().lower()
