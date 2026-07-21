@@ -54,6 +54,10 @@ PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VALID_API_MODES = {"", "codex_responses", "responses", "chat_completions", "messages", "custom_endpoint"}
 VALID_AUTH_MODES = {"bearer", "anthropic"}
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+# Anthropic 1M-context beta 头。上游中转对声明了 1M 上下文的模型要求请求必须带上
+# 这个 beta，否则拒绝。达到该阈值的模型请求自动注入，无需 provider 手工配置 header。
+CONTEXT_1M_BETA = "context-1m-2025-08-07"
+CONTEXT_1M_MIN_TOKENS = 1_000_000
 TOOL_SEARCH_PROXY_NAME = "tool_search"
 CUSTOM_TOOL_INPUT_FIELD = "input"
 CHAT_TOOL_NAME_MAX_LEN = 64
@@ -77,6 +81,25 @@ def merge_anthropic_beta_values(*values: str) -> str:
                 seen.add(token)
                 merged.append(token)
     return ", ".join(merged)
+
+
+def request_declares_1m_context(provider: dict[str, Any], body_json: dict[str, Any] | None) -> bool:
+    # 上游对声明了 1M 上下文的模型强制要求 context-1m beta。依据请求 model 命中的
+    # provider 模型元数据里的 context_length（load_config 已归一化为正整数）判断，
+    # 达到阈值即认为需要注入该 beta。
+    if not isinstance(body_json, dict):
+        return False
+    model = str(body_json.get("model") or "").strip()
+    if not model:
+        return False
+    meta = provider.get("models", {}).get(model)
+    if not isinstance(meta, dict):
+        return False
+    ctx = meta.get("context_length") or meta.get("max_model_len")
+    try:
+        return int(ctx) >= CONTEXT_1M_MIN_TOKENS
+    except (TypeError, ValueError):
+        return False
 
 
 def provider_auth_mode_for_endpoint(api_mode: str, custom_endpoint: str = "") -> str:
@@ -3462,6 +3485,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     headers["anthropic-beta"] = merged
             else:
                 headers[key_s] = value_s
+
+        # 上游中转对声明了 1M 上下文的模型强制要求 context-1m beta，否则整条请求被拒
+        # （报错“1m 上下文已经全量可用，请启用 1m 上下文后重试”）。这里按请求 model
+        # 命中的模型元数据自动注入，不依赖 provider 手工配置 header，避免新建/重建
+        # provider 时因 UI 无该字段而漏配。
+        if body is not None:
+            try:
+                _peek_json = json.loads(body.decode("utf-8"))
+            except Exception:
+                _peek_json = None
+            if request_declares_1m_context(provider, _peek_json):
+                client_beta = ",".join(
+                    v for k, v in headers.items() if k.lower() == "anthropic-beta"
+                )
+                merged = merge_anthropic_beta_values(client_beta, CONTEXT_1M_BETA)
+                for existing in list(headers.keys()):
+                    if existing.lower() == "anthropic-beta":
+                        headers.pop(existing, None)
+                if merged:
+                    headers["anthropic-beta"] = merged
 
         for key in provider.get("remove_headers", set()):
             for existing in list(headers.keys()):
