@@ -1979,6 +1979,11 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Base URL 和 API Key 必填")
 
     request_headers = api_checks.build_headers(api_key, None, headers, remove_headers, auth_mode=auth_mode, anthropic_version=anthropic_version)
+    # /models 是 OpenAI 兼容的目录端点：new-api 等中转认 Authorization: Bearer，
+    # 而 anthropic 模式的 build_headers 只发 x-api-key，会被判为“未提供令牌”。
+    # 两个头都带上，兼容 new-api（认 Bearer）与 Anthropic 官方（认 x-api-key）。
+    if auth_mode == "anthropic" and not any(k.lower() == "authorization" for k in request_headers):
+        request_headers["Authorization"] = f"Bearer {api_key}"
     started = time.time()
     response: requests.Response | None = None
     last_exc: Exception | None = None

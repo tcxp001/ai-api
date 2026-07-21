@@ -64,6 +64,21 @@ CUSTOM_TOOL_INPUT_DESCRIPTION = (
 CUSTOM_TOOL_PRESERVED_METADATA_HEADING = "Original tool definition:"
 
 
+def merge_anthropic_beta_values(*values: str) -> str:
+    # anthropic-beta 是逗号分隔的多值头。合并客户端已带的 beta 与 provider 配置的
+    # beta，去重且保留首次出现顺序，避免 provider 配置直接覆盖掉客户端自带的 beta
+    # (如 fine-grained-tool-streaming、prompt-caching 等)。
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for token in str(value or "").split(","):
+            token = token.strip()
+            if token and token not in seen:
+                seen.add(token)
+                merged.append(token)
+    return ", ".join(merged)
+
+
 def provider_auth_mode_for_endpoint(api_mode: str, custom_endpoint: str = "") -> str:
     mode = str(api_mode or "").strip().lower()
     endpoint = str(custom_endpoint or "").strip().lower()
@@ -3430,7 +3445,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
             headers[key] = value
 
         for key, value in provider.get("headers", {}).items():
-            headers[str(key)] = "" if value is None else str(value)
+            key_s = str(key)
+            value_s = "" if value is None else str(value)
+            if key_s.lower() == "anthropic-beta":
+                # anthropic-beta 是逗号分隔的多值头：把 provider 配置的 beta 追加到
+                # 客户端已带的值上（去重、保序），避免覆盖 Claude Code 自带的
+                # fine-grained-tool-streaming / prompt-caching 等 beta。
+                client_beta = ",".join(
+                    v for k, v in headers.items() if k.lower() == "anthropic-beta"
+                )
+                merged = merge_anthropic_beta_values(client_beta, value_s)
+                for existing in list(headers.keys()):
+                    if existing.lower() == "anthropic-beta":
+                        headers.pop(existing, None)
+                if merged:
+                    headers["anthropic-beta"] = merged
+            else:
+                headers[key_s] = value_s
 
         for key in provider.get("remove_headers", set()):
             for existing in list(headers.keys()):
