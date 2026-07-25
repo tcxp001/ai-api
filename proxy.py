@@ -102,6 +102,107 @@ def request_declares_1m_context(provider: dict[str, Any], body_json: dict[str, A
         return False
 
 
+# Anthropic 的思考深度参数是 output_config.effort（GA，缺省等价于 high）；thinking
+# 只负责开关（adaptive 开 / disabled 关）。thinking.budget_tokens 在 Opus 4.7 及更新
+# 的模型上已被移除并返回 400，只有更老的模型还需要它。
+ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+ANTHROPIC_MODEL_VERSION_RE = re.compile(r"(opus|sonnet|haiku|fable|mythos)-(\d{1,2})(?!\d)(?:-(\d{1,2})(?!\d))?")
+# 仅在模型不支持 effort（4.6 之前）时才回落使用的旧式思考预算。
+LEGACY_THINKING_BUDGETS = {"medium": 4096, "high": 10240, "xhigh": 32768, "max": 65536}
+
+
+def anthropic_model_version(model: str) -> tuple[str, int, int] | None:
+    """从模型名解析 (家族, 主版本, 次版本)。识别不出来时返回 None（按不支持处理）。"""
+    match = ANTHROPIC_MODEL_VERSION_RE.search(str(model or "").lower())
+    if not match:
+        return None
+    try:
+        return match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def anthropic_supports_effort(model: str) -> bool:
+    # effort 从 Opus/Sonnet 4.6 起可用，Fable/Mythos 5 也支持。
+    version = anthropic_model_version(model)
+    if not version:
+        return False
+    family, major, minor = version
+    if family in {"fable", "mythos"}:
+        return major >= 5
+    if family in {"opus", "sonnet"}:
+        return (major, minor) >= (4, 6)
+    return False
+
+
+def anthropic_is_adaptive_only(model: str) -> bool:
+    """模型是否属于"只认 adaptive"的一代。
+
+    同一批模型同时具备两个特征：budget_tokens 被移除（传了返回 400），以及
+    effort 阶梯里多出 xhigh 档。4.6 一代两者都不成立。
+    """
+    version = anthropic_model_version(model)
+    if not version:
+        return False
+    family, major, minor = version
+    if family == "opus":
+        return (major, minor) >= (4, 7)
+    if family in {"sonnet", "fable", "mythos"}:
+        return major >= 5
+    return False
+
+
+def clamp_anthropic_effort(model: str, effort: str) -> str:
+    level = str(effort or "").strip().lower()
+    if level not in ANTHROPIC_EFFORT_LEVELS:
+        return ""
+    if level == "xhigh" and not anthropic_is_adaptive_only(model):
+        return "high"
+    return level
+
+
+def apply_anthropic_effort(payload: dict[str, Any], effort: str) -> bool:
+    """把配置的思考深度写进 Anthropic /messages 请求体，返回是否真的改动过。
+
+    只对支持 output_config.effort 的模型生效；更老的模型原样放过，由调用方决定要不
+    要回落到 budget_tokens。
+    """
+    if not isinstance(payload, dict):
+        return False
+    model = str(payload.get("model") or "")
+    if not anthropic_supports_effort(model):
+        return False
+    level = clamp_anthropic_effort(model, effort)
+    if not level:
+        return False
+
+    changed = False
+    thinking = payload.get("thinking")
+    thinking_type = ""
+    if isinstance(thinking, dict):
+        thinking_type = str(thinking.get("type") or "").strip().lower()
+    if thinking_type == "disabled" and level in {"xhigh", "max"}:
+        # 关闭思考只在 high 及以下允许，xhigh/max 配 disabled 会 400。客户端已明确
+        # 关掉思考，这里降档，而不是替它重新打开。
+        level = "high"
+    elif thinking_type == "enabled" and anthropic_is_adaptive_only(model):
+        # budget_tokens 形状在这代模型上直接 400，换成 adaptive。
+        payload["thinking"] = {"type": "adaptive"}
+        changed = True
+    elif not thinking_type:
+        # Opus 4.7/4.8 缺省不开思考，显式开 adaptive 高档 effort 才有意义。
+        payload["thinking"] = {"type": "adaptive"}
+        changed = True
+
+    output_config = payload.get("output_config")
+    output_config = dict(output_config) if isinstance(output_config, dict) else {}
+    if str(output_config.get("effort") or "").strip().lower() != level:
+        output_config["effort"] = level
+        payload["output_config"] = output_config
+        changed = True
+    return changed
+
+
 def provider_auth_mode_for_endpoint(api_mode: str, custom_endpoint: str = "") -> str:
     mode = str(api_mode or "").strip().lower()
     endpoint = str(custom_endpoint or "").strip().lower()
@@ -370,6 +471,55 @@ def maybe_apply_reasoning(provider: dict[str, Any], proxied_path: str, body: byt
                 body_json["reasoning"] = {"effort": effort, "summary": "auto"}
                 body_json.setdefault("include", ["reasoning.encrypted_content"])
     return json.dumps(body_json, ensure_ascii=False).encode("utf-8"), body_json
+
+
+def disable_anthropic_thinking(payload: dict[str, Any]) -> bool:
+    """按配置的 reasoning_effort: none 关掉思考，返回是否改动过。"""
+    if not isinstance(payload, dict):
+        return False
+    changed = False
+    model = str(payload.get("model") or "")
+    if not anthropic_supports_effort(model):
+        # 老模型没有 thinking 开关语义，缺省即不思考。
+        return payload.pop("thinking", None) is not None
+    thinking = payload.get("thinking")
+    if not (isinstance(thinking, dict) and str(thinking.get("type") or "").strip().lower() == "disabled"):
+        payload["thinking"] = {"type": "disabled"}
+        changed = True
+    output_config = payload.get("output_config")
+    if isinstance(output_config, dict) and str(output_config.get("effort") or "").strip().lower() in {"xhigh", "max"}:
+        # 关闭思考只在 high 及以下允许。
+        output_config = dict(output_config)
+        output_config["effort"] = "high"
+        payload["output_config"] = output_config
+        changed = True
+    return changed
+
+
+def apply_reasoning_to_native_messages(provider: dict[str, Any], body: bytes | None) -> bytes | None:
+    """给原生 /messages 透传请求补上 provider 配置的思考深度。
+
+    透传路径故意不做整体规范化（否则会丢掉客户端自带的未知字段），所以这里只在确实
+    需要改动时才重新序列化，其余情况原样返回客户端的字节。
+    """
+    if not body:
+        return body
+    try:
+        body_json = json.loads(body.decode("utf-8"))
+    except Exception:
+        return body
+    if not isinstance(body_json, dict):
+        return body
+    effort = configured_reasoning_effort(provider, body_json)
+    if not effort:
+        return body
+    if effort.strip().lower() == "none":
+        changed = disable_anthropic_thinking(body_json)
+    else:
+        changed = apply_anthropic_effort(body_json, effort)
+    if not changed:
+        return body
+    return json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
 
 
@@ -1418,13 +1568,19 @@ def responses_stop_to_anthropic_stop_sequences(value: Any) -> list[str] | None:
     return [str(value)] if str(value) else None
 
 
-def anthropic_thinking_from_responses_reasoning(reasoning: Any, max_tokens: int) -> dict[str, Any] | None:
+def anthropic_thinking_from_responses_reasoning(reasoning: Any, max_tokens: int, model: str = "") -> dict[str, Any] | None:
+    """Responses 的 reasoning.effort 映射成旧式 thinking.budget_tokens。
+
+    仅用于不支持 output_config.effort 的老模型；新模型走 apply_anthropic_effort。
+    """
     if not isinstance(reasoning, dict):
+        return None
+    if anthropic_supports_effort(model):
         return None
     effort = str(reasoning.get("effort") or "").strip().lower()
     if not effort or effort == "low" or max_tokens <= 1024:
         return None
-    default_budget = {"medium": 4096, "high": 10240, "xhigh": 32768, "max": 32768}.get(effort, 4096)
+    default_budget = LEGACY_THINKING_BUDGETS.get(effort, 4096)
     budget = min(default_budget, max(1024, max_tokens // 2))
     if budget >= max_tokens:
         return None
@@ -1535,9 +1691,14 @@ def responses_payload_to_anthropic_messages(body_json: dict[str, Any], tool_cont
     if "tool_choice" in body_json and anthropic_tools:
         payload["tool_choice"] = responses_tool_choice_to_anthropic(body_json.get("tool_choice"), tool_context)
     max_tokens_for_thinking = _coerce_positive_int(payload.get("max_tokens")) or 0
-    thinking = anthropic_thinking_from_responses_reasoning(body_json.get("reasoning"), max_tokens_for_thinking)
+    reasoning = body_json.get("reasoning")
+    model_name = str(payload.get("model") or "")
+    thinking = anthropic_thinking_from_responses_reasoning(reasoning, max_tokens_for_thinking, model_name)
     if thinking:
         payload["thinking"] = thinking
+    elif isinstance(reasoning, dict):
+        # 新模型：思考深度走 output_config.effort，thinking 只负责开关。
+        apply_anthropic_effort(payload, str(reasoning.get("effort") or ""))
     return {k: v for k, v in payload.items() if v is not None}
 
 
@@ -3530,6 +3691,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             and upstream_route_path == "/messages"
         )
         if native_messages_passthrough:
+            # 透传不解析请求体，但配置的思考深度仍要生效：只补 output_config.effort /
+            # thinking，其余字段原样转发。body_json 保持 None，避免走下面的整体规范化。
+            body = apply_reasoning_to_native_messages(provider, body)
             body_json = None
         else:
             body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
@@ -3557,6 +3721,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
         elif self.command == "POST" and upstream_route_path == "/messages" and auth_mode == "anthropic" and isinstance(body_json, dict):
             body_json = normalize_anthropic_messages_payload(body_json)
+            configured_effort = configured_reasoning_effort(provider, body_json)
+            if configured_effort:
+                if configured_effort.strip().lower() == "none":
+                    disable_anthropic_thinking(body_json)
+                else:
+                    apply_anthropic_effort(body_json, configured_effort)
             body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
         if body_json is not None:
             headers["Content-Type"] = "application/json"

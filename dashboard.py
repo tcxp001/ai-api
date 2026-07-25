@@ -895,6 +895,7 @@ def codex_model_catalog_entry(provider: dict[str, Any], model: str, priority: in
             {"effort": "medium", "description": "Balanced speed and reasoning"},
             {"effort": "high", "description": "Greater reasoning depth"},
             {"effort": "xhigh", "description": "Extra high reasoning depth"},
+            {"effort": "max", "description": "Maximum reasoning depth"},
         ],
         "shell_type": "shell_command",
         "visibility": "list",
