@@ -26,7 +26,16 @@ import requests
 import yaml
 
 import api as api_checks
-from proxy import DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, load_config as load_proxy_config
+from proxy import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_KEEPALIVE_CONCURRENCY,
+    DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_KEEPALIVE_RETRY_INTERVAL,
+    DEFAULT_KEEPALIVE_TIMEOUT,
+    DEFAULT_READ_TIMEOUT,
+    KEEPALIVE_CONCURRENCY_MAX,
+    load_config as load_proxy_config,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -51,12 +60,15 @@ CLAUDE_FUNCTIONS_SOURCE_START = "# >>> ai-api Claude Code functions"
 CLAUDE_FUNCTIONS_SOURCE_END = "# <<< ai-api Claude Code functions"
 SYSTEMD_DIR = Path("/etc/systemd/system")
 AIPROXY_SERVICE_PREFIX = "ai-api-proxy-"
-AIPROXY_SYSTEMD_SERVICES = ("aiproxy.service",)
+AIPROXY_KEEPALIVE_SERVICE = "aiproxy-keepalive.service"
+AIPROXY_KEEPALIVE_ID = "aiproxy-keepalive"
+AIPROXY_SYSTEMD_SERVICES = ("aiproxy.service", AIPROXY_KEEPALIVE_SERVICE)
 AIPROXY_SINGLE_SERVICE = "aiproxy.service"
 AIPROXY_SINGLE_ID = "aiproxy"
 AIPROXY_INSTANCES_FILE = DATA_DIR / "aiproxy-instances.json"
 PROXY_RESTART_LOG = LOG_DIR / "proxy-restart.log"
 DEFAULT_PROXY_BASE = "http://127.0.0.1:18006"
+DEFAULT_KEEPALIVE_PROXY_BASE = "http://127.0.0.1:18007"
 DEFAULT_MONITOR_PROMPT = "在吗？"
 AIPROXY_HTTP_TRANSIENT_SECONDS = 12
 AIPROXY_HTTP_FAILURE_THRESHOLD = 3
@@ -70,6 +82,9 @@ MAX_HISTORY_ITEMS = 500
 DEFAULT_AUTO_COMPACT_PERCENT = 70
 MIN_AUTO_COMPACT_PERCENT = 1
 MAX_AUTO_COMPACT_PERCENT = 95
+DEFAULT_AUTO_COMPACT_TOKEN_LIMIT = 200000
+MIN_AUTO_COMPACT_TOKEN_LIMIT = 100000
+MAX_AUTO_COMPACT_TOKEN_LIMIT = 1000000
 CODEX_STREAM_MAX_RETRIES_DEFAULT = 5
 CODEX_RETRY_MAX = 100
 
@@ -121,6 +136,24 @@ def normalize_auto_compact_percent(value: Any, default: int = DEFAULT_AUTO_COMPA
     return percent
 
 
+def normalize_auto_compact_token_limit(
+    value: Any,
+    default: int = DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        limit = int(round(float(value)))
+    except (TypeError, ValueError):
+        raise ValueError("autoCompactTokenLimit must be a number")
+    if limit < MIN_AUTO_COMPACT_TOKEN_LIMIT or limit > MAX_AUTO_COMPACT_TOKEN_LIMIT:
+        raise ValueError(
+            f"autoCompactTokenLimit must be between "
+            f"{MIN_AUTO_COMPACT_TOKEN_LIMIT} and {MAX_AUTO_COMPACT_TOKEN_LIMIT}"
+        )
+    return limit
+
+
 def load_app_settings() -> dict[str, Any]:
     raw = read_json(SETTINGS_FILE, {})
     if not isinstance(raw, dict):
@@ -129,13 +162,24 @@ def load_app_settings() -> dict[str, Any]:
         percent = normalize_auto_compact_percent(raw.get("autoCompactPercent"))
     except ValueError:
         percent = DEFAULT_AUTO_COMPACT_PERCENT
-    return {"autoCompactPercent": percent}
+    try:
+        token_limit = normalize_auto_compact_token_limit(raw.get("autoCompactTokenLimit"))
+    except ValueError:
+        token_limit = DEFAULT_AUTO_COMPACT_TOKEN_LIMIT
+    return {
+        "autoCompactPercent": percent,
+        "autoCompactTokenLimit": token_limit,
+    }
 
 
 def save_app_settings(settings: dict[str, Any]) -> dict[str, Any]:
     current = load_app_settings()
     if "autoCompactPercent" in settings:
         current["autoCompactPercent"] = normalize_auto_compact_percent(settings.get("autoCompactPercent"))
+    if "autoCompactTokenLimit" in settings:
+        current["autoCompactTokenLimit"] = normalize_auto_compact_token_limit(
+            settings.get("autoCompactTokenLimit")
+        )
     write_json_atomic(SETTINGS_FILE, current)
     return current
 
@@ -146,14 +190,34 @@ def current_auto_compact_percent(value: Any = None) -> int:
     return int(load_app_settings().get("autoCompactPercent") or DEFAULT_AUTO_COMPACT_PERCENT)
 
 
-def auto_compact_token_limit(context_window: int, percent: int) -> int:
+def current_auto_compact_token_limit(value: Any = None) -> int:
+    if value is not None:
+        return normalize_auto_compact_token_limit(value)
+    return int(
+        load_app_settings().get("autoCompactTokenLimit")
+        or DEFAULT_AUTO_COMPACT_TOKEN_LIMIT
+    )
+
+
+def auto_compact_token_limit(
+    context_window: int,
+    percent: int,
+    fixed_token_limit: int = DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+) -> int:
     try:
         context = int(context_window)
     except (TypeError, ValueError):
         context = 0
     if context <= 0:
         context = 128000
-    return max(1, int(context * normalize_auto_compact_percent(percent) / 100))
+    percentage_limit = int(context * normalize_auto_compact_percent(percent) / 100)
+    return max(
+        1,
+        min(
+            percentage_limit,
+            normalize_auto_compact_token_limit(fixed_token_limit),
+        ),
+    )
 
 
 def backup_destination(path: Path, now: datetime) -> Path:
@@ -323,6 +387,61 @@ def provider_validation_label(index: int, name: str = "") -> str:
     return f"provider {name!r}" if name else f"provider #{index}"
 
 
+KEEPALIVE_FIELDS = (
+    "keepalive",
+    "keepalive_interval",
+    "keepalive_retry_interval",
+    "keepalive_timeout",
+    "keepalive_concurrency",
+    "keepalive_model",
+    "keepalive_max_attempts",
+)
+
+
+def normalize_keepalive_number(value: Any, field_name: str, low: float, high: float, default: float) -> float | int:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a number")
+    if number < low or number > high:
+        raise ValueError(f"{field_name} must be between {low:g} and {high:g}")
+    return int(number) if number.is_integer() else number
+
+
+def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
+    """Normalize the keepalive fields in place. Bounds mirror proxy.py."""
+    provider["keepalive"] = api_checks.coerce_bool(provider.get("keepalive"), False)
+    try:
+        provider["keepalive_interval"] = normalize_keepalive_number(
+            provider.get("keepalive_interval"), "keepalive_interval", 5, 3600, DEFAULT_KEEPALIVE_INTERVAL
+        )
+        provider["keepalive_retry_interval"] = normalize_keepalive_number(
+            provider.get("keepalive_retry_interval"),
+            "keepalive_retry_interval",
+            1,
+            3600,
+            DEFAULT_KEEPALIVE_RETRY_INTERVAL,
+        )
+        provider["keepalive_timeout"] = normalize_keepalive_number(
+            provider.get("keepalive_timeout"), "keepalive_timeout", 5, 600, DEFAULT_KEEPALIVE_TIMEOUT
+        )
+        provider["keepalive_concurrency"] = int(
+            normalize_keepalive_number(
+                provider.get("keepalive_concurrency"), "keepalive_concurrency", 1, KEEPALIVE_CONCURRENCY_MAX, DEFAULT_KEEPALIVE_CONCURRENCY
+            )
+        )
+        provider["keepalive_max_attempts"] = int(
+            normalize_keepalive_number(provider.get("keepalive_max_attempts"), "keepalive_max_attempts", 0, 100000, 0)
+        )
+    except ValueError as exc:
+        raise ValueError(f"{label} {exc}") from exc
+    provider["keepalive_model"] = str(provider.get("keepalive_model") or "").strip()
+
+
 def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise ValueError(f"provider #{index} must be an object")
@@ -382,6 +501,7 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     else:
         provider.pop("anthropic_version", None)
     provider["enabled"] = api_checks.coerce_bool(provider.get("enabled"), True)
+    normalize_keepalive(provider, label)
     headers = provider.get("headers", {})
     if headers is None:
         headers = {}
@@ -457,6 +577,23 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
     if item.get("anthropic_version") == "2023-06-01":
         item.pop("anthropic_version", None)
     item.pop("request_max_retries", None)
+    # keepalive 默认不勾：关掉时把相关字段全部丢掉，现有 config.yaml 不会新增噪音。
+    if not item.get("keepalive"):
+        for key in KEEPALIVE_FIELDS:
+            item.pop(key, None)
+    else:
+        if item.get("keepalive_interval") == DEFAULT_KEEPALIVE_INTERVAL:
+            item.pop("keepalive_interval", None)
+        if item.get("keepalive_retry_interval") == DEFAULT_KEEPALIVE_RETRY_INTERVAL:
+            item.pop("keepalive_retry_interval", None)
+        if item.get("keepalive_timeout") == DEFAULT_KEEPALIVE_TIMEOUT:
+            item.pop("keepalive_timeout", None)
+        if item.get("keepalive_concurrency") == DEFAULT_KEEPALIVE_CONCURRENCY:
+            item.pop("keepalive_concurrency", None)
+        if not item.get("keepalive_max_attempts"):
+            item.pop("keepalive_max_attempts", None)
+        if not item.get("keepalive_model"):
+            item.pop("keepalive_model", None)
     for key in ("note", "api_key", "key", "reasoning_effort", "reasoning", "anthropic_version"):
         if item.get(key) == "":
             item.pop(key, None)
@@ -691,11 +828,46 @@ def provider_uses_messages_endpoint(provider: dict[str, Any]) -> bool:
     return provider_endpoint(provider).lower() == "/messages"
 
 
-def claude_code_function_block(provider: dict[str, Any], proxy_base: str = DEFAULT_PROXY_BASE) -> tuple[str, dict[str, Any]]:
+def keepalive_proxy_base(proxy_base: str = DEFAULT_PROXY_BASE) -> str:
+    """Return the companion keepalive proxy address (the next TCP port)."""
+    text = str(proxy_base or DEFAULT_PROXY_BASE).strip().rstrip("/")
+    try:
+        parsed = urlsplit(text)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return DEFAULT_KEEPALIVE_PROXY_BASE
+    if not parsed.scheme or not host:
+        return DEFAULT_KEEPALIVE_PROXY_BASE
+    normalized_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{normalized_host}:{port + 1}"
+
+
+def provider_proxy_base(
+    provider: dict[str, Any],
+    proxy_base: str = DEFAULT_PROXY_BASE,
+    keepalive_base: str = "",
+) -> str:
+    if api_checks.coerce_bool(provider.get("keepalive"), False):
+        return (keepalive_base or keepalive_proxy_base(proxy_base)).rstrip("/")
+    return proxy_base.rstrip("/")
+
+
+def claude_code_function_block(
+    provider: dict[str, Any],
+    proxy_base: str = DEFAULT_PROXY_BASE,
+    keepalive_base: str = "",
+    auto_compact_percent: int | None = None,
+    auto_compact_token_limit_value: int | None = None,
+) -> tuple[str, dict[str, Any]]:
     provider_name = str(provider.get("name") or "").strip()
     function_name = claude_code_function_name(provider_name)
     models = provider_model_names(provider)
-    local_base_url = f"{proxy_base.rstrip('/')}/{provider_name}"
+    local_base_url = f"{provider_proxy_base(provider, proxy_base, keepalive_base)}/{provider_name}"
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compact_token_limit = current_auto_compact_token_limit(
+        auto_compact_token_limit_value
+    )
     lines = [
         f"# Provider: {provider_name}",
         f"{function_name}() {{",
@@ -750,6 +922,8 @@ def claude_code_function_block(provider: dict[str, Any], proxy_base: str = DEFAU
         f"    ANTHROPIC_BASE_URL={shlex.quote(local_base_url)} \\",
         "    ANTHROPIC_AUTH_TOKEN=local-ai-api \\",
         '    ANTHROPIC_MODEL="$model" \\',
+        f"    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={compact_percent} \\",
+        f"    CLAUDE_CODE_AUTO_COMPACT_WINDOW={compact_token_limit} \\",
         "    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \\",
         '    claude "$@"',
         "}",
@@ -765,9 +939,16 @@ def claude_code_function_block(provider: dict[str, Any], proxy_base: str = DEFAU
 def generated_claude_code_functions(
     providers: list[dict[str, Any]],
     proxy_base: str = DEFAULT_PROXY_BASE,
+    keepalive_base: str = "",
+    auto_compact_percent: int | None = None,
+    auto_compact_token_limit_value: int | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     blocks: list[str] = []
     items: list[dict[str, Any]] = []
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compact_token_limit = current_auto_compact_token_limit(
+        auto_compact_token_limit_value
+    )
     for provider in providers:
         if not api_checks.coerce_bool(provider.get("enabled"), True):
             continue
@@ -776,7 +957,13 @@ def generated_claude_code_functions(
         provider_name = str(provider.get("name") or "").strip()
         if not provider_name:
             continue
-        block, item = claude_code_function_block(provider, proxy_base)
+        block, item = claude_code_function_block(
+            provider,
+            proxy_base,
+            keepalive_base,
+            compact_percent,
+            compact_token_limit,
+        )
         blocks.append(block)
         items.append(item)
 
@@ -823,9 +1010,26 @@ def ensure_claude_functions_sourced() -> tuple[bool, Path | None]:
 def sync_claude_code_functions(
     providers: list[dict[str, Any]],
     proxy_base: str | None = None,
+    keepalive_base: str = "",
+    auto_compact_percent: int | None = None,
+    auto_compact_token_limit_value: int | None = None,
 ) -> dict[str, Any]:
     base_url = (proxy_base or current_aiproxy_proxy_base()).rstrip("/")
-    content, items = generated_claude_code_functions(providers, base_url)
+    dedicated_url = (
+        keepalive_base
+        or (current_keepalive_proxy_base() if proxy_base is None else keepalive_proxy_base(base_url))
+    ).rstrip("/")
+    compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compact_token_limit = current_auto_compact_token_limit(
+        auto_compact_token_limit_value
+    )
+    content, items = generated_claude_code_functions(
+        providers,
+        base_url,
+        dedicated_url,
+        compact_percent,
+        compact_token_limit,
+    )
     previous = CLAUDE_FUNCTIONS_FILE.read_text(encoding="utf-8") if CLAUDE_FUNCTIONS_FILE.exists() else ""
     functions_changed = previous != content
     should_write = bool(items) or CLAUDE_FUNCTIONS_FILE.exists()
@@ -848,6 +1052,8 @@ def sync_claude_code_functions(
         "bashrcBackup": str(bashrc_backup) if bashrc_backup else "",
         "reloadCommand": "source ~/.bashrc",
         "proxyBase": base_url,
+        "autoCompactPercent": compact_percent,
+        "autoCompactTokenLimit": compact_token_limit,
     }
 
 
@@ -950,7 +1156,11 @@ def toml_string(value: Any) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def generated_codex_provider_block(providers: list[dict[str, Any]], proxy_base: str) -> str:
+def generated_codex_provider_block(
+    providers: list[dict[str, Any]],
+    proxy_base: str,
+    keepalive_base: str = "",
+) -> str:
     lines: list[str] = [CODEX_SYNC_START]
     for provider in providers:
         name = str(provider.get("name") or "").strip()
@@ -965,7 +1175,7 @@ def generated_codex_provider_block(providers: list[dict[str, Any]], proxy_base: 
         lines.extend([
             f'[model_providers.{toml_string(name)}]',
             f'name = {toml_string(name)}',
-            f'base_url = {toml_string(proxy_provider_url(name, proxy_base))}',
+            f'base_url = {toml_string(proxy_provider_url(name, provider_proxy_base(provider, proxy_base, keepalive_base)))}',
             f'wire_api = {toml_string(codex_wire_api(provider))}',
             f"stream_max_retries = {stream_retries}",
             "",
@@ -1080,14 +1290,28 @@ def cleanup_codex_profiles(active_names: set[str], stale_names: set[str] | None 
             catalog_deleted.append({"path": str(catalog_path), "backup": str(catalog_backup) if catalog_backup else ""})
     return {"deleted": deleted, "backups": backups, "catalogDeleted": catalog_deleted}
 
-def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_provider: str = "", stale_profile_names: set[str] | None = None, auto_compact_percent: int | None = None) -> dict[str, Any]:
+def sync_codex_config(
+    providers: list[dict[str, Any]],
+    proxy_base: str,
+    default_provider: str = "",
+    stale_profile_names: set[str] | None = None,
+    auto_compact_percent: int | None = None,
+    keepalive_base: str = "",
+    auto_compact_token_limit_value: int | None = None,
+) -> dict[str, Any]:
     CODEX_DIR.mkdir(parents=True, exist_ok=True)
     CODEX_MODEL_CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
     backup = backup_file(CODEX_CONFIG)
     compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compact_token_limit = current_auto_compact_token_limit(
+        auto_compact_token_limit_value
+    )
     provider_names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
-    content = strip_codex_generated_blocks(existing, provider_names, proxy_base) + generated_codex_provider_block(providers, proxy_base)
+    content = (
+        strip_codex_generated_blocks(existing, provider_names, proxy_base)
+        + generated_codex_provider_block(providers, proxy_base, keepalive_base)
+    )
     default = next((provider for provider in providers if str(provider.get("name") or "") == default_provider), None)
     if default:
         content = set_codex_default_model(content, default_provider, first_model(default))
@@ -1110,7 +1334,10 @@ def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_
             written_catalogs.append(catalog_result)
         profile_lines = [f"model = {toml_string(model)}", f"model_provider = {toml_string(name)}"]
         profile_lines.append(f'model_context_window = {int(context)}')
-        profile_lines.append(f'model_auto_compact_token_limit = {auto_compact_token_limit(context, compact_percent)}')
+        profile_lines.append(
+            f'model_auto_compact_token_limit = '
+            f'{auto_compact_token_limit(context, compact_percent, compact_token_limit)}'
+        )
         if effort:
             profile_lines.append(f"model_reasoning_effort = {toml_string(effort)}")
         if catalog_result:
@@ -1135,6 +1362,7 @@ def sync_codex_config(providers: list[dict[str, Any]], proxy_base: str, default_
         "profileBackups": profile_backups,
         "profileCleanup": profile_cleanup,
         "autoCompactPercent": compact_percent,
+        "autoCompactTokenLimit": compact_token_limit,
     }
 
 def is_proxy_generated_provider(item: Any, proxy_base: str) -> bool:
@@ -1146,16 +1374,37 @@ def is_proxy_generated_provider(item: Any, proxy_base: str) -> bool:
 
 
 
-def sync_app_configs_for_proxy_base(providers: list[dict[str, Any]], proxy_base: str, stale_names: set[str] | None = None, auto_compact_percent: int | None = None) -> dict[str, Any]:
+def sync_app_configs_for_proxy_base(
+    providers: list[dict[str, Any]],
+    proxy_base: str,
+    stale_names: set[str] | None = None,
+    auto_compact_percent: int | None = None,
+    keepalive_base: str = "",
+    auto_compact_token_limit_value: int | None = None,
+) -> dict[str, Any]:
     enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True)]
     codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
     codex_default = choose_codex_default_provider(enabled, codex_existing)
     compact_percent = current_auto_compact_percent(auto_compact_percent)
+    compact_token_limit = current_auto_compact_token_limit(
+        auto_compact_token_limit_value
+    )
     return {
         "needed": True,
         "proxyBase": proxy_base,
-        "settings": {"autoCompactPercent": compact_percent},
-        "codex": sync_codex_config(enabled, proxy_base, codex_default, stale_names, compact_percent),
+        "settings": {
+            "autoCompactPercent": compact_percent,
+            "autoCompactTokenLimit": compact_token_limit,
+        },
+        "codex": sync_codex_config(
+            enabled,
+            proxy_base,
+            codex_default,
+            stale_names,
+            compact_percent,
+            keepalive_base,
+            compact_token_limit,
+        ),
     }
 
 
@@ -1224,7 +1473,7 @@ def app_sync_projection(providers: list[dict[str, Any]], proxy_base: str = DEFAU
             continue
         projection.append({
             "name": name,
-            "base_url": proxy_provider_url(name, proxy_base),
+            "base_url": proxy_provider_url(name, provider_proxy_base(provider, proxy_base)),
             "api_mode": provider_api_mode(provider),
             "first_model": first_model(provider),
             "models": provider.get("models") or {},
@@ -1246,7 +1495,13 @@ def app_configs_need_proxy_sync(providers: list[dict[str, Any]], proxy_base: str
     enabled = [provider for provider in providers if api_checks.coerce_bool(provider.get("enabled"), True) and str(provider.get("name") or "").strip()]
     if not enabled:
         return False
-    expected = {str(provider.get("name") or "").strip(): proxy_provider_url(str(provider.get("name") or "").strip(), proxy_base) for provider in enabled}
+    expected = {
+        str(provider.get("name") or "").strip(): proxy_provider_url(
+            str(provider.get("name") or "").strip(),
+            provider_proxy_base(provider, proxy_base),
+        )
+        for provider in enabled
+    }
     try:
         codex_items = {str(item.get("name") or "").strip(): str(item.get("base_url") or "").rstrip("/") for item in load_codex_custom_providers()}
         if any(codex_items.get(name) != url.rstrip("/") for name, url in expected.items()):
@@ -1258,13 +1513,19 @@ def app_configs_need_proxy_sync(providers: list[dict[str, Any]], proxy_base: str
 
 def auto_sync_app_configs(before: list[dict[str, Any]], after: list[dict[str, Any]], proxy_base: str | None = None) -> dict[str, Any]:
     proxy_base = (proxy_base or current_aiproxy_proxy_base()).strip().rstrip("/")
+    keepalive_base = current_keepalive_proxy_base().strip().rstrip("/")
     providers = [provider for provider in after if api_checks.coerce_bool(provider.get("enabled"), True)]
     if not app_sync_needed(before, after, proxy_base) and not app_configs_need_proxy_sync(providers, proxy_base):
         return {"needed": False, "reason": "no app config change", "proxyBase": proxy_base}
     before_names = {str(provider.get("name") or "").strip() for provider in before if provider.get("name")}
     after_names = {str(provider.get("name") or "").strip() for provider in providers if provider.get("name")}
     stale_names = before_names - after_names
-    return sync_app_configs_for_proxy_base(providers, proxy_base, stale_names)
+    return sync_app_configs_for_proxy_base(
+        providers,
+        proxy_base,
+        stale_names,
+        keepalive_base=keepalive_base,
+    )
 
 
 def load_codex_custom_providers() -> list[dict[str, Any]]:
@@ -1380,7 +1641,9 @@ def aiproxy_unit_content(item: dict[str, Any]) -> str:
     port = int(item.get("port") or 18006)
     config = str(item.get("config") or active_config_file())
     verbose = " --verbose" if item.get("verbose") else ""
-    exec_start = f'{sys.executable} {BASE_DIR / "proxy.py"} --config {config} --listen {listen} --port {port}{verbose}'
+    scope_flag = str(item.get("scopeFlag") or "").strip()
+    scope = f" {scope_flag}" if scope_flag else ""
+    exec_start = f'{sys.executable} {BASE_DIR / "proxy.py"} --config {config} --listen {listen} --port {port}{scope}{verbose}'
     return "\n".join([
         "[Unit]",
         f"Description=AI API Proxy {service_id}",
@@ -1391,7 +1654,7 @@ def aiproxy_unit_content(item: dict[str, Any]) -> str:
         "Type=simple",
         f"WorkingDirectory={BASE_DIR}",
         f"ExecStart={exec_start}",
-        "Restart=on-failure",
+        "Restart=always",
         "RestartSec=3",
         "",
         "[Install]",
@@ -1442,63 +1705,118 @@ def default_aiproxy_item(overrides: dict[str, Any] | None = None) -> dict[str, A
     source = overrides or {}
     port = int(source.get("port") or 18006)
     return {
+        **source,
         "id": AIPROXY_SINGLE_ID,
-        "name": "AIProxy",
+        "name": "AIProxy-主通道",
         "service": AIPROXY_SINGLE_SERVICE,
         "listen": str(source.get("listen") or "127.0.0.1"),
         "port": port,
         "url": normalize_aiproxy_url(source.get("url") or source.get("publicUrl"), port),
         "config": str(source.get("config") or CONFIG_YAML_FILE),
         "verbose": api_checks.coerce_bool(source.get("verbose"), False),
+        "scopeFlag": "--exclude-keepalive",
+    }
+
+
+def keepalive_aiproxy_item(
+    main_item: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    main = default_aiproxy_item(main_item)
+    source = overrides or {}
+    port = int(source.get("port") or (int(main.get("port") or 18006) + 1))
+    default_url = keepalive_proxy_base(str(main.get("url") or aiproxy_probe_url(main)))
+    return {
+        **source,
+        "id": AIPROXY_KEEPALIVE_ID,
+        "name": "AIProxy-抢通保活通道",
+        "service": AIPROXY_KEEPALIVE_SERVICE,
+        "listen": str(source.get("listen") or main.get("listen") or "127.0.0.1"),
+        "port": port,
+        "url": normalize_aiproxy_url(source.get("url") or source.get("publicUrl") or default_url, port),
+        "config": str(source.get("config") or main.get("config") or CONFIG_YAML_FILE),
+        "verbose": api_checks.coerce_bool(source.get("verbose"), api_checks.coerce_bool(main.get("verbose"), False)),
+        "scopeFlag": "--keepalive-only",
     }
 
 
 def ensure_single_aiproxy_service() -> dict[str, Any]:
     item = preferred_aiproxy_item() or default_aiproxy_item()
     item = default_aiproxy_item(item)
-    unit_path = SYSTEMD_DIR / AIPROXY_SINGLE_SERVICE
-    if not unit_path.exists():
-        return write_aiproxy_service(item, restart=True)
-    enabled_code, _enabled = run_systemctl(["is-enabled", AIPROXY_SINGLE_SERVICE])
-    if enabled_code != 0:
-        run_systemctl(["enable", AIPROXY_SINGLE_SERVICE])
+    required = (
+        (SYSTEMD_DIR / AIPROXY_SINGLE_SERVICE, item),
+        (SYSTEMD_DIR / AIPROXY_KEEPALIVE_SERVICE, keepalive_aiproxy_item(item)),
+    )
+    for path, service_item in required:
+        if not path.exists():
+            write_aiproxy_service(service_item, restart=True)
+    for service in AIPROXY_SYSTEMD_SERVICES:
+        enabled_code, _enabled = run_systemctl(["is-enabled", service])
+        if enabled_code != 0:
+            run_systemctl(["enable", service])
     status = aiproxy_status(item)
     status["ensured"] = True
     return status
 
 
 def write_aiproxy_service(item: dict[str, Any], restart: bool = True) -> dict[str, Any]:
-    item = default_aiproxy_item(item)
-    target_service = AIPROXY_SINGLE_SERVICE
-    service_id = AIPROXY_SINGLE_ID
+    requested_id = normalize_service_id(str(item.get("id") or AIPROXY_SINGLE_ID))
+    requested_service = str(item.get("service") or "")
+    is_keepalive = requested_id == AIPROXY_KEEPALIVE_ID or requested_service == AIPROXY_KEEPALIVE_SERVICE
+    if requested_id and requested_id not in {AIPROXY_SINGLE_ID, AIPROXY_KEEPALIVE_ID}:
+        raise ValueError("AIProxy service not found")
+    if requested_service and requested_service not in AIPROXY_SYSTEMD_SERVICES:
+        raise ValueError("AIProxy service not found")
 
+    existing = merged_aiproxy_service_items()
+    existing_main = next(
+        (candidate for candidate in existing if str(candidate.get("service") or "") == AIPROXY_SINGLE_SERVICE),
+        default_aiproxy_item(),
+    )
+    existing_keepalive = next(
+        (candidate for candidate in existing if str(candidate.get("service") or "") == AIPROXY_KEEPALIVE_SERVICE),
+        keepalive_aiproxy_item(existing_main),
+    )
+    if is_keepalive:
+        main_item = default_aiproxy_item(existing_main)
+        target_item = keepalive_aiproxy_item(main_item, {**existing_keepalive, **item})
+        keepalive_item = target_item
+    else:
+        target_item = default_aiproxy_item({**existing_main, **item})
+        main_item = target_item
+        keepalive_item = keepalive_aiproxy_item(main_item, existing_keepalive)
+
+    target_service = str(target_item["service"])
     path = SYSTEMD_DIR / target_service
     backup = backup_file(path)
-    path.write_text(aiproxy_unit_content(item), encoding="utf-8")
+    path.write_text(aiproxy_unit_content(target_item), encoding="utf-8")
     reload_code, reload_output = run_systemctl(["daemon-reload"])
+    action = "restart" if restart else "start"
     enable_code, enable_output = run_systemctl(["enable", target_service])
-    if restart:
-        restart_code, restart_output = run_systemctl(["restart", target_service])
-    else:
-        restart_code, restart_output = run_systemctl(["start", target_service])
+    action_code, action_output = run_systemctl([action, target_service])
 
-    save_aiproxy_instances([item])
+    save_aiproxy_instances([main_item, keepalive_item])
 
-    status = aiproxy_status(item)
+    status = aiproxy_status(target_item)
     status["backup"] = str(backup) if backup else ""
     status["daemonReload"] = {"returnCode": reload_code, "output": reload_output}
     status["enable"] = {"returnCode": enable_code, "output": enable_output}
-    status["restart"] = {"returnCode": restart_code, "output": restart_output}
-    status["returnCode"] = restart_code
-    status["output"] = restart_output
+    status[action] = {"returnCode": action_code, "output": action_output}
+    status["returnCode"] = max(reload_code, enable_code, action_code)
+    status["output"] = "\n".join(part for part in (enable_output, action_output) if part)
     providers = load_provider_list()
-    proxy_base = current_aiproxy_proxy_base(item)
+    proxy_base = aiproxy_probe_url(main_item) or DEFAULT_PROXY_BASE
+    keepalive_base = aiproxy_probe_url(keepalive_item) or DEFAULT_KEEPALIVE_PROXY_BASE
     try:
-        status["appSync"] = sync_app_configs_for_proxy_base(providers, proxy_base)
+        status["appSync"] = sync_app_configs_for_proxy_base(
+            providers,
+            proxy_base,
+            keepalive_base=keepalive_base,
+        )
     except Exception as exc:
         status["appSync"] = {"error": f"{type(exc).__name__}: {exc}", "proxyBase": proxy_base}
     try:
-        status["claudeFunctions"] = sync_claude_code_functions(providers, proxy_base)
+        status["claudeFunctions"] = sync_claude_code_functions(providers, proxy_base, keepalive_base)
     except Exception as exc:
         status["claudeFunctions"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "proxyBase": proxy_base}
     return status
@@ -1506,9 +1824,11 @@ def write_aiproxy_service(item: dict[str, Any], restart: bool = True) -> dict[st
 def control_aiproxy_service(service_id: str, action: str) -> dict[str, Any]:
     if action not in {"start", "stop", "restart", "enable", "disable"}:
         raise ValueError("unsupported action")
-    item = preferred_aiproxy_item() or default_aiproxy_item()
-    item = default_aiproxy_item(item)
-    code, output = run_systemctl([action, AIPROXY_SINGLE_SERVICE])
+    item = find_aiproxy_service_item(service_id)
+    if item is None:
+        raise ValueError("AIProxy service not found")
+    name = str(item.get("service") or AIPROXY_SINGLE_SERVICE)
+    code, output = run_systemctl([action, name])
     status = aiproxy_status(item)
     status["returnCode"] = code
     status["output"] = output
@@ -1524,6 +1844,14 @@ def parse_cli_flag(args: list[str], name: str) -> str:
             return args[index + 1]
         if arg.startswith(prefix):
             return arg[len(prefix):]
+    return ""
+
+
+def parse_aiproxy_scope_flag(args: list[str]) -> str:
+    if "--keepalive-only" in args:
+        return "--keepalive-only"
+    if "--exclude-keepalive" in args:
+        return "--exclude-keepalive"
     return ""
 
 
@@ -1636,6 +1964,7 @@ def aiproxy_item_from_unit(path: Path) -> dict[str, Any]:
     item["listen"] = parse_cli_flag(args, "--listen") or "127.0.0.1"
     item["port"] = parse_cli_flag(args, "--port") or 18006
     item["verbose"] = "--verbose" in args
+    item["scopeFlag"] = parse_aiproxy_scope_flag(args)
     return item
 
 
@@ -1660,6 +1989,7 @@ def named_aiproxy_service_item(name: str) -> dict[str, Any] | None:
     item["listen"] = parse_cli_flag(args, "--listen") or "127.0.0.1"
     item["port"] = parse_cli_flag(args, "--port") or 18006
     item["verbose"] = "--verbose" in args
+    item["scopeFlag"] = parse_aiproxy_scope_flag(args)
     return item
 
 
@@ -1671,20 +2001,36 @@ def discover_aiproxy_unit_items() -> list[dict[str, Any]]:
 
 
 def merged_aiproxy_service_items() -> list[dict[str, Any]]:
-    configured = None
+    configured_main = None
+    configured_keepalive = None
     data = load_aiproxy_instances()
     for item in data.get("items", []):
         if str(item.get("service") or "") == AIPROXY_SINGLE_SERVICE or normalize_service_id(str(item.get("id") or "")) == AIPROXY_SINGLE_ID:
-            configured = item
-            break
-    discovered = named_aiproxy_service_item(AIPROXY_SINGLE_SERVICE)
-    item = default_aiproxy_item({**(discovered or {}), **(configured or {})})
-    return [item]
+            configured_main = item
+        elif str(item.get("service") or "") == AIPROXY_KEEPALIVE_SERVICE:
+            configured_keepalive = item
+    discovered_main = named_aiproxy_service_item(AIPROXY_SINGLE_SERVICE)
+    main = default_aiproxy_item({**(discovered_main or {}), **(configured_main or {})})
+    discovered_keepalive = named_aiproxy_service_item(AIPROXY_KEEPALIVE_SERVICE)
+    keepalive = keepalive_aiproxy_item(
+        main,
+        {
+            **(discovered_keepalive or {}),
+            **(configured_keepalive or {}),
+        },
+    )
+    return [main, keepalive]
 
 
 
 def find_aiproxy_service_item(service_id: str) -> dict[str, Any] | None:
-    return merged_aiproxy_service_items()[0]
+    target = normalize_service_id(service_id)
+    for item in merged_aiproxy_service_items():
+        item_id = normalize_service_id(str(item.get("id") or ""))
+        service = str(item.get("service") or "")
+        if target == item_id or target == normalize_service_id(service.removesuffix(".service")):
+            return item
+    return None
 
 
 
@@ -1704,17 +2050,17 @@ def aiproxy_config_files() -> list[dict[str, Any]]:
 
 def list_aiproxy_services() -> dict[str, Any]:
     data = load_aiproxy_instances()
-    item = ensure_single_aiproxy_service()
-    items = [item]
+    ensure_single_aiproxy_service()
+    items = [aiproxy_status(item) for item in merged_aiproxy_service_items()]
     return {
         "items": items,
         "updatedAt": data.get("updatedAt", ""),
         "defaultConfig": str(CONFIG_YAML_FILE),
         "configFiles": aiproxy_config_files(),
         "summary": {
-            "total": 1,
-            "running": 1 if item.get("activeOk") else 0,
-            "healthy": 1 if item.get("health") == "healthy" else 0,
+            "total": len(items),
+            "running": sum(1 for item in items if item.get("activeOk")),
+            "healthy": sum(1 for item in items if item.get("health") == "healthy"),
         },
     }
 
@@ -1730,6 +2076,37 @@ def preferred_aiproxy_item(items: list[dict[str, Any]] | None = None) -> dict[st
 def current_aiproxy_proxy_base(fallback_item: dict[str, Any] | None = None) -> str:
     item = fallback_item or preferred_aiproxy_item()
     return (aiproxy_probe_url(item or {}) or DEFAULT_PROXY_BASE).rstrip("/")
+
+
+def current_keepalive_proxy_base() -> str:
+    item = next(
+        (candidate for candidate in merged_aiproxy_service_items() if str(candidate.get("service") or "") == AIPROXY_KEEPALIVE_SERVICE),
+        None,
+    )
+    return (aiproxy_probe_url(item or {}) or DEFAULT_KEEPALIVE_PROXY_BASE).rstrip("/")
+
+
+def keepalive_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
+    """向 aiproxy 进程要抢通/保活状态。保活线程活在 proxy 里，dashboard 只是转发。"""
+    base = (proxy_base or current_keepalive_proxy_base()).rstrip("/")
+    if not base:
+        return {"ok": False, "error": "aiproxy address unknown", "providers": {}}
+    try:
+        response = requests.get(f"{base}/_keepalive", timeout=(3, 5))
+    except Exception as exc:
+        return {"ok": False, "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 400), "providers": {}, "proxyBase": base}
+    if response.status_code != 200:
+        return {"ok": False, "error": f"HTTP {response.status_code}", "providers": {}, "proxyBase": base}
+    try:
+        payload = response.json()
+    except Exception:
+        return {"ok": False, "error": "non-JSON reply from aiproxy", "providers": {}, "proxyBase": base}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "unexpected reply from aiproxy", "providers": {}, "proxyBase": base}
+    payload["ok"] = True
+    payload["proxyBase"] = base
+    payload.setdefault("providers", {})
+    return payload
 
 
 def proc_cwd(pid: int) -> Path | None:
@@ -2568,6 +2945,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/aiproxy":
                 self.send_json(200, list_aiproxy_services())
                 return
+            if path == "/keepalive":
+                query = parse_qs(split.query)
+                proxy_base = (query.get("proxyBase") or [""])[0]
+                self.send_json(200, keepalive_status_from_proxy(proxy_base))
+                return
             if path == "/proxy-config":
                 cfg = load_proxy_config(active_config_file())
                 self.send_json(200, {
@@ -2722,16 +3104,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(200, clear_history())
                 return
             if path == "/app-configs/compact-percent":
-                percent = normalize_auto_compact_percent(payload.get("autoCompactPercent"))
-                settings = save_app_settings({"autoCompactPercent": percent})
+                current_settings = load_app_settings()
+                percent = normalize_auto_compact_percent(
+                    payload.get(
+                        "autoCompactPercent",
+                        current_settings["autoCompactPercent"],
+                    )
+                )
+                token_limit = normalize_auto_compact_token_limit(
+                    payload.get(
+                        "autoCompactTokenLimit",
+                        current_settings["autoCompactTokenLimit"],
+                    )
+                )
+                settings = save_app_settings(
+                    {
+                        "autoCompactPercent": percent,
+                        "autoCompactTokenLimit": token_limit,
+                    }
+                )
                 providers = [provider for provider in load_provider_list() if api_checks.coerce_bool(provider.get("enabled"), True)]
                 proxy_base = str(payload.get("proxyBase") or current_aiproxy_proxy_base()).strip().rstrip("/")
+                keepalive_base = current_keepalive_proxy_base().strip().rstrip("/")
                 codex_existing = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
                 codex_default = choose_codex_default_provider(providers, codex_existing)
                 result = {
                     "proxyBase": proxy_base,
                     "settings": settings,
-                    "codex": sync_codex_config(providers, proxy_base, codex_default, auto_compact_percent=percent),
+                    "codex": sync_codex_config(
+                        providers,
+                        proxy_base,
+                        codex_default,
+                        auto_compact_percent=percent,
+                        keepalive_base=keepalive_base,
+                        auto_compact_token_limit_value=token_limit,
+                    ),
+                    "claudeCode": sync_claude_code_functions(
+                        providers,
+                        proxy_base,
+                        keepalive_base,
+                        auto_compact_percent=percent,
+                        auto_compact_token_limit_value=token_limit,
+                    ),
                 }
                 self.send_json(200, {"ok": True, "settings": settings, "result": result})
                 return
@@ -2746,9 +3160,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if unsupported_targets:
                     raise ValueError("target must be codex")
                 compact_percent = current_auto_compact_percent()
-                result: dict[str, Any] = {"proxyBase": proxy_base, "settings": {"autoCompactPercent": compact_percent}}
+                compact_token_limit = current_auto_compact_token_limit()
+                result: dict[str, Any] = {
+                    "proxyBase": proxy_base,
+                    "settings": {
+                        "autoCompactPercent": compact_percent,
+                        "autoCompactTokenLimit": compact_token_limit,
+                    },
+                }
                 if "codex" in targets:
-                    result["codex"] = sync_codex_config(providers, proxy_base, default_provider, auto_compact_percent=compact_percent)
+                    result["codex"] = sync_codex_config(
+                        providers,
+                        proxy_base,
+                        default_provider,
+                        auto_compact_percent=compact_percent,
+                        auto_compact_token_limit_value=compact_token_limit,
+                    )
                 restart = restart_after_config_write()
                 self.send_json(200, {"ok": True, "result": result, "restart": restart})
                 return

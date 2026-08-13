@@ -13,6 +13,12 @@ import unicodedata
 import requests
 import yaml
 
+try:
+    from prompts import next_prompt as next_probe_prompt
+except ImportError:  # pragma: no cover - prompts.py missing from a partial deployment
+    def next_probe_prompt():
+        return "在吗？短回"
+
 # ==========================================
 # 顶部配置：选择 UA 测试方式
 # ==========================================
@@ -256,10 +262,12 @@ def is_messages_endpoint(endpoint):
 
 
 def build_payload(model, endpoint, variant="basic"):
+    # 提示词每次从共享牌堆轮换取一句，避免固定 "在吗？" 被上游当成重复请求缓存/限流。
+    prompt = next_probe_prompt()
     if is_responses_endpoint(endpoint):
         payload = {
             "model": model,
-            "input": [{"role": "user", "content": "在吗？"}],
+            "input": [{"role": "user", "content": prompt}],
             "store": False,
             "include": ["reasoning.encrypted_content"],
             "max_output_tokens": MAX_OUTPUT_TOKENS,
@@ -270,7 +278,7 @@ def build_payload(model, endpoint, variant="basic"):
 
     return {
         "model": model,
-        "messages": [{"role": "user", "content": "在吗？"}],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": MAX_OUTPUT_TOKENS,
     }
 

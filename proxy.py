@@ -32,6 +32,17 @@ import requests
 from requests.adapters import HTTPAdapter
 import yaml
 
+try:
+    from prompts import next_prompt as next_keepalive_prompt
+except ImportError:  # pragma: no cover - prompts.py missing from a partial deployment
+    PROMPTS_MODULE_AVAILABLE = False
+
+    def next_keepalive_prompt() -> str:
+        """Degraded fallback so a missing prompts.py cannot break request proxying."""
+        return "在吗？短回"
+else:
+    PROMPTS_MODULE_AVAILABLE = True
+
 DEFAULT_CONFIG = Path(__file__).with_name("config.yaml")
 
 HOP_BY_HOP_HEADERS = {
@@ -233,6 +244,32 @@ TRANSPORT_RETRY_EXCEPTIONS = (
     requests.exceptions.ChunkedEncodingError,
 )
 
+# 抢通 / 保温 (keepalive) defaults. See KeepAliveManager below.
+DEFAULT_KEEPALIVE_INTERVAL = 30.0
+DEFAULT_KEEPALIVE_CONCURRENCY = 10
+DEFAULT_KEEPALIVE_TIMEOUT = 30.0
+KEEPALIVE_CONCURRENCY_MAX = 50
+# Cap in-flight probes across every provider so N providers x concurrency does not
+# open a burst of sockets at startup.
+KEEPALIVE_GLOBAL_INFLIGHT = 16
+# 一整轮抢通失败后固定等待，再开始下一轮；与成功后的保活间隔相互独立。
+DEFAULT_KEEPALIVE_RETRY_INTERVAL = 5.0
+KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS = 32
+# Upstream text that means "try again later", not "this provider is broken".
+KEEPALIVE_RETRYABLE_BODY_MARKERS = ("rate_limit", "rate limit", "overloaded", "too many requests")
+
+
+def _is_stale_connection_error(exc: BaseException) -> bool:
+    """True when the failure looks like a pooled keep-alive socket the upstream closed.
+
+    requests.ConnectTimeout subclasses ConnectionError but means the upstream is
+    unreachable, so it must not be treated as a recyclable stale connection.
+    """
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return False
+    return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError))
+
+
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -264,6 +301,39 @@ def _coerce_positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return low if value < low else high if value > high else value
+
+
+def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Read the ``keepalive*`` provider fields, clamped to sane bounds.
+
+    ``keepalive`` defaults to False, so a provider that never mentions keepalive
+    behaves exactly as before. ``keepalive_max_attempts`` is the one field where 0
+    is meaningful (retry forever), which is why ``_coerce_positive_int`` cannot be
+    used for it.
+    """
+    enabled = _coerce_bool(entry.get("keepalive"), False)
+    interval = _coerce_positive_float(entry.get("keepalive_interval")) or DEFAULT_KEEPALIVE_INTERVAL
+    retry_interval = _coerce_positive_float(entry.get("keepalive_retry_interval")) or DEFAULT_KEEPALIVE_RETRY_INTERVAL
+    timeout = _coerce_positive_float(entry.get("keepalive_timeout")) or DEFAULT_KEEPALIVE_TIMEOUT
+    concurrency = _coerce_positive_int(entry.get("keepalive_concurrency")) or DEFAULT_KEEPALIVE_CONCURRENCY
+    try:
+        max_attempts = int(entry.get("keepalive_max_attempts") or 0)
+    except (TypeError, ValueError):
+        max_attempts = 0
+    return {
+        "keepalive": enabled,
+        "keepalive_interval": _clamp_float(interval, 5.0, 3600.0),
+        "keepalive_retry_interval": _clamp_float(retry_interval, 1.0, 3600.0),
+        "keepalive_timeout": _clamp_float(timeout, 5.0, 600.0),
+        "keepalive_concurrency": min(max(concurrency, 1), KEEPALIVE_CONCURRENCY_MAX),
+        "keepalive_model": str(entry.get("keepalive_model") or "").strip(),
+        "keepalive_max_attempts": max(max_attempts, 0),
+    }
+
 
 
 def normalize_models(raw: Any) -> dict[str, dict[str, Any]]:
@@ -365,6 +435,7 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
             "models": models,
             "reasoning_effort": provider_reasoning.strip() if isinstance(provider_reasoning, str) and provider_reasoning.strip() else "",
             "fallback_responses_to_chat": _coerce_bool(entry.get("fallback_responses_to_chat"), True),
+            **keepalive_options_from_entry(entry),
         }
     return normalized
 
@@ -373,6 +444,27 @@ def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or []
     return load_config_from_data(cfg, path)
+
+
+def filter_config_providers(config: dict[str, Any], keepalive_only: bool = False, exclude_keepalive: bool = False) -> dict[str, Any]:
+    """Select the provider set owned by one proxy process.
+
+    The keepalive-only process must also serve the opted-in providers' real
+    client traffic; otherwise its warmed ``requests.Session`` pool cannot be
+    reused by Codex. The regular process excludes those providers so there is
+    only one live route and one connection pool for each keepalive provider.
+    """
+    if keepalive_only and exclude_keepalive:
+        raise ValueError("keepalive_only and exclude_keepalive are mutually exclusive")
+    providers = config.get("providers") or {}
+    if keepalive_only:
+        selected = {name: provider for name, provider in providers.items() if provider.get("keepalive")}
+    elif exclude_keepalive:
+        selected = {name: provider for name, provider in providers.items() if not provider.get("keepalive")}
+    else:
+        selected = dict(providers)
+    config["providers"] = selected
+    return config
 
 
 def _header_contains_token(headers: Any, header_name: str, token: str) -> bool:
@@ -2413,6 +2505,583 @@ class ProviderSessionPool:
                     break
 
 
+KEEPALIVE_STATE_COLD = "cold"
+KEEPALIVE_STATE_WARM = "warm"
+KEEPALIVE_STATE_LOST = "lost"
+KEEPALIVE_STATE_FAILED = "failed"
+KEEPALIVE_STATE_STOPPED = "stopped"
+
+# 探活请求要长得像真实客户端流量：上游中转普遍按 UA / Originator 做 WAF 判断
+# （api.py 的 UA 矩阵就是为此存在的），用 requests 默认 UA 容易被直接拦掉。
+KEEPALIVE_CODEX_HEADERS = {
+    "Originator": "codex_cli_rs",
+    "User-Agent": "codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color",
+}
+KEEPALIVE_CLAUDE_HEADERS = {
+    "User-Agent": "claude-code/2.1.153 (linux; x64; node/v24.16.0)",
+}
+
+KEEPALIVE_SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|ak|pk|rk)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{12,}"),
+)
+
+
+def keepalive_redact(text: Any, limit: int = 200) -> str:
+    """探活失败详情会进日志和 /_keepalive，先把可能的密钥抹掉。"""
+    value = " ".join(str("" if text is None else text).split())
+    for pattern in KEEPALIVE_SECRET_PATTERNS:
+        value = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "<redacted>", value)
+    return value[:limit]
+
+
+class KeepAliveProbe:
+    """单次探活结果。
+
+    ``kind`` 是关键：``stale`` 表示连接层异常（池里那条连接被上游按空闲超时掐了，
+    属于正常现象，换条连接重试即可）；``protocol`` 表示上游真的有问题。
+    """
+
+    __slots__ = ("ok", "kind", "detail", "elapsed")
+
+    def __init__(self, ok: bool, kind: str = "ok", detail: str = "", elapsed: float = 0.0) -> None:
+        self.ok = ok
+        self.kind = kind
+        self.detail = detail
+        self.elapsed = elapsed
+
+
+def keepalive_target_path(provider: dict[str, Any]) -> str:
+    """探活打的是 provider 真实上游 endpoint，按 api_mode 选路径。"""
+    api_mode = str(provider.get("api_mode") or "").strip().lower()
+    if api_mode == "custom_endpoint":
+        return str(provider.get("custom_endpoint") or "").strip() or "/chat/completions"
+    if api_mode in {"codex_responses", "responses"}:
+        return "/responses"
+    if api_mode == "messages":
+        return "/messages"
+    return "/chat/completions"
+
+
+def keepalive_model_for(provider: dict[str, Any]) -> str:
+    configured = str(provider.get("keepalive_model") or "").strip()
+    if configured:
+        return configured
+    models = provider.get("models") or {}
+    if isinstance(models, dict):
+        return next(iter(models), "")
+    return ""
+
+
+def build_keepalive_payload(model: str, prompt: str, path: str) -> dict[str, Any]:
+    """极短的探活请求体：一问一答几十个 token。"""
+    if path.endswith("/responses"):
+        # stream=True 才拿得到 response.completed —— 那是"真实回复"的唯一硬信号。
+        return {
+            "model": model,
+            "input": [{"role": "user", "content": prompt}],
+            "store": False,
+            "stream": True,
+            "max_output_tokens": KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS,
+        }
+    # /chat/completions 与 /messages 的最小请求体一致
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS,
+    }
+
+
+def keepalive_request_headers(provider: dict[str, Any], path: str) -> dict[str, str]:
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" if path.endswith("/responses") else "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
+    headers.update(KEEPALIVE_CLAUDE_HEADERS if path.endswith("/messages") else KEEPALIVE_CODEX_HEADERS)
+    for key, value in (provider.get("headers") or {}).items():
+        headers[str(key)] = "" if value is None else str(value)
+    for key in provider.get("remove_headers") or ():
+        for existing in list(headers.keys()):
+            if existing.lower() == str(key).lower():
+                headers.pop(existing, None)
+    api_key = str(provider.get("api_key") or "").strip()
+    if str(provider.get("auth_mode") or "bearer").strip().lower() == "anthropic":
+        for existing in list(headers.keys()):
+            if existing.lower() == "authorization":
+                headers.pop(existing, None)
+        if api_key:
+            headers["x-api-key"] = api_key
+        if not any(existing.lower() == "anthropic-version" for existing in headers):
+            headers["anthropic-version"] = str(provider.get("anthropic_version") or DEFAULT_ANTHROPIC_VERSION)
+    elif api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _keepalive_body_hint(response: requests.Response) -> str:
+    try:
+        return keepalive_redact(getattr(response, "text", "") or "")
+    except Exception:
+        return ""
+
+
+def _keepalive_meta_markers(payload: dict[str, Any]) -> str:
+    """只扫顶层 meta 字段找 rate_limit / overloaded，不扫模型回复正文避免误判。"""
+    parts = [str(payload.get(key) or "") for key in ("message", "detail", "code", "status_message")]
+    haystack = " ".join(parts).lower()
+    for marker in KEEPALIVE_RETRYABLE_BODY_MARKERS:
+        if marker in haystack:
+            return marker
+    return ""
+
+
+def _validate_keepalive_json(response: requests.Response, path: str) -> tuple[bool, str]:
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "text/html" in content_type:
+        return False, "upstream returned HTML"
+    try:
+        payload = response.json()
+    except Exception:
+        return False, f"non-JSON body {_keepalive_body_hint(response)}".strip()
+    if not isinstance(payload, dict):
+        return False, "unexpected JSON shape"
+    if payload.get("error"):
+        return False, f"error in 200 body: {keepalive_redact(payload.get('error'))}"
+    marker = _keepalive_meta_markers(payload)
+    if marker:
+        return False, f"upstream throttled ({marker})"
+    if path.endswith("/responses"):
+        if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
+            return True, ""
+        return False, "responses body without output"
+    if path.endswith("/messages"):
+        content = payload.get("content")
+        if (isinstance(content, list) and content) or (isinstance(content, str) and content.strip()) or payload.get("stop_reason"):
+            return True, ""
+        return False, "messages body without content"
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False, "chat body without choices"
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    # 有的中转对非流式请求也回流式分片形状，一并认。
+    delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+    for block in (message, delta):
+        for key in ("content", "reasoning_content", "reasoning", "thinking"):
+            value = block.get(key)
+            if (isinstance(value, str) and value.strip()) or (isinstance(value, list) and value):
+                return True, ""
+    # 推理模型可能把探活的 max_tokens 全花在 reasoning 上，正文为空但这一轮确实跑完了。
+    # 口径与 /messages 认 stop_reason、/responses 认 status 一致：探活只证明管道通。
+    if first.get("finish_reason"):
+        return True, ""
+    return False, "chat choice without content"
+
+
+def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "text/event-stream" not in content_type:
+        # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
+        return _validate_keepalive_json(response, "/responses")
+    saw_event = False
+    for raw in response.iter_lines(decode_unicode=False):
+        if not raw:
+            continue
+        line = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        saw_event = True
+        try:
+            event = json.loads(data)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "response.completed":
+            return True, ""
+        if event_type in {"response.failed", "response.incomplete"}:
+            return False, event_type
+        if event_type == "error" or event.get("error"):
+            return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'))}"
+    if saw_event:
+        return False, "stream ended without response.completed"
+    return False, "empty SSE stream"
+
+
+def validate_keepalive_response(response: requests.Response, path: str) -> tuple[bool, str]:
+    """把 HTTP 响应判成"真实回复"或失败，对应 atry 的 role-aware reply detection。"""
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status >= 400:
+        # 429 / 5xx 立即判失败，不等超时 —— 对应 atry 把 "Retrying in 11s" 当即判失败。
+        return False, f"HTTP {status} {_keepalive_body_hint(response)}".strip()
+    if path.endswith("/responses"):
+        return _validate_keepalive_stream(response)
+    return _validate_keepalive_json(response, path)
+
+
+class KeepAliveManager:
+    """抢通 + 保温：把 atry 对 Codex CLI 做的事搬到 HTTP 上游连接上。
+
+    每个勾选了 ``keepalive`` 的 provider 一个 daemon 线程，状态机是::
+
+        COLD ──抢通(并发 N)──→ WARM ──保温(每 interval 秒)──→ WARM
+         ↑                       │
+         └──退避重抢(并发 1)──── LOST
+
+    保温对象是 ``ProviderSessionPool`` 里那条 per-provider requests.Session ——
+    真实代理流量就是从这个池子 borrow() 的，所以必须跑在 proxy 进程里。
+    """
+
+    def __init__(self, config: dict[str, Any], session_pool: ProviderSessionPool) -> None:
+        self._config = config
+        self._pool = session_pool
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._states: dict[str, dict[str, Any]] = {}
+        self._inflight = threading.BoundedSemaphore(KEEPALIVE_GLOBAL_INFLIGHT)
+
+    # ---- lifecycle ----------------------------------------------------
+
+    def enabled_providers(self) -> list[tuple[str, dict[str, Any]]]:
+        providers = self._config.get("providers") or {}
+        return [(name, provider) for name, provider in providers.items() if provider.get("keepalive")]
+
+    def start(self) -> int:
+        targets = self.enabled_providers()
+        if not targets:
+            return 0
+        if not PROMPTS_MODULE_AVAILABLE:
+            self._log("prompts.py not importable; falling back to a single fixed probe prompt", always=True)
+        for index, (name, provider) in enumerate(targets):
+            with self._lock:
+                self._states[name] = {
+                    "state": KEEPALIVE_STATE_COLD,
+                    "since": time.time(),
+                    "note": "starting",
+                    "endpoint": keepalive_target_path(provider),
+                    "model": keepalive_model_for(provider),
+                    "interval": float(provider.get("keepalive_interval") or DEFAULT_KEEPALIVE_INTERVAL),
+                    "retryInterval": float(
+                        provider.get("keepalive_retry_interval") or DEFAULT_KEEPALIVE_RETRY_INTERVAL
+                    ),
+                    "concurrency": int(provider.get("keepalive_concurrency") or DEFAULT_KEEPALIVE_CONCURRENCY),
+                    "timeout": float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT),
+                    "maxAttempts": int(provider.get("keepalive_max_attempts") or 0),
+                    "attempts": 0,
+                    "okCount": 0,
+                    "failCount": 0,
+                    "recycled": 0,
+                    "lastOkAt": None,
+                    "lastErrorAt": None,
+                    "lastError": "",
+                    "latencyMs": None,
+                    "nextProbeAt": None,
+                }
+            thread = threading.Thread(
+                target=self._run_provider,
+                args=(name, provider, index * 0.25),
+                name=f"keepalive-{name}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+        self._log("started for %d provider(s): %s", len(targets), ", ".join(name for name, _ in targets), always=True)
+        return len(targets)
+
+    def stop(self, timeout: float = 3.0) -> None:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+        self._threads.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            states = {name: dict(state) for name, state in self._states.items()}
+        return {
+            "now": time.time(),
+            "globalInflightLimit": KEEPALIVE_GLOBAL_INFLIGHT,
+            "providers": states,
+        }
+
+    # ---- bookkeeping --------------------------------------------------
+
+    def _log(self, fmt: str, *args: Any, always: bool = False) -> None:
+        if not always and not self._config.get("verbose"):
+            return
+        message = fmt % args if args else fmt
+        sys.stdout.write("keepalive - - [%s] %s\n" % (time.strftime("%d/%b/%Y %H:%M:%S"), message))
+        sys.stdout.flush()
+
+    def _update(self, name: str, **fields: Any) -> None:
+        with self._lock:
+            state = self._states.get(name)
+            if state is None:
+                return
+            if "state" in fields and fields["state"] != state.get("state"):
+                state["since"] = time.time()
+            state.update(fields)
+
+    def _sleep(self, seconds: float) -> bool:
+        """睡到下次探活；返回 False 表示收到停止信号。"""
+        return not self._stop.wait(max(seconds, 0.0))
+
+    # ---- one probe ----------------------------------------------------
+
+    def _probe(self, provider: dict[str, Any], session: requests.Session) -> KeepAliveProbe:
+        model = keepalive_model_for(provider)
+        if not model:
+            return KeepAliveProbe(False, "protocol", "provider has no model configured")
+        path = keepalive_target_path(provider)
+        url = str(provider.get("base_url") or "").rstrip("/") + path
+        read_timeout = float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT)
+        connect_timeout = min(float(provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT), read_timeout)
+        payload = build_keepalive_payload(model, next_keepalive_prompt(), path)
+        headers = keepalive_request_headers(provider, path)
+        streaming = bool(payload.get("stream"))
+
+        if not self._inflight.acquire(timeout=max(60.0, read_timeout)):
+            return KeepAliveProbe(False, "protocol", "global keepalive slot timeout")
+        started = time.monotonic()
+        response = None
+        try:
+            response = session.post(
+                url,
+                headers=headers,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                timeout=(connect_timeout, read_timeout),
+                stream=streaming,
+                allow_redirects=False,
+            )
+            ok, detail = validate_keepalive_response(response, path)
+            return KeepAliveProbe(ok, "ok" if ok else "protocol", detail, time.monotonic() - started)
+        except Exception as exc:
+            kind = "stale" if _is_stale_connection_error(exc) else "protocol"
+            return KeepAliveProbe(False, kind, f"{type(exc).__name__}: {keepalive_redact(exc)}", time.monotonic() - started)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            self._inflight.release()
+
+    # ---- 抢通 ---------------------------------------------------------
+
+    def _acquire(self, name: str, provider: dict[str, Any], concurrency: int) -> tuple[bool, str]:
+        """并发若干独立 session 赛跑，第一个拿到真实回复的胜出，其余全部关掉。
+
+        胜者 session release() 进池子 —— 之后真实流量 borrow() 到的就是这条热连接。
+        对应 atry 用隔离 CODEX_HOME 并发拉起 N 个会话、赢家留下输家全杀。
+        """
+        results: queue.Queue[tuple[int, requests.Session | None, KeepAliveProbe]] = queue.Queue()
+        sessions: dict[int, requests.Session] = {}
+        decided = threading.Event()
+        details: list[str] = []
+        killed: set[int] = set()
+
+        def kill(index: int, session: requests.Session | None) -> None:
+            """关掉一条输家 session，且只关一次。"""
+            if session is None or index in killed:
+                return
+            killed.add(index)
+            self._pool.discard(session)
+
+        # 先创建完全部独立 session 再开跑。这样首胜产生时，调用线程已经持有所有
+        # 输家的句柄，可以立即 close，而不用等尚未调度的线程先创建并登记 session。
+        for index in range(max(concurrency, 1)):
+            try:
+                sessions[index] = self._pool.fresh(provider)
+            except Exception as exc:
+                details.append(f"{type(exc).__name__}: {keepalive_redact(exc)}")
+
+        def attempt(index: int, session: requests.Session) -> None:
+            outcome = KeepAliveProbe(False, "protocol", "probe did not run")
+            try:
+                if decided.is_set() or self._stop.is_set():
+                    outcome = KeepAliveProbe(False, "skipped")
+                else:
+                    outcome = self._probe(provider, session)
+            except Exception as exc:
+                outcome = KeepAliveProbe(False, "protocol", f"{type(exc).__name__}: {keepalive_redact(exc)}")
+            results.put((index, session, outcome))
+
+        threads = [
+            threading.Thread(target=attempt, args=(index, session), name=f"keepalive-{name}-{index}", daemon=True)
+            for index, session in sessions.items()
+        ]
+        for thread in threads:
+            thread.start()
+
+        deadline = time.monotonic() + float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT) + 120.0
+        for _ in threads:
+            try:
+                index, session, outcome = results.get(timeout=max(deadline - time.monotonic(), 1.0))
+            except queue.Empty:
+                details.append("probe thread did not report in time")
+                break
+            if outcome.ok:
+                decided.set()
+                # 首胜即返回：先关掉所有输家 session，使其在途 socket 尽快退出；不再
+                # join/等待慢输家。线程是 daemon，若底层系统调用不能被 close 立刻打断，
+                # 最迟也会按 keepalive_timeout 自行结束，但不会阻塞热连接投入使用。
+                for other_index, other in sessions.items():
+                    if other_index != index:
+                        kill(other_index, other)
+                self._pool.release(name, provider, session)
+                self._update(name, latencyMs=int(outcome.elapsed * 1000))
+                return True, ""
+            kill(index, session)
+            if outcome.kind != "skipped" and outcome.detail:
+                details.append(outcome.detail)
+
+        for thread in threads:
+            thread.join(timeout=2.0)
+        for other_index, other in sessions.items():
+            kill(other_index, other)
+
+        return False, "; ".join(dict.fromkeys(details))[:400] or "all attempts failed"
+
+    # ---- 保温 ---------------------------------------------------------
+
+    def _keepalive_once(self, name: str, provider: dict[str, Any]) -> tuple[bool, str]:
+        """borrow 池中连接 → 发一句轮换提示词 → release 回池，走的是真实请求同一条路径。
+
+        失败要区分两种原因。HTTPAdapter 是 ``max_retries=0``，若上游空闲超时短于
+        保温间隔，每次保温都会撞到一条已经死掉的池化连接：那是正常现象，换条连接
+        重试成功就不该计失败，否则 provider 会被反复误判 LOST 并触发重抢。
+        """
+        session = self._pool.borrow(name, provider)
+        outcome = self._probe(provider, session)
+        if outcome.ok:
+            self._pool.release(name, provider, session)
+            self._update(name, latencyMs=int(outcome.elapsed * 1000))
+            return True, ""
+
+        if outcome.kind == "stale":
+            # 连接层异常：池里那条连接被上游掐了，换一条新连接立刻重试一次。
+            self._pool.discard(session)
+            session = self._pool.fresh(provider)
+            retry = self._probe(provider, session)
+            if retry.ok:
+                self._pool.release(name, provider, session)
+                with self._lock:
+                    state = self._states.get(name)
+                    if state is not None:
+                        state["recycled"] = int(state.get("recycled") or 0) + 1
+                        state["latencyMs"] = int(retry.elapsed * 1000)
+                self._log("%s recycled a stale pooled connection (%s)", name, outcome.detail)
+                return True, ""
+            self._pool.discard(session)
+            return False, f"{outcome.detail}; retry={retry.detail}"
+
+        # 协议层失败：socket 本身没问题，是上游的回答不对。同一条连接立刻重试一次,
+        # 再失败才判 LOST（即状态图里的"连续 2 次失败"）。
+        retry = self._probe(provider, session)
+        if retry.ok:
+            self._pool.release(name, provider, session)
+            self._update(name, latencyMs=int(retry.elapsed * 1000))
+            return True, ""
+        if retry.kind == "stale":
+            self._pool.discard(session)
+        else:
+            self._pool.release(name, provider, session)
+        return False, f"{outcome.detail}; retry={retry.detail}"
+
+    # ---- state machine ------------------------------------------------
+
+    def _run_provider(self, name: str, provider: dict[str, Any], startup_delay: float = 0.0) -> None:
+        interval = float(provider.get("keepalive_interval") or DEFAULT_KEEPALIVE_INTERVAL)
+        retry_interval = float(
+            provider.get("keepalive_retry_interval") or DEFAULT_KEEPALIVE_RETRY_INTERVAL
+        )
+        cold_concurrency = int(provider.get("keepalive_concurrency") or DEFAULT_KEEPALIVE_CONCURRENCY)
+        max_attempts = int(provider.get("keepalive_max_attempts") or 0)
+        state = KEEPALIVE_STATE_COLD
+        first_acquire = True
+        attempts = 0
+
+        if startup_delay and not self._sleep(startup_delay):
+            self._update(name, state=KEEPALIVE_STATE_STOPPED, note="stopped before first probe")
+            return
+
+        while not self._stop.is_set():
+            if state == KEEPALIVE_STATE_WARM:
+                self._update(name, nextProbeAt=time.time() + interval)
+                if not self._sleep(interval):
+                    break
+                ok, detail = self._keepalive_once(name, provider)
+                if ok:
+                    self._note_ok(name, KEEPALIVE_STATE_WARM, "keepalive ok")
+                    self._log("%s keepalive ok", name)
+                    continue
+                self._note_fail(name, detail)
+                # 一次保温 miss 不能扇出成又一批并发请求：重抢并发降到 1。
+                self._log("%s keepalive lost: %s", name, detail, always=True)
+                state = KEEPALIVE_STATE_LOST
+                attempts = 0
+                continue
+
+            attempts += 1
+            concurrency = cold_concurrency if (state == KEEPALIVE_STATE_COLD and first_acquire) else 1
+            self._update(name, state=state, attempts=attempts, note=f"acquiring (concurrency={concurrency})", nextProbeAt=None)
+            ok, detail = self._acquire(name, provider, concurrency)
+            if ok:
+                first_acquire = False
+                attempts = 0
+                state = KEEPALIVE_STATE_WARM
+                self._note_ok(name, KEEPALIVE_STATE_WARM, f"acquired with concurrency={concurrency}")
+                self._log("%s acquired upstream connection (concurrency=%d)", name, concurrency, always=True)
+                continue
+            self._note_fail(name, detail)
+            if max_attempts and attempts >= max_attempts:
+                self._update(name, state=KEEPALIVE_STATE_FAILED, note=f"gave up after {attempts} attempts")
+                self._log("%s giving up after %d attempts: %s", name, attempts, detail, always=True)
+                return
+            self._log(
+                "%s acquire failed (attempt %d), retrying in %.0fs: %s",
+                name,
+                attempts,
+                retry_interval,
+                detail,
+                always=True,
+            )
+            self._update(name, nextProbeAt=time.time() + retry_interval)
+            if not self._sleep(retry_interval):
+                break
+
+        self._update(name, state=KEEPALIVE_STATE_STOPPED, note="stopped", nextProbeAt=None)
+
+    def _note_ok(self, name: str, state: str, note: str) -> None:
+        with self._lock:
+            entry = self._states.get(name)
+            if entry is None:
+                return
+            if entry.get("state") != state:
+                entry["since"] = time.time()
+            entry["state"] = state
+            entry["note"] = note
+            entry["okCount"] = int(entry.get("okCount") or 0) + 1
+            entry["lastOkAt"] = time.time()
+            entry["lastError"] = ""
+
+    def _note_fail(self, name: str, detail: str) -> None:
+        with self._lock:
+            entry = self._states.get(name)
+            if entry is None:
+                return
+            entry["failCount"] = int(entry.get("failCount") or 0) + 1
+            entry["lastErrorAt"] = time.time()
+            entry["lastError"] = keepalive_redact(detail, 400)
+
+
 class HeaderProxyServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -2422,9 +3091,12 @@ class HeaderProxyServer(ThreadingHTTPServer):
         # is safe even when bind() fails, for example during a port-conflict restart.
         self.config = config
         self.session_pool = ProviderSessionPool()
+        self.keepalive: KeepAliveManager | None = None
         super().__init__(server_address, RequestHandlerClass)
 
     def server_close(self) -> None:
+        if self.keepalive is not None:
+            self.keepalive.stop()
         self.session_pool.close_all()
         super().server_close()
 
@@ -3598,7 +4270,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
+    def _handle_keepalive_status(self) -> None:
+        """GET /_keepalive —— 抢通/保温状态。以 _ 开头，过不了 PROVIDER_NAME_PATTERN，
+        所以不可能和 provider 路径冲突。"""
+        if self.command not in {"GET", "HEAD"}:
+            self._send_text(405, "method not allowed\n")
+            return
+        manager = getattr(self.server, "keepalive", None)
+        payload = manager.snapshot() if manager is not None else {"now": time.time(), "providers": {}}
+        payload["enabled"] = bool(payload.get("providers"))
+        self._send_json(200, payload)
+
     def _handle(self) -> None:
+        if urlsplit(self.path).path.rstrip("/") == "/_keepalive":
+            self._handle_keepalive_status()
+            return
         provider_name, provider, proxied_path = self._route()
         if not provider_name or provider is None:
             return
@@ -3925,10 +4611,22 @@ def main() -> int:
     parser.add_argument("--port", type=int, help="Override listen port")
     parser.add_argument("--check", action="store_true", help="Validate config and exit")
     parser.add_argument("--verbose", action="store_true", help="Log every proxied request; errors are always logged")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--keepalive-only",
+        action="store_true",
+        help="Serve only providers with keepalive enabled; their real client traffic shares the warmed pool",
+    )
+    scope.add_argument(
+        "--exclude-keepalive",
+        action="store_true",
+        help="Serve only providers without keepalive enabled",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config).expanduser().resolve()
     cfg = load_config(cfg_path)
+    filter_config_providers(cfg, keepalive_only=args.keepalive_only, exclude_keepalive=args.exclude_keepalive)
     if args.listen:
         cfg["listen"] = args.listen
     if args.port:
@@ -3938,6 +4636,14 @@ def main() -> int:
         print(f"OK config: {cfg_path}")
         print(f"listen: {cfg['listen']}:{cfg['port']}")
         print("providers: " + ", ".join(sorted(cfg["providers"].keys())))
+        warm = sorted(name for name, provider in cfg["providers"].items() if provider.get("keepalive"))
+        print("keepalive: " + (", ".join(warm) if warm else "(none)"))
+        if args.keepalive_only:
+            print("provider scope: keepalive-only")
+        elif args.exclude_keepalive:
+            print("provider scope: exclude-keepalive")
+        else:
+            print("provider scope: all")
         return 0
 
     server = HeaderProxyServer((cfg["listen"], cfg["port"]), ProxyHandler, cfg)
@@ -3956,13 +4662,25 @@ def main() -> int:
     print("providers:")
     for name, provider in sorted(cfg["providers"].items()):
         h = {k: redact_header(k, v) for k, v in provider["headers"].items()}
+        keepalive_note = ""
+        if provider.get("keepalive"):
+            keepalive_note = (
+                f" keepalive=on interval={provider.get('keepalive_interval')}s "
+                f"concurrency={provider.get('keepalive_concurrency')}"
+            )
         print(
             f"  /{name}/ -> {provider['base_url']} "
             f"headers={json.dumps(h, ensure_ascii=False)} remove={sorted(provider['remove_headers'])} "
             f"trust_env_proxy={provider.get('trust_env_proxy', False)} pool_maxsize={provider.get('pool_maxsize', DEFAULT_POOL_MAXSIZE)} "
             f"timeout=({provider.get('connect_timeout', DEFAULT_CONNECT_TIMEOUT)}, {provider.get('read_timeout', DEFAULT_READ_TIMEOUT)})"
+            f"{keepalive_note}"
         )
     sys.stdout.flush()
+
+    # 保温必须跑在 proxy 进程里：真实流量从 ProviderSessionPool.borrow() 取连接,
+    # 在别的进程里热的是别人的 TCP/TLS 连接，对这里的请求没有任何作用。
+    server.keepalive = KeepAliveManager(cfg, server.session_pool)
+    server.keepalive.start()
 
     try:
         server.serve_forever()

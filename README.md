@@ -8,8 +8,9 @@
 
 - `dashboard.py`：Web 管理台后端
 - `dashboard.html`：Web 管理台前端
-- `proxy.py`：AIProxy 转发与协议转换
+- `proxy.py`：AIProxy 转发与协议转换、抢通 + 保温
 - `api.py`：测活逻辑
+- `prompts.py`：探活提示词轮换（proxy.py 与 api.py 共用）
 - `config.example.yaml`：配置示例
 - `requirements.txt`：依赖列表
 
@@ -97,6 +98,7 @@ python3 -m unittest discover -s tests -v
 ai-api/
   api.py
   proxy.py
+  prompts.py
   dashboard.py
   dashboard.html
   config.yaml

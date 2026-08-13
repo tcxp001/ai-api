@@ -83,7 +83,7 @@
     .span-8 { grid-column: span 8; }
     .span-12 { grid-column: span 12; }
     .field { display: grid; gap: 6px; }
-    .provider-edit-spaced { margin-top: 6px; }
+    .provider-edit-spaced { margin-top: 10px; }
     label { color: #344047; font-size: 13px; font-weight: 650; }
     input, textarea, select {
       width: 100%;
@@ -148,7 +148,12 @@
     .muted { border-color: rgba(102,114,123,.25); background: rgba(102,114,123,.08); color: var(--muted); }
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(460px, 520px); gap: 14px; align-items: start; }
     .editor-stack { display: grid; gap: 14px; align-content: start; min-width: 0; }
-    .editor { display: grid; gap: 12px; min-width: 0; overflow: hidden; }
+    .editor { display: grid; gap: 0; min-width: 0; overflow: hidden; }
+    .provider-subsection { display: grid; gap: 0; }
+    .provider-subsection-title { color: #344047; font-size: 14px; font-weight: 750; }
+    .keepalive-settings-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: end; }
+    .keepalive-toggle-input { width: 100%; min-height: 38px; }
+    #modelFetchStatus:empty, #modelRows:empty { display: none; }
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
     pre { margin: 0; padding: 12px; border-radius: 6px; background: var(--code); color: #ecf2ef; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -181,9 +186,9 @@
     .service-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; justify-self: end; flex-wrap: wrap; }
     .service-actions button { flex: 0 0 auto; min-height: 30px; padding: 0 8px; font-size: 12px; }
     .aiproxy-editor { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; }
-    .settings-card { display: grid; gap: 10px; }
+    .settings-card { display: grid; gap: 6px; }
     .settings-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-    .setting-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .setting-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
     .setting-row button { white-space: nowrap; }
     .aiproxy-editor-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
     .aiproxy-editor .actions { justify-content: flex-end; }
@@ -199,7 +204,7 @@
       .actions button { flex: 1 1 auto; }
       .mini-row { grid-template-columns: minmax(0, 1fr) 108px 92px 30px; }
       .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
-      .setting-row { grid-template-columns: 1fr; }
+      .keepalive-settings-row { grid-template-columns: 1fr; align-items: stretch; }
     }
   </style>
 </head>
@@ -251,12 +256,13 @@
             <div class="settings-card-head">
               <div>
                 <h2>全局上下文压缩</h2>
-                <div class="subtle">Codex 按每个 profile 的上下文换算 token 阈值。</div>
+                <div class="subtle">按模型上下文百分比换算值与上下文压缩窗口中的较小值执行压缩。</div>
               </div>
             </div>
             <div class="setting-row">
               <div class="field"><label for="autoCompactPercent">压缩阈值 (%)</label><input id="autoCompactPercent" type="number" min="1" max="95" step="1" value="70"></div>
-              <button id="saveCompactPercentBtn" type="button">保存比例</button>
+              <div class="field"><label for="autoCompactTokenLimit">上下文压缩窗口</label><input id="autoCompactTokenLimit" type="number" min="100000" max="1000000" step="1000" value="200000"></div>
+              <button id="saveCompactPercentBtn" type="button">保存</button>
             </div>
             <div id="autoCompactSaveState" class="subtle"></div>
           </section>
@@ -264,8 +270,8 @@
             <div>
               <h2 id="providerEditorTitle" hidden></h2>
             </div>
-            <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
-          <div class="field"><label for="providerName">Provider</label><input id="providerName"></div>
+            <div class="field provider-edit-spaced"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
+          <div class="field provider-edit-spaced"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
           <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="messages">/messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
@@ -292,6 +298,27 @@
           <div class="field provider-edit-spaced">
             <label for="providerStreamMaxRetries">Codex stream_max_retries</label>
             <input id="providerStreamMaxRetries" type="number" min="0" max="100" step="1" value="5">
+          </div>
+          <div class="provider-subsection provider-edit-spaced">
+            <div class="provider-subsection-title">Keepalive</div>
+            <div id="providerKeepaliveOptions" class="keepalive-settings-row">
+              <div class="field">
+                <label for="providerKeepalive">抢通保活</label>
+                <label class="check-toggle keepalive-toggle-input"><input id="providerKeepalive" type="checkbox">启用</label>
+              </div>
+              <div class="field">
+                <label for="providerKeepaliveConcurrency">并发数</label>
+                <input id="providerKeepaliveConcurrency" type="number" min="1" max="50" step="1" value="10">
+              </div>
+              <div class="field">
+                <label for="providerKeepaliveRetryInterval">抢通间隔（秒）</label>
+                <input id="providerKeepaliveRetryInterval" type="number" min="1" max="3600" step="1" value="5">
+              </div>
+              <div class="field">
+                <label for="providerKeepaliveInterval">保活间隔（秒）</label>
+                <input id="providerKeepaliveInterval" type="number" min="5" max="3600" step="1" value="30">
+              </div>
+            </div>
           </div>
             <div class="actions">
               <button id="applyProviderBtn" class="primary" type="button">保存</button>
@@ -339,13 +366,13 @@
         <div id="aiproxyEditor" class="aiproxy-editor" hidden>
           <div class="aiproxy-editor-head">
             <h2 id="aiproxyEditorTitle">编辑 AIProxy</h2>
-            <span class="subtle">AIProxy 为单实例服务，保存后会自动重启。</span>
+            <span class="subtle">保存后只重启当前通道。</span>
           </div>
           <div class="grid">
             <div class="field span-6"><label for="aiproxyAddress">服务地址</label><input id="aiproxyAddress" placeholder="http://127.0.0.1:18006"></div>
             <div class="field span-6"><label for="aiproxyConfig">配置 YAML</label><input id="aiproxyConfig" list="aiproxyConfigOptions" placeholder="config.yaml"><datalist id="aiproxyConfigOptions"></datalist></div>
           </div>
-          <div class="subtle">固定使用 <code>aiproxy.service</code>；服务地址默认 <code>http://127.0.0.1:18006</code>，配置默认脚本根目录 <code>config.yaml</code>，保存后自动重启。</div>
+          <div id="aiproxyEditorHint" class="subtle">服务职责和 systemd unit 固定不变；保存后只重启当前通道。</div>
           <div class="actions">
             <button id="cancelAiproxyEditorBtn" type="button">取消</button>
             <button id="saveAiproxyEditorBtn" class="primary" type="button">保存并重启</button>
@@ -393,8 +420,9 @@
       healthSelection: null,
       appSync: {},
       customProviders: { codex: { items: [] } },
-      settings: { autoCompactPercent: 70 },
+      settings: { autoCompactPercent: 70, autoCompactTokenLimit: 200000 },
       aiproxy: { items: [] },
+      keepalive: { ok: false, providers: {} },
       configPath: 'config.yaml',
       fetchedModels: [],
       selectedProvider: -1,
@@ -421,6 +449,9 @@
     const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
     const DEFAULT_MONITOR_PROMPT = '在吗？';
     const CODEX_STREAM_MAX_RETRIES_DEFAULT = 5;
+    const KEEPALIVE_CONCURRENCY_DEFAULT = 10;
+    const KEEPALIVE_RETRY_INTERVAL_DEFAULT = 5;
+    const KEEPALIVE_INTERVAL_DEFAULT = 30;
     const CODEX_RETRY_MAX = 100;
     function providerByName(name) {
       const key = String(name || '').toLowerCase();
@@ -533,26 +564,53 @@
 
     async function loadAll() {
       $('serverState').textContent = '读取中';
-      const [config, monitor, status, aiproxy] = await Promise.all([
+      const [config, monitor, status, aiproxy, keepalive] = await Promise.all([
         api('/config'),
         api('/monitor'),
         api('/status'),
-        api('/aiproxy').catch(err => ({ items: [], error: err.message }))
+        api('/aiproxy').catch(err => ({ items: [], error: err.message })),
+        api('/keepalive').catch(err => ({ ok: false, providers: {}, error: err.message }))
       ]);
       state.providers = config.providers || [];
-      state.settings = config.settings || { autoCompactPercent: 70 };
+      state.settings = config.settings || { autoCompactPercent: 70, autoCompactTokenLimit: 200000 };
       state.configPath = config.configPath || 'config.yaml';
       sortProvidersByEnabled();
       state.monitor = monitor;
       state.status = status;
       state.aiproxy = aiproxy;
+      state.keepalive = keepalive;
       if (state.selectedProvider >= state.providers.length) state.selectedProvider = -1;
       if (state.selectedChain >= state.monitor.chains.length) state.selectedChain = -1;
       render();
+      startKeepalivePolling();
       const serviceSummary = state.aiproxy.summary ? `，AIProxy${Number(state.aiproxy.summary.healthy || 0) > 0 ? '健康' : '异常'}` : '';
       const saveMessage = state.lastSaveMessage;
       state.lastSaveMessage = '';
       $('serverState').textContent = saveMessage || `已读取 ${state.providers.length} 个 provider${serviceSummary}`;
+    }
+
+    let keepaliveTimer = null;
+
+    function keepaliveWatched() {
+      return state.providers.some(p => p && p.keepalive === true);
+    }
+
+    async function refreshKeepalive() {
+      if (!keepaliveWatched()) return;
+      try {
+        state.keepalive = await api('/keepalive');
+      } catch (err) {
+        state.keepalive = { ok: false, providers: {}, error: err.message };
+      }
+      renderProviders();
+    }
+
+    function startKeepalivePolling() {
+      if (keepaliveTimer) clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+      // 只有存在勾选了保活的 provider 才轮询，否则 dashboard 空转打 aiproxy。
+      if (!keepaliveWatched()) return;
+      keepaliveTimer = setInterval(refreshKeepalive, 15000);
     }
 
     function render() {
@@ -569,10 +627,19 @@
       return Math.min(Math.max(percent, 1), 95);
     }
 
+    function autoCompactTokenLimitValue(value = state.settings?.autoCompactTokenLimit) {
+      const limit = Math.round(Number(value || 200000));
+      if (!Number.isFinite(limit)) return 200000;
+      return Math.min(Math.max(limit, 100000), 1000000);
+    }
+
     function renderCompactSettings() {
       const percent = autoCompactPercentValue();
-      const input = $('autoCompactPercent');
-      if (input && document.activeElement !== input) input.value = percent;
+      const tokenLimit = autoCompactTokenLimitValue();
+      const percentInput = $('autoCompactPercent');
+      const tokenLimitInput = $('autoCompactTokenLimit');
+      if (percentInput && document.activeElement !== percentInput) percentInput.value = percent;
+      if (tokenLimitInput && document.activeElement !== tokenLimitInput) tokenLimitInput.value = tokenLimit;
     }
 
     function setCompactSaveState(text = '') {
@@ -582,45 +649,56 @@
     }
 
     function markCompactPercentDirty() {
-      const input = $('autoCompactPercent');
-      if (!input) return;
-      const raw = Number(input.value || 70);
-      if (!Number.isFinite(raw)) {
+      const percentInput = $('autoCompactPercent');
+      const tokenLimitInput = $('autoCompactTokenLimit');
+      if (!percentInput || !tokenLimitInput) return;
+      const percent = Number(percentInput.value || 70);
+      const tokenLimit = Number(tokenLimitInput.value || 200000);
+      if (!Number.isFinite(percent) || !Number.isFinite(tokenLimit)) {
         setCompactSaveState('请输入数字');
         return;
       }
-      const value = Math.round(raw);
-      const current = autoCompactPercentValue();
-      setCompactSaveState(value === current ? '' : '未保存');
+      setCompactSaveState(
+        Math.round(percent) === autoCompactPercentValue()
+        && Math.round(tokenLimit) === autoCompactTokenLimitValue()
+          ? ''
+          : '未保存'
+      );
     }
 
-    function collectAutoCompactPercent() {
-      const input = $('autoCompactPercent');
-      const raw = Number(input?.value || 70);
-      if (!Number.isFinite(raw)) throw new Error('压缩阈值必须是数字');
-      const percent = Math.round(raw);
+    function collectAutoCompactSettings() {
+      const percentRaw = Number($('autoCompactPercent')?.value || 70);
+      const tokenLimitRaw = Number($('autoCompactTokenLimit')?.value || 200000);
+      if (!Number.isFinite(percentRaw)) throw new Error('压缩阈值必须是数字');
+      if (!Number.isFinite(tokenLimitRaw)) throw new Error('上下文压缩窗口必须是数字');
+      const percent = Math.round(percentRaw);
+      const tokenLimit = Math.round(tokenLimitRaw);
       if (percent < 1 || percent > 95) throw new Error('压缩阈值必须在 1-95% 之间');
-      return percent;
+      if (tokenLimit < 100000 || tokenLimit > 1000000) throw new Error('上下文压缩窗口必须在 100000-1000000 之间');
+      return { percent, tokenLimit };
     }
 
     async function saveCompactPercent() {
-      const percent = collectAutoCompactPercent();
+      const { percent, tokenLimit } = collectAutoCompactSettings();
       const btn = $('saveCompactPercentBtn');
       if (btn) btn.disabled = true;
       const originalText = btn?.textContent || '';
       try {
         if (btn) btn.textContent = '保存中...';
         setCompactSaveState('保存中...');
-        $('serverState').textContent = `正在保存上下文压缩比例 ${percent}%...`;
-        const data = await api('/app-configs/compact-percent', { method: 'POST', body: JSON.stringify({ autoCompactPercent: percent }) });
-        state.settings = data.settings || { autoCompactPercent: percent };
+        $('serverState').textContent = `正在保存上下文压缩设置 ${percent}% / ${tokenLimit}...`;
+        const data = await api('/app-configs/compact-percent', {
+          method: 'POST',
+          body: JSON.stringify({ autoCompactPercent: percent, autoCompactTokenLimit: tokenLimit })
+        });
+        state.settings = data.settings || { autoCompactPercent: percent, autoCompactTokenLimit: tokenLimit };
         renderCompactSettings();
-        setCompactSaveState('已同步到 Codex');
-        $('serverState').textContent = `上下文压缩比例已保存：${autoCompactPercentValue(state.settings.autoCompactPercent)}%`;
+        setCompactSaveState('已同步到 Codex 和 Claude Code');
+        $('serverState').textContent = `上下文压缩设置已保存：${autoCompactPercentValue(state.settings.autoCompactPercent)}% / ${autoCompactTokenLimitValue(state.settings.autoCompactTokenLimit)}`;
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.textContent = originalText || '保存比例';
+          btn.textContent = originalText || '保存';
         }
       }
     }
@@ -633,6 +711,11 @@
       if (item.models && typeof item.models === 'object' && !Array.isArray(item.models) && !Object.keys(item.models).length) delete item.models;
       if (item.auth_mode === 'bearer') delete item.auth_mode;
       delete item.request_max_retries;
+      // 不勾选就把 keepalive 相关字段全部丢掉，config.yaml 不留噪音（与 dashboard.py 一致）。
+      if (item.keepalive !== true) {
+        ['keepalive', 'keepalive_interval', 'keepalive_retry_interval', 'keepalive_timeout', 'keepalive_concurrency', 'keepalive_model', 'keepalive_max_attempts']
+          .forEach(key => { delete item[key]; });
+      }
       ['note', 'api_key', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
         if (item[key] === '') delete item[key];
       });
@@ -663,6 +746,26 @@
         throw new Error(`${label} 必须是 0-${CODEX_RETRY_MAX} 之间的整数`);
       }
       return value;
+    }
+
+    function collectIntegerInput(id, label, low, high, fallback) {
+      const raw = String($(id)?.value ?? '').trim();
+      if (!raw) return fallback;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < low || value > high) {
+        throw new Error(`${label} 必须是 ${low}-${high} 之间的整数`);
+      }
+      return value;
+    }
+
+    function updateKeepaliveOptions() {
+      const enabled = $('providerKeepalive')?.checked === true;
+      const options = $('providerKeepaliveOptions');
+      if (options) options.classList.toggle('disabled', !enabled);
+      for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveInterval']) {
+        const input = $(id);
+        if (input) input.disabled = !enabled;
+      }
     }
 
     function providerForPersist(provider) {
@@ -876,6 +979,21 @@
       return { text, title };
     }
 
+    function keepaliveBadge(provider) {
+      if (!provider || provider.keepalive !== true) return '';
+      const entry = (state.keepalive && state.keepalive.providers || {})[provider.name];
+      if (!entry) return '<span class="status muted" title="aiproxy 尚未上报该 provider 的保活状态；保存配置会自动重启 aiproxy">待启动</span>';
+      const detail = [];
+      if (entry.lastError) detail.push(entry.lastError);
+      if (entry.note) detail.push(entry.note);
+      if (entry.latencyMs != null) detail.push(entry.latencyMs + 'ms');
+      const title = esc(detail.join(' | '));
+      if (entry.state === 'warm') return `<span class="status ok" title="${title}">🟢 保活</span>`;
+      if (entry.state === 'failed') return `<span class="status fail" title="${title}">🔴 失败</span>`;
+      if (entry.state === 'stopped') return `<span class="status muted" title="${title}">保活已停</span>`;
+      return `<span class="status warn" title="${title}">🟡 抢通</span>`;
+    }
+
     function renderProviders() {
       $('providerRows').innerHTML = state.providers.map((p, i) => {
         const models = modelSummary(p);
@@ -883,7 +1001,8 @@
         const uaLabel = providerUaLabel(p);
         const providerBadges = [
           p.enabled === false ? '<span class="status muted">停用</span>' : '',
-          providerApiKey(p) ? '' : '<span class="status warn">无Key</span>'
+          providerApiKey(p) ? '' : '<span class="status warn">无Key</span>',
+          keepaliveBadge(p)
         ].filter(Boolean).join(' ');
         return `
         <tr>
@@ -1086,6 +1205,13 @@
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT);
       $('providerStreamMaxRetries').dataset.autoDefault = hasRetryConfig(p, 'stream_max_retries') ? '0' : '1';
+      $('providerKeepalive').checked = p?.keepalive === true;
+      $('providerKeepaliveConcurrency').value = Number(p?.keepalive_concurrency || KEEPALIVE_CONCURRENCY_DEFAULT);
+      $('providerKeepaliveRetryInterval').value = Number(
+        p?.keepalive_retry_interval || KEEPALIVE_RETRY_INTERVAL_DEFAULT
+      );
+      $('providerKeepaliveInterval').value = Number(p?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT);
+      updateKeepaliveOptions();
       updateCustomEndpointInput();
       if (p) {
         renderModelRows(p.models || {});
@@ -1125,8 +1251,32 @@
         models: rowsToModels(),
         headers: headerConfig.headers,
         remove_headers: headerConfig.remove_headers,
-        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT)
+        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT),
+        keepalive: $('providerKeepalive').checked
       };
+      if (item.keepalive) {
+        item.keepalive_concurrency = collectIntegerInput(
+          'providerKeepaliveConcurrency',
+          '并发数',
+          1,
+          50,
+          KEEPALIVE_CONCURRENCY_DEFAULT
+        );
+        item.keepalive_interval = collectIntegerInput(
+          'providerKeepaliveInterval',
+          '保活间隔',
+          5,
+          3600,
+          KEEPALIVE_INTERVAL_DEFAULT
+        );
+        item.keepalive_retry_interval = collectIntegerInput(
+          'providerKeepaliveRetryInterval',
+          '抢通间隔',
+          1,
+          3600,
+          KEEPALIVE_RETRY_INTERVAL_DEFAULT
+        );
+      }
       if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
       else delete item.custom_endpoint;
       return compactProviderForPersist(item);
@@ -1594,10 +1744,14 @@
     function openAiproxyEditor(item = null) {
       const editor = $('aiproxyEditor');
       if (!editor) return;
-      $('aiproxyEditorTitle').textContent = '编辑 AIProxy';
+      state.editingAiproxyId = item?.id || 'aiproxy';
+      const name = item?.name || item?.service || 'AIProxy';
+      $('aiproxyEditorTitle').textContent = `编辑 ${name}`;
       $('aiproxyAddress').value = aiproxyServiceAddress(item);
       renderAiproxyConfigOptions(item?.config || '');
       $('aiproxyConfig').value = item?.config || aiproxyDefaultConfigPath();
+      const hint = $('aiproxyEditorHint');
+      if (hint) hint.textContent = `固定使用 ${item?.service || 'aiproxy.service'}；服务职责参数不可修改，保存后只重启当前通道。`;
       editor.hidden = false;
       $('aiproxyAddress').focus();
     }
@@ -1605,6 +1759,7 @@
     function closeAiproxyEditor() {
       const editor = $('aiproxyEditor');
       if (editor) editor.hidden = true;
+      state.editingAiproxyId = '';
     }
 
     function collectAiproxyEditor() {
@@ -1612,10 +1767,12 @@
       const config = String($('aiproxyConfig')?.value || aiproxyDefaultConfigPath()).trim();
       if (!config) throw new Error('配置 YAML 必填');
       if (!/\.ya?ml$/i.test(config)) throw new Error('配置文件必须是 .yaml 或 .yml');
+      const source = (state.aiproxy.items || []).find(item => item.id === state.editingAiproxyId);
+      if (!source) throw new Error('AIProxy 实例不存在，请刷新后重试');
       return {
-        id: 'aiproxy',
-        service: 'aiproxy.service',
-        name: 'AIProxy',
+        id: source.id,
+        service: source.service,
+        name: source.name,
         listen: address.listen,
         port: address.port,
         url: address.url,
@@ -1785,7 +1942,9 @@
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
     $('providerName').addEventListener('input', updateRetryDefaultsForProviderName);
     $('providerStreamMaxRetries').addEventListener('input', () => { $('providerStreamMaxRetries').dataset.autoDefault = '0'; });
+    $('providerKeepalive').addEventListener('change', updateKeepaliveOptions);
     $('autoCompactPercent').addEventListener('input', markCompactPercentDirty);
+    $('autoCompactTokenLimit').addEventListener('input', markCompactPercentDirty);
 
     const chainProviderSelect = $('chainProvider');
     if (chainProviderSelect) {
