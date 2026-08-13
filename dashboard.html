@@ -84,6 +84,10 @@
     .span-12 { grid-column: span 12; }
     .field { display: grid; gap: 6px; }
     .provider-edit-spaced { margin-top: 10px; }
+    .provider-order-row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 10px; align-items: end; }
+    .provider-pin-button { width: 100%; }
+    .provider-pin-button.active { border-color: var(--accent); background: rgba(8,127,123,.1); color: var(--accent-dark); }
+    .provider-save-actions { margin-top: 10px; }
     label { color: #344047; font-size: 13px; font-weight: 650; }
     input, textarea, select {
       width: 100%;
@@ -205,6 +209,7 @@
       .mini-row { grid-template-columns: minmax(0, 1fr) 108px 92px 30px; }
       .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
       .keepalive-settings-row { grid-template-columns: 1fr; align-items: stretch; }
+      .provider-order-row { grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); }
     }
   </style>
 </head>
@@ -270,7 +275,10 @@
             <div>
               <h2 id="providerEditorTitle" hidden></h2>
             </div>
-            <div class="field provider-edit-spaced"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
+            <div class="provider-order-row provider-edit-spaced">
+              <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
+              <div class="field"><label for="providerPinnedBtn">固定位置</label><button id="providerPinnedBtn" class="provider-pin-button" type="button" aria-pressed="false">启用置顶</button></div>
+            </div>
           <div class="field provider-edit-spaced"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
           <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
@@ -320,7 +328,7 @@
               </div>
             </div>
           </div>
-            <div class="actions">
+            <div class="actions provider-save-actions">
               <button id="applyProviderBtn" class="primary" type="button">保存</button>
             </div>
           </section>
@@ -572,6 +580,7 @@
         api('/keepalive').catch(err => ({ ok: false, providers: {}, error: err.message }))
       ]);
       state.providers = config.providers || [];
+      ensurePinnedTimestamps(state.providers);
       state.settings = config.settings || { autoCompactPercent: 70, autoCompactTokenLimit: 200000 };
       state.configPath = config.configPath || 'config.yaml';
       sortProvidersByEnabled();
@@ -710,6 +719,10 @@
       if (item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers) && !Object.keys(item.headers).length) delete item.headers;
       if (item.models && typeof item.models === 'object' && !Array.isArray(item.models) && !Object.keys(item.models).length) delete item.models;
       if (item.auth_mode === 'bearer') delete item.auth_mode;
+      if (item.pinned !== true) {
+        delete item.pinned;
+        delete item.pinned_at;
+      }
       delete item.request_max_retries;
       // 不勾选就把 keepalive 相关字段全部丢掉，config.yaml 不留噪音（与 dashboard.py 一致）。
       if (item.keepalive !== true) {
@@ -772,6 +785,109 @@
       return compactProviderForPersist(provider);
     }
 
+    function isPinnedProvider(provider) {
+      return provider?.pinned === true;
+    }
+
+    function pinnedAtValue(provider) {
+      const value = Number(provider?.pinned_at);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    function ensurePinnedTimestamps(providers) {
+      const base = Date.now();
+      providers.forEach((provider, index) => {
+        if (isPinnedProvider(provider) && pinnedAtValue(provider) === null) {
+          provider.pinned_at = base + index;
+        }
+      });
+    }
+
+    function pinnedProviderCount(providers = state.providers) {
+      return providers.filter(isPinnedProvider).length;
+    }
+
+    function regularProviderCount(providers = state.providers) {
+      return providers.filter(provider => !isPinnedProvider(provider)).length;
+    }
+
+    function regularProviderNo(index, providers = state.providers) {
+      if (index < 0 || isPinnedProvider(providers[index])) return 0;
+      let no = 0;
+      for (let i = 0; i <= index && i < providers.length; i += 1) {
+        if (!isPinnedProvider(providers[i])) no += 1;
+      }
+      return no;
+    }
+
+    function setProviderPinnedButton(pinned, pinnedAt = '') {
+      const button = $('providerPinnedBtn');
+      const input = $('providerNo');
+      if (button) {
+        button.dataset.pinned = pinned ? '1' : '0';
+        if (pinned && pinnedAt) button.dataset.pinnedAt = String(pinnedAt);
+        else delete button.dataset.pinnedAt;
+        button.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+        button.textContent = pinned ? '取消置顶' : '启用置顶';
+        button.classList.toggle('active', pinned);
+      }
+      if (input) {
+        input.disabled = pinned;
+        if (pinned) input.value = '';
+        else if (!String(input.value || '').trim()) input.value = '1';
+      }
+    }
+
+    function providerPinnedFromEditor() {
+      return $('providerPinnedBtn')?.dataset.pinned === '1';
+    }
+
+    function providerPinnedAtFromEditor() {
+      const button = $('providerPinnedBtn');
+      const existing = Number(button?.dataset.pinnedAt);
+      if (Number.isFinite(existing) && existing > 0) return Math.trunc(existing);
+      return Date.now();
+    }
+
+    async function toggleProviderPinnedImmediately() {
+      if (state.selectedProvider < 0) return;
+      const current = state.providers[state.selectedProvider];
+      if (current?.__draft) throw new Error('请先保存 Provider，再启用置顶');
+      const previousPinned = providerPinnedFromEditor();
+      const previousPinnedAt = current?.pinned_at;
+      const pinned = !previousPinned;
+      const pinnedAt = pinned ? Date.now() : '';
+      const button = $('providerPinnedBtn');
+      if (button) button.disabled = true;
+      try {
+        await api('/config/pin', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: current.name,
+            pinned,
+            pinnedAt
+          })
+        });
+        current.pinned = pinned;
+        if (pinned) current.pinned_at = pinnedAt;
+        else delete current.pinned_at;
+        sortProvidersByEnabled();
+        renderProviderRows();
+        setProviderPinnedButton(pinned, pinnedAt);
+        $('serverState').textContent = pinned
+          ? '已启用置顶（AIProxy 未重启）'
+          : '已取消置顶（AIProxy 未重启）';
+      } catch (error) {
+        current.pinned = previousPinned;
+        if (previousPinned) current.pinned_at = previousPinnedAt;
+        else delete current.pinned_at;
+        setProviderPinnedButton(previousPinned, previousPinned ? previousPinnedAt : '');
+        throw error;
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     function dropSelectedProviderDraft() {
       const current = state.providers[state.selectedProvider];
       if (current?.__draft) {
@@ -782,21 +898,35 @@
 
     function beginProviderDraft(provider) {
       dropSelectedProviderDraft();
-      state.providers.unshift({ ...provider, __draft: true });
-      state.selectedProvider = 0;
+      const index = isPinnedProvider(provider) ? 0 : pinnedProviderCount();
+      state.providers.splice(index, 0, { ...provider, __draft: true });
+      state.selectedProvider = index;
       renderProviders();
     }
 
     function firstDisabledIndex(providers = state.providers) {
-      const index = providers.findIndex(provider => provider.enabled === false);
-      return index < 0 ? providers.length : index;
+      const pinnedCount = pinnedProviderCount(providers);
+      const index = providers.slice(pinnedCount).findIndex(provider => provider.enabled === false);
+      return index < 0 ? providers.length : pinnedCount + index;
     }
 
     function sortProvidersByEnabled() {
       const selected = state.providers[state.selectedProvider] || null;
-      const enabled = state.providers.filter(provider => provider.enabled !== false);
-      const disabled = state.providers.filter(provider => provider.enabled === false);
-      state.providers = [...enabled, ...disabled];
+      const pinned = state.providers
+        .map((provider, index) => ({ provider, index }))
+        .filter(item => isPinnedProvider(item.provider))
+        .sort((left, right) => {
+          const leftAt = pinnedAtValue(left.provider);
+          const rightAt = pinnedAtValue(right.provider);
+          if (leftAt !== null && rightAt !== null && leftAt !== rightAt) return leftAt - rightAt;
+          if (leftAt !== null && rightAt === null) return -1;
+          if (leftAt === null && rightAt !== null) return 1;
+          return left.index - right.index;
+        })
+        .map(item => item.provider);
+      const enabled = state.providers.filter(provider => !isPinnedProvider(provider) && provider.enabled !== false);
+      const disabled = state.providers.filter(provider => !isPinnedProvider(provider) && provider.enabled === false);
+      state.providers = [...pinned, ...enabled, ...disabled];
       state.selectedProvider = selected ? state.providers.indexOf(selected) : -1;
     }
 
@@ -810,13 +940,26 @@
     function upsertProviderAtNo(provider, targetNo) {
       const oldIndex = state.selectedProvider;
       const providers = [...state.providers];
+      const oldProvider = oldIndex >= 0 ? providers[oldIndex] : null;
+      const oldWasPinned = isPinnedProvider(oldProvider);
       if (oldIndex >= 0) providers.splice(oldIndex, 1);
+      const pinnedCount = pinnedProviderCount(providers);
+      if (isPinnedProvider(provider)) {
+        const index = oldWasPinned
+          ? Math.min(Math.max(oldIndex, 0), pinnedCount)
+          : pinnedCount;
+        providers.splice(index, 0, provider);
+        state.providers = providers;
+        state.selectedProvider = -1;
+        return;
+      }
       const disabledStart = firstDisabledIndex(providers);
+      const regularStart = pinnedCount;
       let index;
       if (provider.enabled === false) {
-        index = Math.min(Math.max(targetNo - 1, disabledStart), providers.length);
+        index = Math.min(Math.max(regularStart + targetNo - 1, disabledStart), providers.length);
       } else {
-        index = Math.min(Math.max(targetNo - 1, 0), disabledStart);
+        index = Math.min(Math.max(regularStart + targetNo - 1, regularStart), disabledStart);
       }
       providers.splice(index, 0, provider);
       state.providers = providers;
@@ -829,6 +972,12 @@
       if (!provider) return;
       providers.splice(index, 1);
       provider.enabled = provider.enabled === false;
+      if (isPinnedProvider(provider)) {
+        providers.splice(index, 0, provider);
+        state.providers = providers;
+        state.selectedProvider = -1;
+        return;
+      }
       const insertIndex = firstDisabledIndex(providers);
       providers.splice(insertIndex, 0, provider);
       state.providers = providers;
@@ -994,11 +1143,13 @@
       return `<span class="status warn" title="${title}">🟡 抢通</span>`;
     }
 
-    function renderProviders() {
+    function renderProviderRows() {
+      let regularNo = 0;
       $('providerRows').innerHTML = state.providers.map((p, i) => {
         const models = modelSummary(p);
         const baseUrl = providerBaseUrl(p);
         const uaLabel = providerUaLabel(p);
+        const displayNo = isPinnedProvider(p) ? '置顶' : String(++regularNo);
         const providerBadges = [
           p.enabled === false ? '<span class="status muted">停用</span>' : '',
           providerApiKey(p) ? '' : '<span class="status warn">无Key</span>',
@@ -1006,7 +1157,7 @@
         ].filter(Boolean).join(' ');
         return `
         <tr>
-          <td>${i + 1}</td>
+          <td>${displayNo}</td>
           <td class="truncate" title="${esc(p.name || '')}">${esc(p.name)}${providerBadges ? ' ' + providerBadges : ''}</td>
           <td class="truncate" title="${esc(baseUrl)}">${esc(baseUrl)}</td>
           <td class="truncate" title="${esc(endpointLabel(p.api_mode || 'codex_responses', p))}">${esc(endpointLabel(p.api_mode || 'codex_responses', p))}</td>
@@ -1015,6 +1166,10 @@
           <td><div class="row-tools"><button class="${state.selectedProvider === i ? 'danger' : ''}" data-edit-provider="${i}" type="button">${state.selectedProvider === i ? '取消' : '编辑'}</button><button data-clone-provider="${i}" type="button">克隆</button><button data-toggle-provider="${i}" type="button">${p.enabled === false ? '启用' : '停用'}</button><button class="danger" data-delete-provider="${i}" type="button">删除</button></div></td>
         </tr>`;
       }).join('') || `<tr><td colspan="7"><div class="empty">暂无 provider</div></td></tr>`;
+    }
+
+    function renderProviders() {
+      renderProviderRows();
       renderSaveResult();
       renderProviderEditor();
     }
@@ -1196,8 +1351,10 @@
       const p = state.providers[state.selectedProvider];
       clearFetchedModels();
       $('providerEditorTitle').textContent = p ? `编辑 ${p.name || ''}` : 'Provider';
-      $('providerNo').value = p ? state.selectedProvider + 1 : 1;
-      $('providerNo').max = Math.max(state.providers.length, 1);
+      const pinned = isPinnedProvider(p);
+      setProviderPinnedButton(pinned, pinnedAtValue(p) || '');
+      $('providerNo').value = pinned ? '' : (p ? regularProviderNo(state.selectedProvider) : 1);
+      $('providerNo').max = Math.max(regularProviderCount(), 1);
       $('providerName').value = p?.name || '';
       $('providerBaseUrl').value = providerBaseUrl(p);
       $('providerApiKey').value = providerApiKey(p);
@@ -1240,6 +1397,7 @@
       if (endpointMode === 'custom_endpoint' && !customEndpoint) throw new Error('自定义 Endpoint 必填');
       if (customEndpoint === '/message') throw new Error('Endpoint must be /messages, not /message');
       const headerConfig = presetToHeaders(headerPreset, customUa, state.providers[state.selectedProvider] || {});
+      const pinned = providerPinnedFromEditor();
       const item = {
         ...(state.providers[state.selectedProvider] || {}),
         name: providerName,
@@ -1248,12 +1406,15 @@
         api_mode: endpointMode,
         auth_mode: authModeForEndpoint(endpointMode, customEndpoint),
         enabled: state.providers[state.selectedProvider]?.enabled !== false,
+        pinned,
         models: rowsToModels(),
         headers: headerConfig.headers,
         remove_headers: headerConfig.remove_headers,
         stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT),
         keepalive: $('providerKeepalive').checked
       };
+      if (pinned) item.pinned_at = providerPinnedAtFromEditor();
+      else delete item.pinned_at;
       if (item.keepalive) {
         item.keepalive_concurrency = collectIntegerInput(
           'providerKeepaliveConcurrency',
@@ -1489,7 +1650,9 @@
         if (state.selectedProvider >= 0) {
           const provider = collectProviderEditor();
           if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
-          upsertProviderAtNo(provider, providerTargetNo(state.providers.length));
+          const current = state.providers[state.selectedProvider];
+          const maxNo = regularProviderCount() + (isPinnedProvider(current) && !isPinnedProvider(provider) ? 1 : 0);
+          upsertProviderAtNo(provider, providerTargetNo(maxNo));
         }
         await persistProviders();
       } else if (state.tab === 'monitor') {
@@ -1859,10 +2022,13 @@
         } else if (target.id === 'applyProviderBtn') {
           const provider = collectProviderEditor();
           if (!provider.name || !provider.base_url) throw new Error('名称和 Base URL 必填');
-          const maxNo = state.selectedProvider >= 0 ? state.providers.length : state.providers.length + 1;
+          const current = state.providers[state.selectedProvider];
+          const maxNo = regularProviderCount() + (isPinnedProvider(current) && !isPinnedProvider(provider) ? 1 : 0);
           upsertProviderAtNo(provider, providerTargetNo(maxNo));
           await persistProviders();
           await loadAll();
+        } else if (target.id === 'providerPinnedBtn') {
+          await toggleProviderPinnedImmediately();
         } else if (target.hasAttribute('data-delete-provider')) {
           const index = Number(target.dataset.deleteProvider);
           const providerName = state.providers[index]?.name || ('#' + (index + 1));

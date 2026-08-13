@@ -501,6 +501,21 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     else:
         provider.pop("anthropic_version", None)
     provider["enabled"] = api_checks.coerce_bool(provider.get("enabled"), True)
+    provider["pinned"] = api_checks.coerce_bool(provider.get("pinned"), False)
+    if provider["pinned"]:
+        pinned_at = provider.get("pinned_at")
+        if pinned_at not in (None, ""):
+            try:
+                pinned_at = int(pinned_at)
+            except (TypeError, ValueError):
+                raise ValueError(f"{label} pinned_at must be an integer") from None
+            if pinned_at <= 0:
+                raise ValueError(f"{label} pinned_at must be positive")
+            provider["pinned_at"] = pinned_at
+        else:
+            provider.pop("pinned_at", None)
+    else:
+        provider.pop("pinned_at", None)
     normalize_keepalive(provider, label)
     headers = provider.get("headers", {})
     if headers is None:
@@ -576,6 +591,9 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
         item.pop("auth_mode", None)
     if item.get("anthropic_version") == "2023-06-01":
         item.pop("anthropic_version", None)
+    if not item.get("pinned"):
+        item.pop("pinned", None)
+        item.pop("pinned_at", None)
     item.pop("request_max_retries", None)
     # keepalive 默认不勾：关掉时把相关字段全部丢掉，现有 config.yaml 不会新增噪音。
     if not item.get("keepalive"):
@@ -662,6 +680,40 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
                 yaml.safe_dump(persisted, f, allow_unicode=True, sort_keys=False)
         os.replace(tmp_name, target)
     return backup, warnings
+
+
+def save_provider_pin(provider_name: str, pinned: bool, pinned_at: Any = None) -> tuple[Path | None, list[str]]:
+    """Persist dashboard-only pin metadata without syncing or restarting services."""
+    name = str(provider_name or "").strip()
+    if not name:
+        raise ValueError("provider name is required")
+    providers = load_provider_list()
+    provider = next(
+        (
+            item
+            for item in providers
+            if str(item.get("name") or "").strip().lower() == name.lower()
+        ),
+        None,
+    )
+    if provider is None:
+        raise ValueError(f"provider {name!r} not found")
+
+    provider["pinned"] = api_checks.coerce_bool(pinned, False)
+    if provider["pinned"]:
+        if pinned_at in (None, ""):
+            raise ValueError("pinned_at is required when enabling pin")
+        try:
+            timestamp = int(pinned_at)
+        except (TypeError, ValueError):
+            raise ValueError("pinned_at must be an integer") from None
+        if timestamp <= 0:
+            raise ValueError("pinned_at must be positive")
+        provider["pinned_at"] = timestamp
+    else:
+        provider.pop("pinned_at", None)
+
+    return save_provider_list(providers, "auto")
 
 
 def provider_public(provider: dict[str, Any]) -> dict[str, Any]:
@@ -2187,8 +2239,25 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-def restart_manual_proxy_processes(config_path: Path) -> dict[str, Any]:
-    matches = iter_matching_manual_proxy_processes(config_path)
+def manual_proxy_service_assignment(args: list[str]) -> str | None:
+    scope = parse_aiproxy_scope_flag(args)
+    if scope == "--keepalive-only":
+        return AIPROXY_KEEPALIVE_SERVICE
+    if scope == "--exclude-keepalive":
+        return AIPROXY_SINGLE_SERVICE
+    return None
+
+
+def restart_manual_proxy_processes(
+    config_path: Path,
+    services: set[str] | None = None,
+) -> dict[str, Any]:
+    matches = []
+    for item in iter_matching_manual_proxy_processes(config_path):
+        assigned_service = manual_proxy_service_assignment(list(item.get("cmdline") or []))
+        if services is not None and assigned_service is not None and assigned_service not in services:
+            continue
+        matches.append(item)
     result: dict[str, Any] = {"matched": len(matches), "stopped": [], "killed": [], "started": [], "log": str(PROXY_RESTART_LOG)}
     if not matches:
         return result
@@ -2255,7 +2324,48 @@ def restart_aiproxy_service_item(item: dict[str, Any], config_path: Path) -> dic
     return entry
 
 
-def restart_aiproxy_services_for_config(config_path: Path) -> dict[str, Any]:
+def provider_service_assignment(provider: dict[str, Any]) -> str:
+    if api_checks.coerce_bool(provider.get("keepalive"), False):
+        return AIPROXY_KEEPALIVE_SERVICE
+    return AIPROXY_SINGLE_SERVICE
+
+
+def canonical_provider_map(providers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    normalized = compact_provider_list(validate_provider_list(providers))
+    result: dict[str, dict[str, Any]] = {}
+    for provider in normalized:
+        item = dict(provider)
+        # pinned / pinned_at 只影响 dashboard 展示顺序，不改变任何 AIProxy 运行配置。
+        item.pop("pinned", None)
+        item.pop("pinned_at", None)
+        result[str(item.get("name") or "").lower()] = item
+    return result
+
+
+def changed_aiproxy_services(
+    before_providers: list[dict[str, Any]],
+    after_providers: list[dict[str, Any]],
+) -> set[str]:
+    """Return only the proxy channels whose owned provider configs changed."""
+    before = canonical_provider_map(before_providers)
+    after = canonical_provider_map(after_providers)
+    services: set[str] = set()
+    for name in before.keys() | after.keys():
+        old_provider = before.get(name)
+        new_provider = after.get(name)
+        if old_provider == new_provider:
+            continue
+        if old_provider is not None:
+            services.add(provider_service_assignment(old_provider))
+        if new_provider is not None:
+            services.add(provider_service_assignment(new_provider))
+    return services
+
+
+def restart_aiproxy_services_for_config(
+    config_path: Path,
+    services: set[str] | None = None,
+) -> dict[str, Any]:
     items = []
     seen_services: set[str] = set()
     candidates = merged_aiproxy_service_items()
@@ -2268,6 +2378,8 @@ def restart_aiproxy_services_for_config(config_path: Path) -> dict[str, Any]:
         if service in seen_services:
             continue
         seen_services.add(service)
+        if services is not None and service not in services:
+            continue
         entry = restart_aiproxy_service_item(item, config_path)
         if entry is not None:
             items.append(entry)
@@ -2288,20 +2400,31 @@ def check_proxy_config_before_restart(config_path: Path) -> dict[str, Any]:
         return {"ok": False, "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
 
 
-def restart_after_config_write() -> dict[str, Any]:
+def restart_after_config_write(
+    before_providers: list[dict[str, Any]] | None = None,
+    after_providers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     config_path = active_config_file()
     result: dict[str, Any] = {"configPath": str(config_path)}
+    changed_services: set[str] | None = None
+    if before_providers is not None and after_providers is not None:
+        changed_services = changed_aiproxy_services(before_providers, after_providers)
+        result["changedServices"] = sorted(changed_services)
+        if not changed_services:
+            result["ok"] = True
+            result["skipped"] = "no effective provider changes"
+            return result
     result["configCheck"] = check_proxy_config_before_restart(config_path)
     if not result["configCheck"].get("ok"):
         result["ok"] = False
         result["skipped"] = "proxy config check failed; existing proxy processes were left unchanged"
         return result
     try:
-        result["manualProxy"] = restart_manual_proxy_processes(config_path)
+        result["manualProxy"] = restart_manual_proxy_processes(config_path, changed_services)
     except Exception as exc:
         result["manualProxy"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
     try:
-        result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path)
+        result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path, changed_services)
     except Exception as exc:
         result["aiproxyServices"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
 
@@ -2993,7 +3116,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     app_sync = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
                     warnings.append(f"Codex 同步失败：{app_sync['error']}")
-                restart = restart_after_config_write()
+                restart = restart_after_config_write(before_providers, after_providers)
                 self.send_json(200, {
                     "ok": True,
                     "backup": str(backup) if backup else "",
@@ -3001,6 +3124,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "claudeFunctions": claude_functions,
                     "appSync": app_sync,
                     "restart": restart,
+                })
+                return
+            if path == "/config/pin":
+                provider_name = str(payload.get("name") or "").strip()
+                pinned = api_checks.coerce_bool(payload.get("pinned"), False)
+                backup, warnings = save_provider_pin(provider_name, pinned, payload.get("pinnedAt"))
+                self.send_json(200, {
+                    "ok": True,
+                    "backup": str(backup) if backup else "",
+                    "warnings": warnings,
+                    "pinOnly": True,
+                    "restart": {
+                        "ok": True,
+                        "changedServices": [],
+                        "skipped": "pin-only change; AIProxy was not restarted",
+                    },
                 })
                 return
             if path == "/checkins":
