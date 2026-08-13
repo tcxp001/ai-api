@@ -23,6 +23,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -2511,11 +2512,12 @@ KEEPALIVE_STATE_LOST = "lost"
 KEEPALIVE_STATE_FAILED = "failed"
 KEEPALIVE_STATE_STOPPED = "stopped"
 
-# 探活请求要长得像真实客户端流量：上游中转普遍按 UA / Originator 做 WAF 判断
-# （api.py 的 UA 矩阵就是为此存在的），用 requests 默认 UA 容易被直接拦掉。
+# Responses 请求要长得像真实 Codex 客户端流量。这里的版本与本机运行的
+# Codex CLI 保持一致；上游中转普遍会按 UA / Originator / Codex metadata
+# 判断请求是否来自官方客户端。
 KEEPALIVE_CODEX_HEADERS = {
     "Originator": "codex_cli_rs",
-    "User-Agent": "codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color",
+    "User-Agent": "codex_cli_rs/0.144.1-cometix (Debian 12.0.0; x86_64) xterm-256color",
 }
 KEEPALIVE_CLAUDE_HEADERS = {
     "User-Agent": "claude-code/2.1.153 (linux; x64; node/v24.16.0)",
@@ -2573,17 +2575,66 @@ def keepalive_model_for(provider: dict[str, Any]) -> str:
     return ""
 
 
-def build_keepalive_payload(model: str, prompt: str, path: str) -> dict[str, Any]:
-    """极短的探活请求体：一问一答几十个 token。"""
+def keepalive_codex_context() -> dict[str, str]:
+    """为一条 keepalive 对话生成与 Codex 请求对应的关联标识。"""
+    session_id = str(uuid.uuid4())
+    return {
+        "session_id": session_id,
+        "thread_id": session_id,
+        "turn_id": str(uuid.uuid4()),
+        "window_id": f"{session_id}:0",
+        "request_id": str(uuid.uuid4()),
+    }
+
+
+def build_keepalive_payload(
+    model: str,
+    prompt: str,
+    path: str,
+    provider: dict[str, Any] | None = None,
+    codex_context: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """构造一条最小但形态真实的 Codex Responses 对话请求。"""
     if path.endswith("/responses"):
         # stream=True 才拿得到 response.completed —— 那是"真实回复"的唯一硬信号。
-        return {
+        payload: dict[str, Any] = {
             "model": model,
-            "input": [{"role": "user", "content": prompt}],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
             "store": False,
             "stream": True,
-            "max_output_tokens": KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS,
+            "text": {"verbosity": "low"},
         }
+        # Codex 会把会话上下文标识放在 prompt_cache_key；每次请求独立生成，
+        # 避免多个并发抢通请求共享一个缓存键。
+        context = codex_context or keepalive_codex_context()
+        session_id = context["session_id"]
+        payload["prompt_cache_key"] = session_id
+        payload["client_metadata"] = {
+            "session_id": session_id,
+            "turn_id": context["turn_id"],
+            "thread_id": context["thread_id"],
+            "x-codex-window-id": context["window_id"],
+        }
+        # 真实 Codex 请求会把 reasoning.context 一并发送。provider 的
+        # reasoning_effort 仍是唯一配置来源，避免改变现有 provider 语义。
+        if isinstance(provider, dict):
+            effort = configured_reasoning_effort(provider, payload)
+            if effort and effort.strip().lower() != "none":
+                payload["reasoning"] = {
+                    "effort": effort,
+                    "summary": "auto",
+                    "context": "all_turns",
+                }
+                payload.setdefault("include", ["reasoning.encrypted_content"])
+        return payload
     # /chat/completions 与 /messages 的最小请求体一致
     return {
         "model": model,
@@ -2592,14 +2643,41 @@ def build_keepalive_payload(model: str, prompt: str, path: str) -> dict[str, Any
     }
 
 
-def keepalive_request_headers(provider: dict[str, Any], path: str) -> dict[str, str]:
+def keepalive_request_headers(
+    provider: dict[str, Any],
+    path: str,
+    codex_context: dict[str, str] | None = None,
+) -> dict[str, str]:
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if path.endswith("/responses") else "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
     }
     headers.update(KEEPALIVE_CLAUDE_HEADERS if path.endswith("/messages") else KEEPALIVE_CODEX_HEADERS)
+    if path.endswith("/responses"):
+        context = codex_context or keepalive_codex_context()
+        session_id = context["session_id"]
+        headers.update(
+            {
+                "Originator": "codex_cli_rs",
+                "session-id": session_id,
+                "thread-id": session_id,
+                "x-client-request-id": context["request_id"],
+                "x-codex-beta-features": "remote_compaction_v2",
+                "x-codex-window-id": context["window_id"],
+                "x-openai-internal-codex-responses-lite": "true",
+            }
+        )
+        headers["x-codex-turn-metadata"] = json.dumps(
+            {
+                "session_id": session_id,
+                "thread_id": context["thread_id"],
+                "turn_id": context["turn_id"],
+                "window_id": context["window_id"],
+                "request_kind": "turn",
+                "thread_source": "user",
+            },
+            separators=(",", ":"),
+        )
     for key, value in (provider.get("headers") or {}).items():
         headers[str(key)] = "" if value is None else str(value)
     for key in provider.get("remove_headers") or ():
@@ -2843,8 +2921,15 @@ class KeepAliveManager:
         url = str(provider.get("base_url") or "").rstrip("/") + path
         read_timeout = float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT)
         connect_timeout = min(float(provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT), read_timeout)
-        payload = build_keepalive_payload(model, next_keepalive_prompt(), path)
-        headers = keepalive_request_headers(provider, path)
+        codex_context = keepalive_codex_context() if path.endswith("/responses") else None
+        payload = build_keepalive_payload(
+            model,
+            next_keepalive_prompt(),
+            path,
+            provider,
+            codex_context,
+        )
+        headers = keepalive_request_headers(provider, path, codex_context)
         streaming = bool(payload.get("stream"))
 
         if not self._inflight.acquire(timeout=max(60.0, read_timeout)):
