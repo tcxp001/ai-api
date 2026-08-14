@@ -106,29 +106,6 @@
     }
     .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; background: #fff; }
-    .health-table { min-width: 0; }
-    .monitor-table { width: 100%; min-width: 0; table-layout: fixed; }
-    .monitor-table th, .monitor-table td { white-space: nowrap; }
-    .monitor-table th:nth-child(1), .monitor-table td:nth-child(1) { width: 8%; }
-    .monitor-table th:nth-child(2), .monitor-table td:nth-child(2) { width: 10%; }
-    .monitor-table th:nth-child(3), .monitor-table td:nth-child(3) { width: 8%; }
-    .monitor-table th:nth-child(4), .monitor-table td:nth-child(4) { width: 6%; }
-    .monitor-table th:nth-child(5), .monitor-table td:nth-child(5) { width: 6%; }
-    .monitor-table th:nth-child(6), .monitor-table td:nth-child(6) { width: 6%; }
-    .monitor-table th:nth-child(8), .monitor-table td:nth-child(8) { width: 7%; }
-    .monitor-table th:nth-child(9), .monitor-table td:nth-child(9) { width: 11%; }
-    .monitor-table .detail-col { width: 38%; min-width: 0; white-space: nowrap; }
-    .monitor-table .row-tools { width: 100%; flex-wrap: nowrap; }
-    .monitor-table .chain-prompt { flex: 1 1 0; width: auto; min-width: 0; }
-    .monitor-table .row-tools button { flex: 0 0 auto; }
-    .health-check { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; cursor: pointer; }
-    .health-check input { position: absolute; width: 1px; min-height: 0; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
-    .health-check-box { width: 16px; height: 16px; border: 1px solid #a8b5b2; border-radius: 4px; background: #fff; box-shadow: inset 0 1px 1px rgba(19, 28, 32, .04); }
-    .health-check input:checked + .health-check-box { border-color: var(--accent); background: var(--accent); }
-    .health-check input:checked + .health-check-box::after { content: ""; display: block; width: 4px; height: 8px; margin: 2px 0 0 5px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
-    .health-check input:focus-visible + .health-check-box { box-shadow: 0 0 0 3px rgba(8,127,123,.18); }
-    .health-result-cell { white-space: nowrap; overflow: visible; }
-    .health-result-cell .status { white-space: nowrap; line-height: 1.25; }
     th, td { min-width: 0; padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: 13px; overflow-wrap: anywhere; }
     th { background: var(--surface-2); color: #3a464c; font-weight: 700; }
     tr:last-child td { border-bottom: 0; }
@@ -153,10 +130,11 @@
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(460px, 520px); gap: 14px; align-items: start; }
     .editor-stack { display: grid; gap: 14px; align-content: start; min-width: 0; }
     .editor { display: grid; gap: 0; min-width: 0; overflow: hidden; }
-    .provider-subsection { display: grid; gap: 0; }
-    .provider-subsection-title { color: #344047; font-size: 14px; font-weight: 750; }
-    .keepalive-settings-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: end; }
-    .keepalive-toggle-input { width: 100%; min-height: 38px; }
+    .keepalive-card { display: grid; gap: 10px; }
+    .keepalive-settings-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
+    .keepalive-card.disabled .keepalive-settings-row { opacity: .55; }
+    .keepalive-actions { margin-top: 2px; justify-content: flex-start; }
+    .keepalive-actions button { min-width: 72px; }
     #modelFetchStatus:empty, #modelRows:empty { display: none; }
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
@@ -190,10 +168,11 @@
     .service-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; justify-self: end; flex-wrap: wrap; }
     .service-actions button { flex: 0 0 auto; min-height: 30px; padding: 0 8px; font-size: 12px; }
     .aiproxy-editor { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcfb; }
-    .settings-card { display: grid; gap: 6px; }
+    .settings-card { display: grid; gap: 10px; }
     .settings-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
     .setting-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
     .setting-row button { white-space: nowrap; }
+    #autoCompactSaveState { margin-top: -4px; }
     .aiproxy-editor-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
     .aiproxy-editor .actions { justify-content: flex-end; }
     .service-log { max-height: 180px; overflow: auto; }
@@ -229,7 +208,6 @@
   <main class="wrap">
     <nav class="tabs">
       <button class="tab active" data-tab="config" type="button">Provider 维护</button>
-      <button class="tab" data-tab="health" type="button">Provider 测活</button>
       <button class="tab" data-tab="aiproxy" type="button">AIProxy 服务</button>
     </nav>
 
@@ -261,7 +239,6 @@
             <div class="settings-card-head">
               <div>
                 <h2>全局上下文压缩</h2>
-                <div class="subtle">按模型上下文百分比换算值与上下文压缩窗口中的较小值执行压缩。</div>
               </div>
             </div>
             <div class="setting-row">
@@ -273,11 +250,11 @@
           </section>
           <section class="panel editor">
             <div>
-              <h2 id="providerEditorTitle" hidden></h2>
+              <h2 id="providerEditorTitle">Provider编辑</h2>
             </div>
             <div class="provider-order-row provider-edit-spaced">
               <div class="field"><label for="providerNo">No.</label><input id="providerNo" type="number" min="1" step="1" value="1"></div>
-              <div class="field"><label for="providerPinnedBtn">固定位置</label><button id="providerPinnedBtn" class="provider-pin-button" type="button" aria-pressed="false">启用置顶</button></div>
+              <div class="field"><button id="providerPinnedBtn" class="provider-pin-button" type="button" aria-label="固定位置" aria-pressed="false">启用置顶</button></div>
             </div>
           <div class="field provider-edit-spaced"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
@@ -307,13 +284,15 @@
             <label for="providerStreamMaxRetries">Codex stream_max_retries</label>
             <input id="providerStreamMaxRetries" type="number" min="0" max="100" step="1" value="5">
           </div>
-          <div class="provider-subsection provider-edit-spaced">
-            <div class="provider-subsection-title">Keepalive</div>
+            <div class="actions provider-save-actions">
+              <button id="applyProviderBtn" class="primary" type="button">保存</button>
+            </div>
+          </section>
+          <section id="providerKeepaliveCard" class="panel keepalive-card disabled">
+            <div>
+              <h2>抢通保活</h2>
+            </div>
             <div id="providerKeepaliveOptions" class="keepalive-settings-row">
-              <div class="field">
-                <label for="providerKeepalive">抢通保活</label>
-                <label class="check-toggle keepalive-toggle-input"><input id="providerKeepalive" type="checkbox">启用</label>
-              </div>
               <div class="field">
                 <label for="providerKeepaliveConcurrency">并发数</label>
                 <input id="providerKeepaliveConcurrency" type="number" min="1" max="50" step="1" value="10">
@@ -327,36 +306,13 @@
                 <input id="providerKeepaliveInterval" type="number" min="5" max="3600" step="1" value="30">
               </div>
             </div>
-          </div>
-            <div class="actions provider-save-actions">
-              <button id="applyProviderBtn" class="primary" type="button">保存</button>
+            <div class="actions keepalive-actions">
+              <button id="saveProviderKeepaliveBtn" type="button">保存</button>
+              <button id="providerKeepaliveBtn" class="primary" type="button" aria-pressed="false">启用</button>
             </div>
           </section>
         </aside>
       </div>
-    </section>
-
-    <section id="health" class="view">
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Provider 测活</h2>
-            <div class="subtle">默认测试 Codex / Claude Code / Empty / Curl / Chrome；取消「测试UA矩阵」则只测 Provider 配置 User-Agent。</div>
-          </div>
-          <div class="actions">
-            <label class="check-toggle"><input id="healthAllUa" type="checkbox" checked>测试UA矩阵</label>
-            <button id="selectAllHealthBtn" type="button">全部选中</button>
-            <button id="clearAllHealthBtn" type="button">全部取消</button>
-            <button id="runSelectedHealthBtn" class="primary" type="button">测试</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table class="health-table">
-            <thead><tr><th style="width:42px"></th><th style="width:130px">Provider</th><th style="width:90px">Status</th><th style="width:160px">Model</th><th style="width:140px">Endpoint</th><th style="width:105px">Codex</th><th style="width:125px">Claude Code</th><th style="width:105px">Empty</th><th style="width:105px">Curl</th><th style="width:105px">Chrome</th><th style="width:120px">Custom</th><th style="width:170px">Checked At</th></tr></thead>
-            <tbody id="healthRows"></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <section id="aiproxy" class="view">
@@ -364,10 +320,7 @@
         <div class="panel-head">
           <div>
             <h2>AIProxy 服务状态</h2>
-            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。下方可通过 AIProxy 发起 provider/model 调用测试。</div>
-          </div>
-          <div class="actions">
-            <button id="refreshAiproxyPageBtn" type="button">刷新AIProxy</button>
+            <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。</div>
           </div>
         </div>
         <div id="aiproxyPageRows" class="service-list"></div>
@@ -388,44 +341,19 @@
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>AIProxy 端到端测试</h2>
-            <div class="subtle">自动列出当前启用的 Provider 和模型；停用或没有模型的 Provider 不会显示。每行「测试」会通过本地 AIProxy 真实调用该 Provider/Model。</div>
-          </div>
-          <div class="actions">
-            <button id="runMonitorBtn" class="primary" type="button">检查全部</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table class="monitor-table">
-            <thead><tr><th>Provider</th><th>Model</th><th>Endpoint</th><th>Reasoning</th><th>User-Agent</th><th>状态</th><th class="detail-col">详情</th><th>检测时间</th><th>操作</th></tr></thead>
-            <tbody id="chainRows"></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
 
   </main>
 
   <script>
-    const TAB_PATHS = { config: '/config', health: '/health', aiproxy: '/aiproxy' };
-    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/health': 'health', '/aiproxy': 'aiproxy' };
+    const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy' };
+    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy' };
     const tabFromLocation = () => PATH_TABS[window.location.pathname] || 'config';
 
     const state = {
       tab: tabFromLocation(),
       providers: [],
-      monitor: { proxies: [], chains: [] },
-      monitorRunning: {},
-      monitorPrompts: {},
-      status: { providers: {}, proxies: {}, chains: {} },
-      healthResults: {},
-      healthRunning: {},
-      healthRun: null,
-      healthSelection: null,
       appSync: {},
       customProviders: { codex: { items: [] } },
       settings: { autoCompactPercent: 70, autoCompactTokenLimit: 200000 },
@@ -434,7 +362,6 @@
       configPath: 'config.yaml',
       fetchedModels: [],
       selectedProvider: -1,
-      selectedChain: -1,
       lastSaveMessage: '',
       lastSaveDetails: null
     };
@@ -453,79 +380,12 @@
       if (m && typeof m === 'object') return Object.keys(m).map(normalize).filter(Boolean);
       return [];
     };
-    const firstModel = (p) => modelNames(p)[0] || '';
     const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
-    const DEFAULT_MONITOR_PROMPT = '在吗？';
     const CODEX_STREAM_MAX_RETRIES_DEFAULT = 5;
     const KEEPALIVE_CONCURRENCY_DEFAULT = 10;
     const KEEPALIVE_RETRY_INTERVAL_DEFAULT = 5;
     const KEEPALIVE_INTERVAL_DEFAULT = 30;
     const CODEX_RETRY_MAX = 100;
-    function providerByName(name) {
-      const key = String(name || '').toLowerCase();
-      return (state.providers || []).find(p => String(p.name || '').toLowerCase() === key) || null;
-    }
-    function modelMeta(provider, model) {
-      const models = provider?.models || provider?.model;
-      if (models && typeof models === 'object' && !Array.isArray(models)) {
-        const meta = models[model];
-        return meta && typeof meta === 'object' ? meta : {};
-      }
-      return {};
-    }
-    function chainReasoningText(chain) {
-      const provider = providerByName(chain?.providerId);
-      const meta = modelMeta(provider, chain?.model);
-      const effort = meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning || '';
-      if (effort && typeof effort === 'object') return effort.effort || '默认';
-      return String(effort || '').trim() || '默认';
-    }
-    function providerEndpointText(provider) {
-      const mode = String(provider?.api_mode || '').trim();
-      if (mode === 'chat_completions') return 'chat';
-      if (mode === 'messages') return 'messages';
-      if (mode === 'custom_endpoint') {
-        const endpoint = provider?.custom_endpoint || provider?.endpoint || 'custom';
-        return endpoint;
-      }
-      return 'responses';
-    }
-    function providerUserAgentText(provider) {
-      const headers = provider?.headers || {};
-      const key = Object.keys(headers).find(k => String(k).toLowerCase() === 'user-agent');
-      if (key === undefined) return 'Default';
-      const value = headers[key];
-      if (value === '') return 'Empty';
-      if (value === null || value === undefined) return 'Default';
-      const ua = String(value);
-      const lower = ua.toLowerCase();
-      if (lower.includes('codex_cli_rs') || String(headers.Originator || headers.originator || '').toLowerCase() === 'codex_cli_rs') return 'Codex';
-      if (lower.includes('claude-code/') || lower.includes('claude-cli') || String(headers['x-app'] || headers['X-App'] || '').toLowerCase() === 'cli') return 'Claude Code';
-      if (lower.startsWith('curl/') || lower === 'curl') return 'Curl';
-      if (lower.includes('chrome/') || lower.includes('chromium/') || lower.includes('applewebkit/')) return 'Chrome';
-      return 'Custom';
-    }
-    function collectMonitorPrompts() {
-      const prompts = { ...(state.monitorPrompts || {}) };
-      document.querySelectorAll('[data-chain-prompt]').forEach(input => {
-        const id = input.dataset.chainPrompt;
-        if (id) prompts[id] = input.value;
-      });
-      state.monitorPrompts = prompts;
-      return prompts;
-    }
-    const shortDateTime = (iso) => {
-      if (!iso) return '-';
-      const match = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
-      if (match) return `${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
-      return String(iso);
-    };
-    const isToday = (iso) => {
-      if (!iso) return false;
-      const d = new Date(iso);
-      const n = new Date();
-      return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
-    };
     const api = async (path, options = {}) => {
       const res = await fetch(path, {
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -572,10 +432,8 @@
 
     async function loadAll() {
       $('serverState').textContent = '读取中';
-      const [config, monitor, status, aiproxy, keepalive] = await Promise.all([
+      const [config, aiproxy, keepalive] = await Promise.all([
         api('/config'),
-        api('/monitor'),
-        api('/status'),
         api('/aiproxy').catch(err => ({ items: [], error: err.message })),
         api('/keepalive').catch(err => ({ ok: false, providers: {}, error: err.message }))
       ]);
@@ -584,12 +442,9 @@
       state.settings = config.settings || { autoCompactPercent: 70, autoCompactTokenLimit: 200000 };
       state.configPath = config.configPath || 'config.yaml';
       sortProvidersByEnabled();
-      state.monitor = monitor;
-      state.status = status;
       state.aiproxy = aiproxy;
       state.keepalive = keepalive;
       if (state.selectedProvider >= state.providers.length) state.selectedProvider = -1;
-      if (state.selectedChain >= state.monitor.chains.length) state.selectedChain = -1;
       render();
       startKeepalivePolling();
       const serviceSummary = state.aiproxy.summary ? `，AIProxy${Number(state.aiproxy.summary.healthy || 0) > 0 ? '健康' : '异常'}` : '';
@@ -625,8 +480,6 @@
     function render() {
       renderCompactSettings();
       renderProviders();
-      renderHealth();
-      renderMonitor();
       renderAiproxy();
     }
 
@@ -724,10 +577,9 @@
         delete item.pinned_at;
       }
       delete item.request_max_retries;
-      // 不勾选就把 keepalive 相关字段全部丢掉，config.yaml 不留噪音（与 dashboard.py 一致）。
+      // 关闭时保留已保存的非默认参数；Provider 编辑保存不能清掉 Keepalive 独立配置。
       if (item.keepalive !== true) {
-        ['keepalive', 'keepalive_interval', 'keepalive_retry_interval', 'keepalive_timeout', 'keepalive_concurrency', 'keepalive_model', 'keepalive_max_attempts']
-          .forEach(key => { delete item[key]; });
+        delete item.keepalive;
       }
       ['note', 'api_key', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
         if (item[key] === '') delete item[key];
@@ -771,13 +623,143 @@
       return value;
     }
 
+    function providerKeepaliveEnabled() {
+      return $('providerKeepaliveBtn')?.dataset.enabled === 'true';
+    }
+
+    function setProviderKeepaliveEnabled(enabled) {
+      const button = $('providerKeepaliveBtn');
+      if (!button) return;
+      button.dataset.enabled = enabled ? 'true' : 'false';
+      button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      button.textContent = enabled ? '关闭' : '启用';
+      button.classList.toggle('primary', !enabled);
+      button.classList.toggle('danger', enabled);
+      updateKeepaliveOptions();
+    }
+
     function updateKeepaliveOptions() {
-      const enabled = $('providerKeepalive')?.checked === true;
-      const options = $('providerKeepaliveOptions');
-      if (options) options.classList.toggle('disabled', !enabled);
-      for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveInterval']) {
+      const provider = state.providers[state.selectedProvider];
+      const available = !!provider && !provider.__draft;
+      const card = $('providerKeepaliveCard');
+      const toggleButton = $('providerKeepaliveBtn');
+      const saveButton = $('saveProviderKeepaliveBtn');
+      if (card) card.classList.toggle('disabled', !available);
+      if (toggleButton) toggleButton.disabled = !available;
+      if (saveButton) saveButton.disabled = !available;
+      for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveRetryInterval', 'providerKeepaliveInterval']) {
         const input = $(id);
-        if (input) input.disabled = !enabled;
+        if (input) input.disabled = !available;
+      }
+    }
+
+    function collectKeepaliveSettings() {
+      return {
+        concurrency: collectIntegerInput(
+          'providerKeepaliveConcurrency',
+          '并发数',
+          1,
+          50,
+          KEEPALIVE_CONCURRENCY_DEFAULT
+        ),
+        retryInterval: collectIntegerInput(
+          'providerKeepaliveRetryInterval',
+          '抢通间隔',
+          1,
+          3600,
+          KEEPALIVE_RETRY_INTERVAL_DEFAULT
+        ),
+        interval: collectIntegerInput(
+          'providerKeepaliveInterval',
+          '保活间隔',
+          5,
+          3600,
+          KEEPALIVE_INTERVAL_DEFAULT
+        )
+      };
+    }
+
+    function keepaliveSettingsForProvider(provider) {
+      return {
+        concurrency: Number(provider?.keepalive_concurrency || KEEPALIVE_CONCURRENCY_DEFAULT),
+        retryInterval: Number(provider?.keepalive_retry_interval || KEEPALIVE_RETRY_INTERVAL_DEFAULT),
+        interval: Number(provider?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT)
+      };
+    }
+
+    function keepaliveSettingsChanged(provider, settings) {
+      const saved = keepaliveSettingsForProvider(provider);
+      return saved.concurrency !== settings.concurrency
+        || saved.retryInterval !== settings.retryInterval
+        || saved.interval !== settings.interval;
+    }
+
+    function applyKeepaliveResult(provider, data, updateInputs = true) {
+      const saved = data?.keepalive || {};
+      provider.keepalive = saved.enabled === true;
+      provider.keepalive_concurrency = Number(saved.concurrency || KEEPALIVE_CONCURRENCY_DEFAULT);
+      provider.keepalive_retry_interval = Number(saved.retryInterval || KEEPALIVE_RETRY_INTERVAL_DEFAULT);
+      provider.keepalive_interval = Number(saved.interval || KEEPALIVE_INTERVAL_DEFAULT);
+      setProviderKeepaliveEnabled(provider.keepalive);
+      if (updateInputs) {
+        $('providerKeepaliveConcurrency').value = provider.keepalive_concurrency;
+        $('providerKeepaliveRetryInterval').value = provider.keepalive_retry_interval;
+        $('providerKeepaliveInterval').value = provider.keepalive_interval;
+      }
+      renderProviderRows();
+      startKeepalivePolling();
+    }
+
+    async function toggleProviderKeepalive() {
+      const provider = state.providers[state.selectedProvider];
+      if (!provider || provider.__draft) throw new Error('请先保存 Provider，再配置 Keepalive');
+      const currentlyEnabled = providerKeepaliveEnabled();
+      if (!currentlyEnabled) {
+        const settings = collectKeepaliveSettings();
+        if (keepaliveSettingsChanged(provider, settings)) {
+          throw new Error('Keepalive 参数尚未保存，请先点击“保存”');
+        }
+      }
+      const button = $('providerKeepaliveBtn');
+      if (button) button.disabled = true;
+      try {
+        $('serverState').textContent = currentlyEnabled ? '正在关闭 Keepalive' : '正在启用 Keepalive';
+        const data = await api('/config/keepalive', {
+          method: 'POST',
+          body: JSON.stringify({ name: provider.name, enabled: !currentlyEnabled })
+        });
+        applyKeepaliveResult(provider, data, !currentlyEnabled);
+        const restartText = saveRestartText(data.restart);
+        $('serverState').textContent = currentlyEnabled
+          ? `Keepalive 已关闭${restartText}`
+          : `Keepalive 已启用${restartText}`;
+      } finally {
+        if (button) button.disabled = false;
+        updateKeepaliveOptions();
+      }
+    }
+
+    async function saveProviderKeepaliveParameters() {
+      const provider = state.providers[state.selectedProvider];
+      if (!provider || provider.__draft) throw new Error('请先保存 Provider，再配置 Keepalive');
+      const settings = collectKeepaliveSettings();
+      const enabled = providerKeepaliveEnabled();
+      const button = $('saveProviderKeepaliveBtn');
+      if (button) button.disabled = true;
+      try {
+        $('serverState').textContent = enabled ? '正在保存并应用 Keepalive 参数' : '正在保存 Keepalive 参数';
+        const data = await api('/config/keepalive', {
+          method: 'POST',
+          body: JSON.stringify({ name: provider.name, ...settings })
+        });
+        applyKeepaliveResult(provider, data);
+        const restartText = saveRestartText(data.restart);
+        $('serverState').textContent = enabled
+          ? `Keepalive 参数已保存并应用${restartText}`
+          : 'Keepalive 参数已保存（当前关闭，未重启）';
+      } finally {
+        if (button) button.disabled = false;
+        updateKeepaliveOptions();
       }
     }
 
@@ -1005,29 +987,6 @@
 
     function providerLocalUrl(providerName) {
       return `${aiproxyBaseUrl()}/${encodeURIComponent(String(providerName || '').trim())}/v1`;
-    }
-
-    function providerRecentHealth(provider) {
-      const providerName = String(provider?.name || '');
-      const bucket = state.status?.providers || {};
-      const rows = Object.entries(bucket).map(([key, value]) => ({ key, ...(value || {}) }))
-        .filter(item => String(item.providerId || '').toLowerCase() === providerName.toLowerCase() || String(item.key || '').toLowerCase().startsWith(`${providerName.toLowerCase()}::`))
-        .sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')));
-      const latest = rows[0] || null;
-      const latestFailure = rows.find(item => item.alive === false) || null;
-      return { latest, latestFailure };
-    }
-
-    function providerHealthPill(health) {
-      const latest = health.latest;
-      if (!latest?.checkedAt) return statusPill(null, '未测');
-      return statusPill(!!latest.alive, latest.alive ? '可用' : '失败');
-    }
-
-    function providerLastErrorText(health) {
-      const failure = health.latestFailure;
-      if (!failure?.checkedAt) return '-';
-      return healthDetailText(failure) || failure.compact || failure.detail || failure.status || '-';
     }
 
     function renderSaveResult() {
@@ -1350,7 +1309,7 @@
     function renderProviderEditor() {
       const p = state.providers[state.selectedProvider];
       clearFetchedModels();
-      $('providerEditorTitle').textContent = p ? `编辑 ${p.name || ''}` : 'Provider';
+      $('providerEditorTitle').textContent = 'Provider编辑';
       const pinned = isPinnedProvider(p);
       setProviderPinnedButton(pinned, pinnedAtValue(p) || '');
       $('providerNo').value = pinned ? '' : (p ? regularProviderNo(state.selectedProvider) : 1);
@@ -1362,13 +1321,12 @@
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT);
       $('providerStreamMaxRetries').dataset.autoDefault = hasRetryConfig(p, 'stream_max_retries') ? '0' : '1';
-      $('providerKeepalive').checked = p?.keepalive === true;
       $('providerKeepaliveConcurrency').value = Number(p?.keepalive_concurrency || KEEPALIVE_CONCURRENCY_DEFAULT);
       $('providerKeepaliveRetryInterval').value = Number(
         p?.keepalive_retry_interval || KEEPALIVE_RETRY_INTERVAL_DEFAULT
       );
       $('providerKeepaliveInterval').value = Number(p?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT);
-      updateKeepaliveOptions();
+      setProviderKeepaliveEnabled(p?.keepalive === true);
       updateCustomEndpointInput();
       if (p) {
         renderModelRows(p.models || {});
@@ -1410,220 +1368,13 @@
         models: rowsToModels(),
         headers: headerConfig.headers,
         remove_headers: headerConfig.remove_headers,
-        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT),
-        keepalive: $('providerKeepalive').checked
+        stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT)
       };
       if (pinned) item.pinned_at = providerPinnedAtFromEditor();
       else delete item.pinned_at;
-      if (item.keepalive) {
-        item.keepalive_concurrency = collectIntegerInput(
-          'providerKeepaliveConcurrency',
-          '并发数',
-          1,
-          50,
-          KEEPALIVE_CONCURRENCY_DEFAULT
-        );
-        item.keepalive_interval = collectIntegerInput(
-          'providerKeepaliveInterval',
-          '保活间隔',
-          5,
-          3600,
-          KEEPALIVE_INTERVAL_DEFAULT
-        );
-        item.keepalive_retry_interval = collectIntegerInput(
-          'providerKeepaliveRetryInterval',
-          '抢通间隔',
-          1,
-          3600,
-          KEEPALIVE_RETRY_INTERVAL_DEFAULT
-        );
-      }
       if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
       else delete item.custom_endpoint;
       return compactProviderForPersist(item);
-    }
-
-    function healthDetailText(status) {
-      const text = String(status?.compact || status?.detail || '').trim();
-      if (!text || text === '-' || text === '➖') return '';
-      const hiddenFragments = ['跳过', '不测', '未测试', '不支持responses'];
-      return hiddenFragments.some(fragment => text.includes(fragment)) ? '' : text;
-    }
-
-    const HEALTH_UA_COLUMNS = ['Codex', 'Claude Code', 'Empty', 'Curl', 'Chrome', 'Custom'];
-
-    function healthResultKey(providerName, model) {
-      return `${providerName}::${model || ''}`;
-    }
-
-    function healthRowsData() {
-      const rows = [];
-      state.providers.filter(provider => provider.enabled !== false).forEach((provider) => {
-        const providerName = provider.name || '';
-        const models = modelNames(provider);
-        const rowModels = models.length ? models : [''];
-        rowModels.forEach((model) => {
-          rows.push({
-            provider,
-            providerName,
-            model,
-            key: healthResultKey(providerName, model)
-          });
-        });
-      });
-      return rows;
-    }
-
-    function currentHealthSelection() {
-      const inputs = [...document.querySelectorAll('[data-health-select]')];
-      if (!inputs.length) return null;
-      return new Set(inputs.filter(input => input.checked).map(input => input.dataset.healthKey));
-    }
-
-    function selectedHealthTargets() {
-      return [...document.querySelectorAll('[data-health-select]:checked')].map(input => ({
-        key: input.dataset.healthKey,
-        provider: input.dataset.healthProvider,
-        model: input.dataset.healthModel || ''
-      })).filter(item => item.key && item.provider);
-    }
-
-    function healthConfiguredUaColumn(provider) {
-      const label = providerUaLabel(provider);
-      if (HEALTH_UA_COLUMNS.includes(label)) return label;
-      if (!label || label === 'Default') return '';
-      return 'Custom';
-    }
-
-    function healthConfiguredUaMap(provider) {
-      const label = healthConfiguredUaColumn(provider);
-      if (!label) return {};
-      const configured = providerUaLabel(provider);
-      return { [label]: { text: '✅', title: 'Configured User-Agent: ' + configured, configured: true } };
-    }
-
-    function healthUaResultMap(status) {
-      const resultMap = {};
-      const addResult = (item) => {
-        if (!item || !item.ua) return;
-        if (item.ua === 'Default') return;
-        const label = HEALTH_UA_COLUMNS.includes(item.ua) ? item.ua : 'Custom';
-        const text = String(item.compact || healthDetailText(item) || item.status || '').trim();
-        if (!text) return;
-        resultMap[label] = {
-          text,
-          title: [item.endpointLabel, item.ua, item.detail || item.status || text].filter(Boolean).join(': '),
-          alive: item.alive
-        };
-      };
-      if (Array.isArray(status?.uaResults)) status.uaResults.forEach(addResult);
-      else if (status?.ua) addResult(status);
-      return resultMap;
-    }
-
-    function healthUaCell(resultMap, label) {
-      const result = resultMap[label];
-      if (!result) return '<td></td>';
-      if (result.configured) return `<td class="health-result-cell" title="${esc(result.title)}">${esc(result.text)}</td>`;
-      const kind = result.alive === true ? 'ok' : result.alive === false ? 'fail' : 'muted';
-      return `<td class="health-result-cell" title="${esc(result.title)}"><span class="status ${kind}">${esc(result.text)}</span></td>`;
-    }
-
-    function healthEndpointTitle(status) {
-      if (!Array.isArray(status?.endpointTrace) || !status.endpointTrace.length) return status?.endpointLabel || '';
-      return status.endpointTrace.map(attempt => `${attempt.endpointLabel}: ${attempt.alive ? '成功' : '失败'}`).join(' | ');
-    }
-
-    function healthEndpointText(status) {
-      if (status?.endpointLabel) return status.endpointLabel;
-      return '';
-    }
-
-    function hasReasoningEffort(value) {
-      if (value === true) return true;
-      const text = String(value ?? '').trim().toLowerCase();
-      return !!text && !['none', 'false', '0', 'off', 'no'].includes(text);
-    }
-
-    function modelMeta(provider, model) {
-      const models = provider?.models || provider?.model;
-      if (models && typeof models === 'object' && !Array.isArray(models)) return models[model] || {};
-      if (Array.isArray(models)) {
-        const item = models.find(entry => entry && typeof entry === 'object' && String(entry.id || entry.name || '') === model);
-        return item && typeof item === 'object' ? item : {};
-      }
-      return {};
-    }
-
-    function healthConfiguredEndpointLabel(provider, model) {
-      const endpoint = endpointLabel(provider?.api_mode || '', provider).toLowerCase();
-      if (endpoint.includes('/messages') || endpoint === 'messages') return 'messages';
-      if (endpoint.includes('/chat/completions') || endpoint === 'chat') return 'chat';
-      const meta = modelMeta(provider, model);
-      if (hasReasoningEffort(meta.reasoning_effort || meta.reasoning || provider?.reasoning_effort || provider?.reasoning)) return 'reasoning';
-      return 'responses';
-    }
-
-    function healthEndpointTraceTitle(configuredEndpoint) {
-      return configuredEndpoint === 'messages' ? 'messages' : 'reasoning -> responses -> chat';
-    }
-
-    function renderHealth() {
-      const rows = healthRowsData();
-      const selectedKeys = state.healthSelection || currentHealthSelection();
-      const hasSelectionState = selectedKeys instanceof Set;
-      $('healthRows').innerHTML = rows.map((row) => {
-        const p = row.provider;
-        const s = (state.healthResults || {})[row.key] || {};
-        const running = !!(state.healthRunning || {})[row.key];
-        const configuredEndpoint = healthConfiguredEndpointLabel(p, row.model);
-        const endpointText = running ? '' : healthEndpointText(s) || configuredEndpoint;
-        const endpointTitle = running ? healthEndpointTraceTitle(configuredEndpoint) : healthEndpointTitle(s) || `配置: ${configuredEndpoint}`;
-        const checked = !hasSelectionState || selectedKeys.has(row.key) ? ' checked' : '';
-        const statusCell = running ? statusPill(null, '测试中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
-        const uaResultMap = running ? {} : s.checkedAt ? healthUaResultMap(s) : healthConfiguredUaMap(p);
-        const uaCells = HEALTH_UA_COLUMNS.map(label => healthUaCell(uaResultMap, label)).join('');
-        return `<tr>
-          <td><label class="health-check" title="选择"><input type="checkbox" data-health-select="1" data-health-key="${esc(row.key)}" data-health-provider="${esc(row.providerName)}" data-health-model="${esc(row.model)}"${checked}><span class="health-check-box" aria-hidden="true"></span></label></td>
-          <td class="truncate">${esc(row.providerName)}</td>
-          <td>${statusCell}</td>
-          <td class="truncate" title="${esc(row.model)}">${esc(row.model || '-')}</td>
-          <td class="truncate" title="${esc(endpointTitle)}">${esc(endpointText)}</td>
-          ${uaCells}
-          <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
-        </tr>`;
-      }).join('') || `<tr><td colspan="12"><div class="empty">暂无 provider</div></td></tr>`;
-    }
-
-    function renderMonitor() {
-      if (!$('chainRows')) return;
-      const rows = state.monitor.chains || [];
-      $('chainRows').innerHTML = rows.map((c, i) => {
-        const s = (state.status.chains || {})[c.id] || {};
-        const running = !!(state.monitorRunning || {})[c.id];
-        const statusCell = running ? statusPill(null, '检查中', 'pending') : s.checkedAt ? statusPill(!!s.alive, s.alive ? '可用' : '失败') : statusPill(null, '未测');
-        const detailText = running ? '正在通过 AIProxy 发起一次端到端请求...' : (s.detail || '');
-        const provider = providerByName(c.providerId);
-        const endpointText = providerEndpointText(provider);
-        const reasoningText = chainReasoningText(c);
-        const userAgentText = providerUserAgentText(provider);
-        const prompt = (state.monitorPrompts || {})[c.id] ?? s.prompt ?? DEFAULT_MONITOR_PROMPT;
-        return `<tr>
-          <td class="truncate" title="${esc(c.providerId || '')}">${esc(c.providerId || '')}</td>
-          <td class="truncate" title="${esc(c.model || '')}">${esc(c.model || '')}</td>
-          <td class="truncate" title="${esc(endpointText)}">${esc(endpointText)}</td>
-          <td class="truncate" title="${esc(reasoningText)}">${esc(reasoningText)}</td>
-          <td class="truncate" title="${esc(userAgentText)}">${esc(userAgentText)}</td>
-          <td>${statusCell}</td>
-          <td class="truncate detail-col" title="${esc(detailText)}">${esc(detailText)}</td>
-          <td title="${esc(s.checkedAt || '')}">${running ? '-' : esc(shortDateTime(s.checkedAt))}</td>
-          <td><div class="row-tools"><input class="chain-prompt" data-chain-prompt="${esc(c.id || '')}" value="${esc(prompt)}" placeholder="测试提示词"><button data-test-chain="${i}" type="button">测试</button></div></td>
-        </tr>`;
-      }).join('') || `<tr><td colspan="9"><div class="empty">暂无可测链路。请先在 Provider 维护中启用 Provider，并给 Provider 配置至少一个模型。</div></td></tr>`;
-    }
-
-    function collectMonitor() {
-      return state.monitor;
     }
 
     function saveRestartText(restart) {
@@ -1655,149 +1406,8 @@
           upsertProviderAtNo(provider, providerTargetNo(maxNo));
         }
         await persistProviders();
-      } else if (state.tab === 'monitor') {
-        collectMonitor();
-        await api('/monitor', { method: 'POST', body: JSON.stringify(state.monitor) });
       }
       await loadAll();
-    }
-
-    function setHealthSelection(checked) {
-      const keys = checked ? healthRowsData().map(row => row.key) : [];
-      state.healthSelection = new Set(keys);
-      document.querySelectorAll('[data-health-select]').forEach(input => {
-        input.checked = checked;
-      });
-    }
-
-    function renderHealthRunButton() {
-      const btn = $('runSelectedHealthBtn');
-      if (!btn) return;
-      const running = !!state.healthRun;
-      btn.textContent = running ? '取消' : '测试';
-      btn.classList.toggle('primary', !running);
-      btn.classList.toggle('danger', running);
-    }
-
-    function cancelHealthRun() {
-      const run = state.healthRun;
-      if (!run) return;
-      run.cancelled = true;
-      run.controllers.forEach(controller => controller.abort());
-      state.healthRunning = {};
-      state.healthRun = null;
-      renderHealth();
-      renderHealthRunButton();
-      $('serverState').textContent = '测活已取消';
-    }
-
-    async function runHealth(targets) {
-      if (state.healthRun) {
-        cancelHealthRun();
-        return;
-      }
-      if (!targets.length) throw new Error('请先选择要测试的 provider/model');
-      const allUa = $('healthAllUa') ? $('healthAllUa').checked : true;
-      const targetKeys = targets.map(target => target.key);
-      const run = { cancelled: false, controllers: new Set() };
-      state.healthRun = run;
-      state.healthSelection = new Set(targetKeys);
-      state.healthResults = {};
-      state.healthRunning = Object.fromEntries(targetKeys.map(key => [key, true]));
-      renderHealth();
-      renderHealthRunButton();
-      $('serverState').textContent = `测活中 0/${targets.length}`;
-
-      const groups = new Map();
-      targets.forEach(target => {
-        if (!groups.has(target.provider)) groups.set(target.provider, []);
-        groups.get(target.provider).push(target);
-      });
-
-      let done = 0;
-      const runTarget = async (target) => {
-        if (run.cancelled) return;
-        const controller = new AbortController();
-        run.controllers.add(controller);
-        try {
-          const data = await api('/health', { method: 'POST', signal: controller.signal, body: JSON.stringify({ providers: [target.provider], models: { [target.provider]: [target.model] }, allUa }) });
-          if (run.cancelled) return;
-          state.status = data.status || state.status;
-          (data.results || []).forEach(result => {
-            if (!result) return;
-            const key = result.resultKey || healthResultKey(result.providerId, result.model);
-            state.healthResults[key] = result;
-          });
-        } catch (err) {
-          if (run.cancelled || err?.name === 'AbortError') return;
-          const message = err?.message || String(err);
-          state.healthResults[target.key] = {
-            resultKey: target.key,
-            providerId: target.provider,
-            model: target.model,
-            checkedAt: new Date().toISOString(),
-            alive: false,
-            latencyMs: null,
-            status: '失败',
-            detail: message,
-            compact: message,
-            endpointLabel: '-',
-            ua: 'Custom',
-            uaResults: [{ ua: 'Custom', alive: false, status: '失败', detail: message, compact: message }]
-          };
-        } finally {
-          run.controllers.delete(controller);
-          delete state.healthRunning[target.key];
-          if (!run.cancelled) {
-            done += 1;
-            renderHealth();
-            renderHealthRunButton();
-            $('serverState').textContent = `测活中 ${done}/${targets.length}`;
-          }
-        }
-      };
-
-      try {
-        await Promise.all([...groups.values()].map(async (providerTargets) => {
-          for (const target of providerTargets) {
-            if (run.cancelled) break;
-            await runTarget(target);
-          }
-        }));
-      } finally {
-        if (state.healthRun === run) {
-          state.healthRun = null;
-          state.healthRunning = {};
-          renderHealth();
-          renderHealthRunButton();
-          $('serverState').textContent = run.cancelled ? `测活已取消 ${done}/${targets.length}` : `测活完成 ${done}/${targets.length}`;
-        }
-      }
-    }
-
-    async function runMonitor(chainIds = null, promptOverrides = null) {
-      const ids = Array.isArray(chainIds) && chainIds.length ? chainIds : (state.monitor.chains || []).map(c => c.id).filter(Boolean);
-      if (!ids.length) throw new Error('暂无可测链路，请先在 Provider 维护中启用 Provider 并配置模型');
-      const currentPrompts = collectMonitorPrompts();
-      if (promptOverrides && typeof promptOverrides === 'object') Object.assign(currentPrompts, promptOverrides);
-      state.monitorPrompts = currentPrompts;
-      state.monitorRunning = Object.fromEntries(ids.map(id => [id, true]));
-      renderMonitor();
-      $('serverState').textContent = ids.length === 1 ? `链路检查中：${ids[0]}` : `全部链路检查中：0/${ids.length}（可能较慢）`;
-      try {
-        const prompts = Object.fromEntries(ids.map(id => [id, (state.monitorPrompts || {})[id] || DEFAULT_MONITOR_PROMPT]));
-        const body = Array.isArray(chainIds) && chainIds.length ? { chainIds: ids, prompts } : { prompts };
-        const data = await api('/monitor/check', { method: 'POST', body: JSON.stringify(body) });
-        state.status = data.status;
-        const results = data.chainResults || [];
-        const ok = results.filter(item => item.alive).length;
-        $('serverState').textContent = ids.length === 1
-          ? `链路检查完成：${results[0]?.alive ? '可用' : '失败'}`
-          : `全部链路检查完成：${ok}/${results.length} 可用`;
-      } finally {
-        state.monitorRunning = {};
-        render();
-      }
     }
 
     function aiproxyHealthLabel(item) {
@@ -2027,6 +1637,10 @@
           upsertProviderAtNo(provider, providerTargetNo(maxNo));
           await persistProviders();
           await loadAll();
+        } else if (target.id === 'providerKeepaliveBtn') {
+          await toggleProviderKeepalive();
+        } else if (target.id === 'saveProviderKeepaliveBtn') {
+          await saveProviderKeepaliveParameters();
         } else if (target.id === 'providerPinnedBtn') {
           await toggleProviderPinnedImmediately();
         } else if (target.hasAttribute('data-delete-provider')) {
@@ -2070,20 +1684,6 @@
           $('importConfigFile').click();
         } else if (target.id === 'saveCompactPercentBtn') {
           await saveCompactPercent();
-        } else if (target.id === 'selectAllHealthBtn') {
-          setHealthSelection(true);
-        } else if (target.id === 'clearAllHealthBtn') {
-          setHealthSelection(false);
-        } else if (target.id === 'runSelectedHealthBtn') {
-          if (state.healthRun) cancelHealthRun();
-          else await runHealth(selectedHealthTargets());
-        } else if (target.hasAttribute('data-test-chain')) {
-          const chain = state.monitor.chains[Number(target.dataset.testChain)];
-          if (!chain?.id) throw new Error('链路 ID 缺失，请刷新页面');
-          const input = target.closest('tr')?.querySelector('[data-chain-prompt]');
-          await runMonitor([chain.id], { [chain.id]: input?.value || DEFAULT_MONITOR_PROMPT });
-        } else if (target.id === 'runMonitorBtn') {
-          await runMonitor();
         } else if (target.id === 'cancelAiproxyEditorBtn') {
           closeAiproxyEditor();
         } else if (target.id === 'saveAiproxyEditorBtn') {
@@ -2091,8 +1691,6 @@
         } else if (target.hasAttribute('data-edit-aiproxy')) {
           const item = state.aiproxy.items?.[Number(target.dataset.editAiproxy)];
           openAiproxyEditor(item || null);
-        } else if (target.id === 'refreshAiproxyBtn' || target.id === 'refreshAiproxyPageBtn') {
-          await loadAiproxyServices();
         } else if (target.dataset.aiproxyAction) {
           const data = await api('/aiproxy/control', { method: 'POST', body: JSON.stringify({ id: target.dataset.aiproxyId, action: target.dataset.aiproxyAction }) });
           await loadAiproxyServices();
@@ -2108,18 +1706,8 @@
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
     $('providerName').addEventListener('input', updateRetryDefaultsForProviderName);
     $('providerStreamMaxRetries').addEventListener('input', () => { $('providerStreamMaxRetries').dataset.autoDefault = '0'; });
-    $('providerKeepalive').addEventListener('change', updateKeepaliveOptions);
     $('autoCompactPercent').addEventListener('input', markCompactPercentDirty);
     $('autoCompactTokenLimit').addEventListener('input', markCompactPercentDirty);
-
-    const chainProviderSelect = $('chainProvider');
-    if (chainProviderSelect) {
-      chainProviderSelect.addEventListener('change', () => {
-        const provider = state.providers.find(p => p.name === chainProviderSelect.value);
-        const chainModelInput = $('chainModel');
-        if (chainModelInput) chainModelInput.value = firstModel(provider || {});
-      });
-    }
 
     $('importConfigFile').addEventListener('change', async (event) => {
       const file = event.target.files[0];

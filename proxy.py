@@ -2764,6 +2764,7 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
         # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
         return _validate_keepalive_json(response, "/responses")
     saw_event = False
+    saw_completed = False
     for raw in response.iter_lines(decode_unicode=False):
         if not raw:
             continue
@@ -2783,11 +2784,17 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
             continue
         event_type = str(event.get("type") or "")
         if event_type == "response.completed":
-            return True, ""
+            # 不能在看到逻辑完成事件后立即返回。iter_lines() 尚未读到 EOF 时，
+            # response.close() 会关闭底层 socket，池里留下的只是 Session 对象，
+            # 而不是可复用的热 TCP 连接。继续消费到正常 EOF，才允许复用。
+            saw_completed = True
+            continue
         if event_type in {"response.failed", "response.incomplete"}:
             return False, event_type
         if event_type == "error" or event.get("error"):
             return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'))}"
+    if saw_completed:
+        return True, ""
     if saw_event:
         return False, "stream ended without response.completed"
     return False, "empty SSE stream"
