@@ -362,6 +362,7 @@
       configPath: 'config.yaml',
       fetchedModels: [],
       selectedProvider: -1,
+      providerEditorDirty: false,
       lastSaveMessage: '',
       lastSaveDetails: null
     };
@@ -466,7 +467,8 @@
       } catch (err) {
         state.keepalive = { ok: false, providers: {}, error: err.message };
       }
-      renderProviders();
+      // 保活状态只影响列表徽标；不要重绘编辑器，避免轮询覆盖用户正在填写的内容。
+      renderProviderRows();
     }
 
     function startKeepalivePolling() {
@@ -876,6 +878,7 @@
         state.providers.splice(state.selectedProvider, 1);
       }
       state.selectedProvider = -1;
+      state.providerEditorDirty = false;
     }
 
     function beginProviderDraft(provider) {
@@ -964,6 +967,7 @@
       providers.splice(insertIndex, 0, provider);
       state.providers = providers;
       state.selectedProvider = -1;
+      state.providerEditorDirty = false;
     }
 
     function preferredAiproxyItem() {
@@ -1307,6 +1311,9 @@
     }
 
     function renderProviderEditor() {
+      // loadAll()、切换页签和其他状态刷新可能在编辑过程中触发。
+      // 编辑器有未保存内容时必须保留 DOM 中的值，不能从旧 state 覆盖回来。
+      if (state.providerEditorDirty) return;
       const p = state.providers[state.selectedProvider];
       clearFetchedModels();
       $('providerEditorTitle').textContent = 'Provider编辑';
@@ -1394,6 +1401,11 @@
       $('serverState').textContent = state.lastSaveMessage;
       renderSaveResult();
       return data;
+    }
+
+    function markProviderEditorDirty(event) {
+      const target = event?.target;
+      if (target?.closest('.editor')) state.providerEditorDirty = true;
     }
 
     async function saveCurrent() {
@@ -1597,6 +1609,7 @@
     document.addEventListener('click', async (event) => {
       const target = event.target.closest('button');
       if (!target) return;
+      if (target.closest('.editor')) state.providerEditorDirty = true;
       try {
         if (target.classList.contains('tab')) {
           const nextTab = target.dataset.tab || 'config';
@@ -1636,6 +1649,7 @@
           const maxNo = regularProviderCount() + (isPinnedProvider(current) && !isPinnedProvider(provider) ? 1 : 0);
           upsertProviderAtNo(provider, providerTargetNo(maxNo));
           await persistProviders();
+          state.providerEditorDirty = false;
           await loadAll();
         } else if (target.id === 'providerKeepaliveBtn') {
           await toggleProviderKeepalive();
@@ -1651,6 +1665,7 @@
           state.providers.splice(index, 1);
           if (state.selectedProvider === index) {
             state.selectedProvider = -1;
+            state.providerEditorDirty = false;
           } else if (state.selectedProvider > index) {
             state.selectedProvider -= 1;
           }
@@ -1702,6 +1717,8 @@
       }
     });
 
+    document.addEventListener('input', markProviderEditorDirty);
+    document.addEventListener('change', markProviderEditorDirty);
     $('headerPreset').addEventListener('change', updateCustomUaInput);
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
     $('providerName').addEventListener('input', updateRetryDefaultsForProviderName);
