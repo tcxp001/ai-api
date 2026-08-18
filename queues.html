@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ai-api 路由策略</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif,system-ui,sans-serif; --bg:#f5f7f6; --card:#fff; --line:#d6dfda; --text:#172026; --muted:#66727b; --accent:#087f7b; --accent-dark:#05615e; --danger:#b7323d; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); } header { position:sticky; top:0; z-index:3; background:#fffffff0; border-bottom:1px solid var(--line); }
+    .wrap { width:min(1760px,calc(100% - 28px)); margin:auto; } .topbar { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    h1 { font-size:21px; margin:0; } h2 { font-size:17px; margin:0 0 12px; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; } .tab { min-height:36px; display:inline-flex; align-items:center; justify-content:center; padding:0 12px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--text); cursor:pointer; font:inherit; text-decoration:none; } .tab:hover { border-color:#aab8b3; background:#fbfcfc; } .tab.active { border-color:var(--accent); background:rgba(8,127,123,.1); color:var(--accent-dark); }
+    main { padding:18px 0 40px; display:grid; gap:14px; } .grid { display:grid; grid-template-columns:minmax(280px,360px) minmax(0,1fr); gap:14px; align-items:start; }
+    .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .muted { color:var(--muted); font-size:13px; } button,input,select { font:inherit; } button { min-height:36px; border:1px solid var(--line); border-radius:7px; background:#fff; padding:0 12px; cursor:pointer; }
+    button.primary { color:#fff; background:var(--accent); border-color:var(--accent); } button.danger { color:#fff; background:var(--danger); border-color:var(--danger); } button:disabled { opacity:.55; cursor:not-allowed; }
+    .actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; } .queue-list { display:grid; gap:8px; } .queue-item { width:100%; text-align:left; padding:11px; height:auto; } .queue-item.active { border-color:var(--accent); background:#eaf6f5; }
+    .field { display:grid; gap:5px; margin-bottom:11px; } label { font-size:13px; font-weight:700; } input,select { width:100%; min-height:38px; border:1px solid var(--line); border-radius:7px; padding:7px 9px; background:#fff; }
+    .settings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; } .members { display:grid; gap:8px; margin:8px 0 14px; }
+    .member { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; align-items:center; border:1px solid var(--line); border-radius:8px; padding:9px; }
+    .member .order { color:var(--muted); width:26px; text-align:center; } .member-actions { display:flex; gap:5px; }
+    .status-table { width:100%; border-collapse:collapse; } th,td { border-bottom:1px solid var(--line); text-align:left; padding:9px; font-size:13px; } th { background:#eef3f1; }
+    .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:12px; } .open { color:var(--danger); border-color:#e3a5aa; background:#fff0f1; } .closed { color:#237342; border-color:#9fd0af; background:#edf8f0; }
+    #message { min-height:20px; } @media(max-width:980px){.topbar{align-items:stretch;flex-direction:column}} @media(max-width:850px){ .grid{grid-template-columns:1fr}.settings{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+<header><div class="wrap topbar"><div><h1>Ai-api 公益服管理</h1><div class="muted" id="serverState">路由策略 · 读取中</div></div><div class="actions"><button id="reloadBtn" type="button">刷新</button></div></div></header>
+<main class="wrap">
+  <nav class="tabs" aria-label="页面导航">
+    <a class="tab" href="/">上游管理</a>
+    <a class="tab active" href="/queues.html">路由策略</a>
+    <a class="tab" href="/aiproxy">本地代理</a>
+    <a class="tab" href="/stats.html">数据统计</a>
+  </nav>
+  <div class="actions"><button id="newQueue">新建策略</button><button class="primary" id="saveAll">保存全部策略</button><span id="message" class="muted"></span></div>
+  <div class="grid">
+    <section class="panel"><h2>路由策略</h2><div id="queueList" class="queue-list"></div></section>
+    <section class="panel">
+      <div id="empty" class="muted">选择或新建一个路由策略。</div>
+      <form id="editor" hidden>
+        <div class="field"><label for="name">策略名称</label><input id="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*"></div>
+        <div class="field"><label><input id="enabled" type="checkbox" style="width:auto;min-height:0"> 启用队列</label></div>
+        <div class="settings">
+          <div class="field"><label for="failureThreshold">连续失败阈值</label><input id="failureThreshold" type="number" min="1" max="100"></div>
+          <div class="field"><label for="cooldown">熔断冷却（秒）</label><input id="cooldown" type="number" min="1" max="86400"></div>
+          <div class="field"><label for="halfOpen">半开成功次数</label><input id="halfOpen" type="number" min="1" max="100"></div>
+          <div class="field"><label for="maxAttempts">最大尝试数（0=全部）</label><input id="maxAttempts" type="number" min="0" max="50"></div>
+        </div>
+        <div class="field"><label for="addMember">添加 Provider</label><div class="actions"><select id="addMember"></select><button type="button" id="addMemberBtn">添加</button></div></div>
+        <div id="members" class="members"></div>
+        <div class="actions"><button type="button" class="danger" id="deleteQueue">删除队列</button></div>
+      </form>
+    </section>
+  </div>
+  <section class="panel"><h2>运行时熔断状态</h2><div class="muted" id="stateNote">正在读取代理状态…</div><div style="overflow:auto"><table class="status-table"><thead><tr><th>队列</th><th>Provider</th><th>模型</th><th>状态</th><th>失败次数</th><th>最后错误</th><th>恢复时间</th></tr></thead><tbody id="stateRows"></tbody></table></div></section>
+</main>
+<script>
+  const $=id=>document.getElementById(id);
+  const state={queues:[],providers:[],selected:-1,runtime:{}};
+  async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json();if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}
+  function selected(){return state.queues[state.selected]||null}
+  function pull(){const q=selected();if(!q)return;q.name=$('name').value.trim();q.enabled=$('enabled').checked;q.failure_threshold=Number($('failureThreshold').value||3);q.cooldown_seconds=Number($('cooldown').value||60);q.half_open_successes=Number($('halfOpen').value||1);q.max_attempts=Number($('maxAttempts').value||0)}
+  function render(){
+    $('queueList').innerHTML=state.queues.map((q,i)=>`<button class="queue-item ${i===state.selected?'active':''}" data-index="${i}"><strong>${escapeHtml(q.name||'未命名')}</strong><br><span class="muted">${q.enabled===false?'已停用':'已启用'} · ${(q.members||[]).length} 个成员</span></button>`).join('')||'<div class="muted">尚未创建队列。</div>';
+    const q=selected();$('empty').hidden=!!q;$('editor').hidden=!q;if(!q)return;
+    $('name').value=q.name||'';$('enabled').checked=q.enabled!==false;$('failureThreshold').value=q.failure_threshold??3;$('cooldown').value=q.cooldown_seconds??60;$('halfOpen').value=q.half_open_successes??1;$('maxAttempts').value=q.max_attempts??0;
+    const current=new Set(q.members||[]);$('addMember').innerHTML=state.providers.filter(p=>!current.has(p.name)).map(p=>`<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}${p.enabled===false?'（停用）':''}</option>`).join('');
+    $('members').innerHTML=(q.members||[]).map((name,i)=>`<div class="member"><span class="order">${i+1}</span><strong>${escapeHtml(name)}</strong><span class="member-actions"><button type="button" data-up="${i}" ${i===0?'disabled':''}>↑</button><button type="button" data-down="${i}" ${i===(q.members.length-1)?'disabled':''}>↓</button><button type="button" data-remove="${i}">移除</button></span></div>`).join('')||'<div class="muted">至少添加一个 Provider。</div>';
+  }
+  function renderRuntime(){
+    const rows=[];const queues=state.runtime.queues||{};
+    Object.entries(queues).forEach(([qname,q])=>(q.members||[]).forEach(member=>{
+      const models=member.models||[];if(!models.length)rows.push(`<tr><td>${escapeHtml(qname)}</td><td>${escapeHtml(member.provider)}</td><td>—</td><td><span class="badge closed">未熔断</span></td><td>0</td><td>—</td><td>—</td></tr>`);
+      models.forEach(m=>rows.push(`<tr><td>${escapeHtml(qname)}</td><td>${escapeHtml(member.provider)}</td><td>${escapeHtml(m.model||'(空模型)')}</td><td><span class="badge ${m.state==='open'?'open':'closed'}">${escapeHtml(m.state||'closed')}</span></td><td>${m.failureCount||0}</td><td>${escapeHtml(m.lastError||'—')}</td><td>${m.retryAt?new Date(m.retryAt*1000).toLocaleString():'—'}</td></tr>`));
+    }));
+    $('stateRows').innerHTML=rows.join('')||'<tr><td colspan="7" class="muted">暂无状态数据。</td></tr>';$('stateNote').textContent=state.runtime.ok===false?`代理状态不可用：${state.runtime.error||'未知错误'}`:'熔断键仅在 Provider 与请求模型字符串完全相同时跨队列共享。';
+  }
+  function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  async function load(){const [cfg,runtime]=await Promise.all([api('/api/queues'),api('/api/queues/state').catch(e=>({ok:false,error:e.message,queues:{}}))]);state.queues=cfg.queues||[];state.providers=cfg.providers||[];state.runtime=runtime;if(state.selected>=state.queues.length)state.selected=state.queues.length?0:-1;render();renderRuntime();$('serverState').textContent=`路由策略 · 已加载 ${state.queues.length} 个策略`}
+  $('queueList').onclick=e=>{const b=e.target.closest('[data-index]');if(!b)return;pull();state.selected=Number(b.dataset.index);render()};
+  $('newQueue').onclick=()=>{pull();state.queues.push({name:`queue-${state.queues.length+1}`,enabled:true,members:[],failure_threshold:3,cooldown_seconds:60,half_open_successes:1,max_attempts:0});state.selected=state.queues.length-1;render()};
+  $('addMemberBtn').onclick=()=>{const q=selected(),name=$('addMember').value;if(q&&name&&!q.members.includes(name)){q.members.push(name);render()}};
+  $('members').onclick=e=>{const q=selected();if(!q)return;const up=e.target.dataset.up,down=e.target.dataset.down,remove=e.target.dataset.remove;if(up!==undefined){const i=Number(up);[q.members[i-1],q.members[i]]=[q.members[i],q.members[i-1]]}if(down!==undefined){const i=Number(down);[q.members[i+1],q.members[i]]=[q.members[i],q.members[i+1]]}if(remove!==undefined)q.members.splice(Number(remove),1);render()};
+  $('deleteQueue').onclick=()=>{if(state.selected<0)return;if(confirm(`删除队列 ${selected().name}？`)){state.queues.splice(state.selected,1);state.selected=Math.min(state.selected,state.queues.length-1);render()}};
+  $('saveAll').onclick=async()=>{try{pull();$('message').textContent='正在保存…';const d=await api('/api/queues',{method:'POST',body:JSON.stringify({queues:state.queues,format:'auto'})});state.queues=d.queues||state.queues;$('message').textContent=d.restart?.ok===false?'已保存，但代理重启失败':'已保存并应用';await load()}catch(e){$('message').textContent=`保存失败：${e.message}`}};
+  $('reloadBtn').onclick=()=>load().catch(e=>{$('serverState').textContent=`路由策略 · 读取失败：${e.message}`;$('message').textContent=`读取失败：${e.message}`});load().catch(e=>{$('serverState').textContent=`路由策略 · 读取失败：${e.message}`;$('message').textContent=`读取失败：${e.message}`});
+</script>
+</body>
+</html>

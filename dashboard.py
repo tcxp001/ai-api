@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import signal
+import sqlite3
 import sys
 sys.dont_write_bytecode = True
 import subprocess
@@ -15,7 +16,7 @@ import tempfile
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 import yaml
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python versions without zoneinfo
+    ZoneInfo = None  # type: ignore[assignment,misc]
 
 import api as api_checks
 from proxy import (
@@ -46,6 +52,9 @@ LOG_DIR = BASE_DIR / "log"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 CHECKINS_FILE = DATA_DIR / "checkins.json"
 DASHBOARD_HTML = BASE_DIR / "dashboard.html"
+QUEUES_HTML = BASE_DIR / "queues.html"
+STATS_HTML = BASE_DIR / "stats.html"
+STATS_DB = DATA_DIR / "request_stats.sqlite3"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
 CODEX_DIR = Path("/root/.codex")
 CODEX_MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
@@ -87,6 +96,19 @@ aiproxy_http_probe_state: dict[str, dict[str, Any]] = {}
 
 PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BACKUP_DIR = BASE_DIR / "backup"
+QUEUE_FAILURE_THRESHOLD_DEFAULT = 3
+QUEUE_COOLDOWN_SECONDS_DEFAULT = 60
+QUEUE_HALF_OPEN_SUCCESSES_DEFAULT = 1
+QUEUE_MAX_ATTEMPTS_DEFAULT = 0
+STATS_DIRECT_FILTER_VALUE = "__direct__"
+
+if ZoneInfo is not None:
+    try:
+        STATS_TIMEZONE = ZoneInfo("Asia/Shanghai")
+    except Exception:  # pragma: no cover - only relevant on incomplete tzdata
+        STATS_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
+else:  # pragma: no cover - Python versions without zoneinfo
+    STATS_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 
 
 def now_iso() -> str:
@@ -327,6 +349,20 @@ def load_provider_list() -> list[dict[str, Any]]:
     if isinstance(cfg, list):
         return cfg
     raise ValueError("config.yaml root must be a provider list or {providers: [...]}")
+
+
+def load_config_document() -> dict[str, Any]:
+    cfg = load_raw_config()
+    if isinstance(cfg, list):
+        return {"providers": cfg, "queues": []}
+    if isinstance(cfg, dict) and isinstance(cfg.get("providers"), list):
+        queues = cfg.get("queues")
+        return {"providers": cfg["providers"], "queues": queues if isinstance(queues, list) else []}
+    raise ValueError("config.yaml root must be a provider list or {providers: [...]}")
+
+
+def load_queue_list() -> list[dict[str, Any]]:
+    return list(load_config_document().get("queues") or [])
 
 
 def provider_validation_label(index: int, name: str = "") -> str:
@@ -579,6 +615,133 @@ def validate_provider_list(providers: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def validate_queue_list(queues: list[Any], providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    provider_names = {
+        str(provider.get("name") or "").strip().lower()
+        for provider in providers
+        if str(provider.get("name") or "").strip()
+    }
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(queues, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"queue #{index} must be an object")
+        queue = dict(entry)
+        name = str(queue.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"queue #{index} missing name")
+        if not PROVIDER_NAME_PATTERN.match(name):
+            raise ValueError(
+                f"queue {name!r} name must be a URL-safe path segment: letters, numbers, dot, underscore or hyphen"
+            )
+        if name.lower() in seen:
+            raise ValueError(f"queue {name!r} duplicates an earlier queue")
+        seen.add(name.lower())
+        if name.lower() in {
+            str(provider.get("name") or "").strip().lower()
+            for provider in providers
+            if str(provider.get("name") or "").strip()
+        }:
+            raise ValueError(f"queue {name!r} conflicts with a provider name")
+        members = queue.get("members")
+        if members is None:
+            members = queue.get("providers")
+        if not isinstance(members, list) or not members:
+            raise ValueError(f"queue {name!r} members must be a non-empty array")
+        normalized_members: list[str] = []
+        member_seen: set[str] = set()
+        provider_by_name = {
+            str(provider.get("name") or "").strip().lower(): str(provider.get("name") or "").strip()
+            for provider in providers
+        }
+        for member in members:
+            member_name = str(member or "").strip()
+            canonical = provider_by_name.get(member_name.lower())
+            if canonical is None or canonical.lower() not in provider_names:
+                raise ValueError(f"queue {name!r} references unknown provider {member_name!r}")
+            if canonical.lower() in member_seen:
+                raise ValueError(f"queue {name!r} contains duplicate provider {canonical!r}")
+            member_seen.add(canonical.lower())
+            normalized_members.append(canonical)
+        try:
+            failure_threshold = int(queue.get("failure_threshold") or QUEUE_FAILURE_THRESHOLD_DEFAULT)
+            cooldown_seconds = float(queue.get("cooldown_seconds") or QUEUE_COOLDOWN_SECONDS_DEFAULT)
+            half_open_successes = int(queue.get("half_open_successes") or QUEUE_HALF_OPEN_SUCCESSES_DEFAULT)
+            max_attempts = int(queue.get("max_attempts") or QUEUE_MAX_ATTEMPTS_DEFAULT)
+        except (TypeError, ValueError):
+            raise ValueError(f"queue {name!r} numeric settings are invalid") from None
+        if failure_threshold < 1 or failure_threshold > 100:
+            raise ValueError(f"queue {name!r} failure_threshold must be between 1 and 100")
+        if cooldown_seconds < 1 or cooldown_seconds > 86400:
+            raise ValueError(f"queue {name!r} cooldown_seconds must be between 1 and 86400")
+        if half_open_successes < 1 or half_open_successes > 100:
+            raise ValueError(f"queue {name!r} half_open_successes must be between 1 and 100")
+        if max_attempts < 0 or max_attempts > 50:
+            raise ValueError(f"queue {name!r} max_attempts must be between 0 and 50")
+        normalized.append(
+            {
+                "name": name,
+                "enabled": api_checks.coerce_bool(queue.get("enabled"), True),
+                "members": normalized_members,
+                "failure_threshold": failure_threshold,
+                "cooldown_seconds": int(cooldown_seconds) if cooldown_seconds.is_integer() else cooldown_seconds,
+                "half_open_successes": half_open_successes,
+                "max_attempts": max_attempts,
+            }
+        )
+    return normalized
+
+
+def compact_queue(queue: dict[str, Any]) -> dict[str, Any]:
+    item = {
+        "name": str(queue.get("name") or "").strip(),
+        "enabled": api_checks.coerce_bool(queue.get("enabled"), True),
+        "members": [str(value).strip() for value in (queue.get("members") or []) if str(value).strip()],
+    }
+    defaults = {
+        "failure_threshold": QUEUE_FAILURE_THRESHOLD_DEFAULT,
+        "cooldown_seconds": QUEUE_COOLDOWN_SECONDS_DEFAULT,
+        "half_open_successes": QUEUE_HALF_OPEN_SUCCESSES_DEFAULT,
+        "max_attempts": QUEUE_MAX_ATTEMPTS_DEFAULT,
+    }
+    for key, default in defaults.items():
+        value = queue.get(key)
+        if value is not None and value != default:
+            item[key] = value
+    if item["enabled"]:
+        item.pop("enabled", None)
+    return item
+
+
+def queue_yaml_text() -> str:
+    queues = validate_queue_list(load_queue_list(), load_provider_list())
+    return yaml.safe_dump([compact_queue(queue) for queue in queues], allow_unicode=True, sort_keys=False)
+
+
+def save_queue_list(queues: list[Any], fmt: str = "auto") -> tuple[Path | None, list[str]]:
+    providers = validate_provider_list(load_provider_list())
+    normalized_queues = validate_queue_list(queues, providers)
+    persisted_providers = compact_provider_list(providers)
+    persisted_queues = [compact_queue(queue) for queue in normalized_queues]
+    target = active_config_file()
+    if fmt == "json":
+        target = CONFIG_JSON_FILE
+    elif fmt == "yaml":
+        target = CONFIG_YAML_FILE
+    payload: Any = {"providers": persisted_providers, "queues": persisted_queues}
+    with write_lock:
+        backup = backup_file(target)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
+            tmp_name = f.name
+            if target.suffix == ".json":
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            else:
+                yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_name, target)
+    return backup, provider_config_warnings(providers)
+
+
 def provider_yaml_text(providers: list[dict[str, Any]]) -> str:
     normalized = compact_provider_list(validate_provider_list(providers))
     return yaml.safe_dump(normalized, allow_unicode=True, sort_keys=False)
@@ -609,6 +772,11 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
     normalized = validate_provider_list(providers)
     warnings = provider_config_warnings(normalized)
     persisted = compact_provider_list(normalized)
+    existing_document = load_config_document()
+    persisted_queues = [
+        compact_queue(queue)
+        for queue in validate_queue_list(existing_document.get("queues") or [], normalized)
+    ]
     target = active_config_file()
     if fmt == "json":
         target = CONFIG_JSON_FILE
@@ -618,11 +786,14 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
         backup = backup_file(target)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
             tmp_name = f.name
+            payload: Any = persisted
+            if persisted_queues or isinstance(load_raw_config(), dict):
+                payload = {"providers": persisted, "queues": persisted_queues}
             if target.suffix == ".json":
-                json.dump(persisted, f, ensure_ascii=False, indent=2)
+                json.dump(payload, f, ensure_ascii=False, indent=2)
                 f.write("\n")
             else:
-                yaml.safe_dump(persisted, f, allow_unicode=True, sort_keys=False)
+                yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
         os.replace(tmp_name, target)
     return backup, warnings
 
@@ -904,7 +1075,7 @@ def claude_code_function_block(
 
     if not models:
         lines.extend([
-            f"  printf '%s\\n' {shlex.quote(f'Provider {provider_name} 尚未配置模型，请先在 ai-api Provider 维护页添加模型。')} >&2",
+            f"  printf '%s\\n' {shlex.quote(f'Provider {provider_name} 尚未配置模型，请先在 ai-api 上游管理页添加模型。')} >&2",
             "  return 2",
             "}",
         ])
@@ -2138,6 +2309,300 @@ def keepalive_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
     return payload
 
 
+def queue_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
+    base = (proxy_base or current_aiproxy_proxy_base()).rstrip("/")
+    if not base:
+        return {"ok": False, "error": "aiproxy address unknown", "queues": {}}
+    try:
+        response = requests.get(f"{base}/_queues", timeout=(3, 5))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 400),
+            "queues": {},
+            "proxyBase": base,
+        }
+    if response.status_code != 200:
+        return {"ok": False, "error": f"HTTP {response.status_code}", "queues": {}, "proxyBase": base}
+    try:
+        payload = response.json()
+    except Exception:
+        return {"ok": False, "error": "non-JSON reply from aiproxy", "queues": {}, "proxyBase": base}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "unexpected reply from aiproxy", "queues": {}, "proxyBase": base}
+    payload["ok"] = True
+    payload["proxyBase"] = base
+    payload.setdefault("queues", {})
+    return payload
+
+
+def stats_connect() -> sqlite3.Connection | None:
+    if not STATS_DB.exists():
+        return None
+    conn = sqlite3.connect(STATS_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def stats_date_clause(query: dict[str, list[str]] | None) -> tuple[str, list[float]]:
+    """Build a Shanghai-natural-day filter for request statistics."""
+    value = str(((query or {}).get("date") or [""])[0]).strip()
+    if not value:
+        return "", []
+    try:
+        selected = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("date must use YYYY-MM-DD format") from None
+    start = datetime.combine(selected, datetime.min.time(), tzinfo=STATS_TIMEZONE)
+    end = start + timedelta(days=1)
+    return "created_at >= ? AND created_at < ?", [start.timestamp(), end.timestamp()]
+
+
+def stats_filter_options(query: dict[str, list[str]] | None = None) -> dict[str, list[dict[str, str]]]:
+    """Return only Provider and route-strategy names seen in the selected day."""
+    date_clause, date_params = stats_date_clause(query)
+    if not date_clause:
+        return {
+            "providers": [
+                {"name": str(provider.get("name") or "")}
+                for provider in load_provider_list()
+                if str(provider.get("name") or "").strip()
+            ],
+            "queues": [
+                {"name": str(queue.get("name") or "")}
+                for queue in load_queue_list()
+                if str(queue.get("name") or "").strip()
+            ],
+        }
+    conn = stats_connect()
+    if conn is None:
+        return {"providers": [], "queues": []}
+    try:
+        provider_rows = conn.execute(
+            f"""
+            SELECT DISTINCT provider_name AS name
+            FROM request_stats
+            WHERE {date_clause} AND TRIM(provider_name) <> ''
+            ORDER BY name
+            """,
+            date_params,
+        ).fetchall()
+        queue_rows = conn.execute(
+            f"""
+            SELECT DISTINCT queue_name AS name
+            FROM request_stats
+            WHERE {date_clause} AND TRIM(queue_name) <> ''
+            ORDER BY name
+            """,
+            date_params,
+        ).fetchall()
+        direct_row = conn.execute(
+            f"""
+            SELECT 1
+            FROM request_stats
+            WHERE {date_clause} AND TRIM(queue_name) = ''
+            LIMIT 1
+            """,
+            date_params,
+        ).fetchone()
+        queues = [{"name": str(row["name"])} for row in queue_rows]
+        if direct_row is not None:
+            queues.insert(
+                0,
+                {"name": "直连", "value": STATS_DIRECT_FILTER_VALUE},
+            )
+        return {
+            "providers": [{"name": str(row["name"])} for row in provider_rows],
+            "queues": queues,
+        }
+    finally:
+        conn.close()
+
+
+def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    date_clause, date_params = stats_date_clause(query)
+    where = f" WHERE {date_clause}" if date_clause else ""
+    conn = stats_connect()
+    if conn is None:
+        return {
+            "requests": 0,
+            "successes": 0,
+            "successRate": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheCreationTokens": 0,
+            "averageFirstTokenMs": None,
+            "averageDurationMs": None,
+            "estimatedCost": 0,
+        }
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS requests,
+                COALESCE(SUM(ok), 0) AS successes,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                AVG(first_token_ms) AS average_first_token_ms,
+                AVG(duration_ms) AS average_duration_ms,
+                SUM(estimated_cost) AS estimated_cost
+            FROM request_stats
+            """
+            + where,
+            date_params,
+        ).fetchone()
+        requests_count = int(row["requests"] or 0)
+        successes = int(row["successes"] or 0)
+        return {
+            "requests": requests_count,
+            "successes": successes,
+            "successRate": round(successes * 100 / requests_count, 2) if requests_count else 0,
+            "inputTokens": int(row["input_tokens"] or 0),
+            "outputTokens": int(row["output_tokens"] or 0),
+            "cacheReadTokens": int(row["cache_read_tokens"] or 0),
+            "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
+            "averageFirstTokenMs": row["average_first_token_ms"],
+            "averageDurationMs": row["average_duration_ms"],
+            "estimatedCost": (
+                float(row["estimated_cost"])
+                if row["estimated_cost"] is not None
+                else None
+            ),
+        }
+    finally:
+        conn.close()
+
+
+def stats_grouped(
+    column: str,
+    query: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    if column not in {"provider_name", "queue_name", "model"}:
+        raise ValueError("invalid stats group")
+    date_clause, date_params = stats_date_clause(query)
+    where = f" WHERE {date_clause}" if date_clause else ""
+    conn = stats_connect()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                {column} AS name,
+                COUNT(*) AS requests,
+                COALESCE(SUM(ok), 0) AS successes,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                AVG(headers_ms) AS average_headers_ms,
+                AVG(first_token_ms) AS average_first_token_ms,
+                AVG(duration_ms) AS average_duration_ms,
+                SUM(estimated_cost) AS estimated_cost
+            FROM request_stats
+            {where}
+            GROUP BY {column}
+            ORDER BY requests DESC, name
+            """,
+            date_params,
+        ).fetchall()
+        result = []
+        for row in rows:
+            requests_count = int(row["requests"] or 0)
+            successes = int(row["successes"] or 0)
+            result.append(
+                {
+                    "name": str(row["name"] or ""),
+                    "requests": requests_count,
+                    "successes": successes,
+                    "successRate": round(successes * 100 / requests_count, 2) if requests_count else 0,
+                    "inputTokens": int(row["input_tokens"] or 0),
+                    "outputTokens": int(row["output_tokens"] or 0),
+                    "cacheReadTokens": int(row["cache_read_tokens"] or 0),
+                    "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
+                    "averageHeadersMs": row["average_headers_ms"],
+                    "averageFirstTokenMs": row["average_first_token_ms"],
+                    "averageDurationMs": row["average_duration_ms"],
+                    "estimatedCost": (
+                        float(row["estimated_cost"])
+                        if row["estimated_cost"] is not None
+                        else None
+                    ),
+                }
+            )
+        return result
+    finally:
+        conn.close()
+
+
+def stats_requests(query: dict[str, list[str]]) -> list[dict[str, Any]]:
+    try:
+        limit = min(max(int((query.get("limit") or ["200"])[0]), 1), 1000)
+    except (TypeError, ValueError):
+        limit = 200
+    clauses: list[str] = []
+    params: list[Any] = []
+    date_clause, date_params = stats_date_clause(query)
+    if date_clause:
+        clauses.append(date_clause)
+        params.extend(date_params)
+    for query_name, column in (("provider", "provider_name"), ("queue", "queue_name"), ("model", "model")):
+        value = str((query.get(query_name) or [""])[0]).strip()
+        if value:
+            if query_name == "queue" and value == STATS_DIRECT_FILTER_VALUE:
+                clauses.append("queue_name = ''")
+            else:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = stats_connect()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, queue_name, provider_name, model, status_code,
+                   ok, headers_ms, first_token_ms, duration_ms, input_tokens,
+                   output_tokens, cache_read_tokens, cache_creation_tokens,
+                   estimated_cost, error, is_streaming
+            FROM request_stats
+            """
+            + where
+            + " ORDER BY id DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "createdAt": datetime.fromtimestamp(
+                    float(row["created_at"]),
+                    timezone.utc,
+                ).astimezone(STATS_TIMEZONE).isoformat(timespec="seconds"),
+                "queue": str(row["queue_name"] or ""),
+                "provider": str(row["provider_name"] or ""),
+                "model": str(row["model"] or ""),
+                "statusCode": row["status_code"],
+                "ok": bool(row["ok"]),
+                "headersMs": row["headers_ms"],
+                "firstTokenMs": row["first_token_ms"],
+                "durationMs": row["duration_ms"],
+                "inputTokens": int(row["input_tokens"] or 0),
+                "outputTokens": int(row["output_tokens"] or 0),
+                "cacheReadTokens": int(row["cache_read_tokens"] or 0),
+                "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
+                "estimatedCost": row["estimated_cost"],
+                "error": str(row["error"] or ""),
+                "streaming": bool(row["is_streaming"]),
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def proc_cwd(pid: int) -> Path | None:
     try:
         return Path(os.readlink(f"/proc/{pid}/cwd"))
@@ -2530,7 +2995,16 @@ def request_exception_detail(exc: Exception, limit: int = 160) -> str:
     return f"{prefix}：{detail}" if detail else prefix
 
 
-DASHBOARD_PAGE_PATHS = {"/", "/dashboard.html", "/config", "/aiproxy"}
+DASHBOARD_PAGE_PATHS = {
+    "/",
+    "/dashboard.html",
+    "/queues",
+    "/queues.html",
+    "/stats",
+    "/stats.html",
+    "/config",
+    "/aiproxy",
+}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -2573,15 +3047,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
         accept = self.headers.get("Accept") or ""
         wants_html = "text/html" in accept.lower()
         try:
-            if path in {"/", "/dashboard.html"} or (path in DASHBOARD_PAGE_PATHS and wants_html):
+            # Keep the legacy browser entry points working: a normal browser
+            # navigation to /config or /aiproxy should open the dashboard,
+            # while the frontend's fetch('/config') request (Accept: */*) must
+            # continue to receive the JSON configuration API below.
+            if path in {"/", "/dashboard.html"} or (
+                path in {"/config", "/aiproxy"} and wants_html
+            ):
                 self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+                return
+            if path == "/queues.html" or (path == "/queues" and wants_html):
+                self.send_text(200, QUEUES_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+                return
+            if path == "/stats.html" or (path == "/stats" and wants_html):
+                self.send_text(200, STATS_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/config/export":
                 self.send_text(200, provider_yaml_text(load_provider_list()), "application/x-yaml; charset=utf-8")
                 return
             if path == "/config":
                 providers = load_provider_list()
-                self.send_json(200, {"providers": providers, "publicProviders": [provider_public(p) for p in providers], "configPath": str(active_config_file()), "configFormat": active_config_file().suffix.lstrip("."), "settings": load_app_settings()})
+                self.send_json(200, {
+                    "providers": providers,
+                    "queues": load_queue_list(),
+                    "publicProviders": [provider_public(p) for p in providers],
+                    "configPath": str(active_config_file()),
+                    "configFormat": active_config_file().suffix.lstrip("."),
+                    "settings": load_app_settings(),
+                })
+                return
+            if path == "/api/queues":
+                self.send_json(200, {"queues": load_queue_list(), "providers": load_provider_list()})
+                return
+            if path == "/api/queues/state":
+                query = parse_qs(split.query)
+                proxy_base = (query.get("proxyBase") or [""])[0]
+                self.send_json(200, queue_status_from_proxy(proxy_base))
+                return
+            if path == "/api/stats/config":
+                self.send_json(200, stats_filter_options(parse_qs(split.query)))
+                return
+            if path == "/api/stats/summary":
+                self.send_json(200, stats_summary(parse_qs(split.query)))
+                return
+            if path == "/api/stats/providers":
+                self.send_json(200, {"items": stats_grouped("provider_name", parse_qs(split.query))})
+                return
+            if path == "/api/stats/queues":
+                self.send_json(200, {"items": stats_grouped("queue_name", parse_qs(split.query))})
+                return
+            if path == "/api/stats/models":
+                self.send_json(200, {"items": stats_grouped("model", parse_qs(split.query))})
+                return
+            if path == "/api/stats/requests":
+                self.send_json(200, {"items": stats_requests(parse_qs(split.query))})
                 return
             if path == "/checkins":
                 self.send_json(200, default_checkins(load_provider_list()))
@@ -2630,6 +3149,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("content must be a YAML string")
                 providers = parse_provider_yaml_text(content)
                 self.send_json(200, {"providers": providers, "warnings": provider_config_warnings(providers), "configFormat": "yaml"})
+                return
+            if path == "/api/queues":
+                queues = payload.get("queues")
+                if not isinstance(queues, list):
+                    raise ValueError("queues must be an array")
+                backup, warnings = save_queue_list(queues, str(payload.get("format") or "yaml"))
+                restart = restart_after_config_write()
+                self.send_json(200, {
+                    "ok": True,
+                    "backup": str(backup) if backup else "",
+                    "warnings": warnings,
+                    "restart": restart,
+                    "queues": load_queue_list(),
+                })
                 return
             if path == "/config":
                 providers = payload.get("providers")

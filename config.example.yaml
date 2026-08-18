@@ -3,58 +3,82 @@
 # 注意：公开仓库不要提交真实 config.yaml、真实 Provider 域名、真实 API Key、
 # 运行状态文件或测活结果。
 
-- name: provider-a
-  base_url: https://example-a.invalid/v1
-  api_key: ${PROVIDER_A_API_KEY}
-  api_mode: codex_responses
-  stream_max_retries: 5
-  models:
-    gpt-5.5:
-      context_length: 400000
-      reasoning_effort: high
-  headers: {}
-  enabled: true
-  # 抢通 + 保温（默认关闭，不写这几行就是关）。开启后 proxy.py 启动时并发抢一条
-  # 可用上游连接，赢家留在连接池里，之后每 keepalive_interval 秒发一句很短的轮换
-  # 提示词把它焐热；状态见 GET /_keepalive 或 dashboard 的 provider 列表 badge。
-  # 只有 keepalive 在维护页有勾选框，其余是 config-only 高级项。
-  # 成本：每个开启的 provider 每天约 86400/keepalive_interval 次短请求，别全开。
-  keepalive: false
-  # keepalive_interval: 30        # 保活间隔秒数，5~3600
-  # keepalive_concurrency: 10     # 冷启动抢通并发，1~50；保温 miss 后重抢固定为 1
-  # keepalive_retry_interval: 5   # 整轮抢通失败后等待秒数，1~3600
-  # keepalive_timeout: 30         # 单次探活超时秒数，5~600
-  # keepalive_model: ''           # 留空取 models 第一个
-  # keepalive_max_attempts: 0     # 0 = 永不放弃
+providers:
+  - name: provider-a
+    base_url: https://example-a.invalid/v1
+    api_key: ${PROVIDER_A_API_KEY}
+    api_mode: codex_responses
+    stream_max_retries: 5
+    models:
+      gpt-5.5:
+        context_length: 400000
+        reasoning_effort: high
+        # 可选：统计估价，单位为 USD / 1,000,000 tokens；不配置则显示未定价。
+        # pricing:
+        #   input_per_million: 1
+        #   output_per_million: 2
+        #   cache_read_per_million: 0.1
+        #   cache_creation_per_million: 0.5
+    headers: {}
+    enabled: true
+    # 抢通 + 保温（默认关闭，不写这几行就是关）。开启后 proxy.py 启动时并发抢一条
+    # 可用上游连接，赢家留在连接池里，之后每 keepalive_interval 秒发一句很短的轮换
+    # 提示词把它焐热；状态见 GET /_keepalive 或 dashboard 的 provider 列表 badge。
+    # 只有 keepalive 在维护页有勾选框，其余是 config-only 高级项。
+    # 成本：每个开启的 provider 每天约 86400/keepalive_interval 次短请求，别全开。
+    keepalive: false
+    # keepalive_interval: 30        # 保活间隔秒数，5~3600
+    # keepalive_concurrency: 10     # 冷启动抢通并发，1~50；保温 miss 后重抢固定为 1
+    # keepalive_retry_interval: 5   # 整轮抢通失败后等待秒数，1~3600
+    # keepalive_timeout: 30         # 单次探活超时秒数，5~600
+    # keepalive_model: ''           # 留空取 models 第一个
+    # keepalive_max_attempts: 0     # 0 = 永不放弃
 
-- name: provider-b
-  base_url: https://example-b.invalid/v1
-  api_key: ${PROVIDER_B_API_KEY}
-  # chat_completions 表示上游只有 /chat/completions；Codex 仍然访问本地
-  # /{provider}/v1/responses，proxy.py 会自动做 Responses ↔ Chat 转换，
-  # 包括 function_call/function_call_output ↔ tool_calls/tool 消息以及流式工具参数事件。
-  api_mode: chat_completions
-  stream_max_retries: 5
-  models:
-    gpt-5.5:
-      context_length: 400000
-      reasoning_effort: high
-  headers:
-    User-Agent: ''
-  enabled: true
+  - name: provider-b
+    base_url: https://example-b.invalid/v1
+    api_key: ${PROVIDER_B_API_KEY}
+    # chat_completions 表示上游只有 /chat/completions；Codex 仍然访问本地
+    # /{provider}/v1/responses，proxy.py 会自动做 Responses ↔ Chat 转换，
+    # 包括 function_call/function_call_output ↔ tool_calls/tool 消息以及流式工具参数事件。
+    api_mode: chat_completions
+    stream_max_retries: 5
+    models:
+      gpt-5.5:
+        context_length: 400000
+        reasoning_effort: high
+    headers:
+      User-Agent: ''
+    enabled: true
 
-- name: provider-c
-  base_url: https://example-c.invalid/v1
-  api_key: ${PROVIDER_C_API_KEY}
-  api_mode: codex_responses
-  stream_max_retries: 5
-  models:
-    gpt-5.5:
-      context_length: 400000
-      reasoning_effort: high
-    glm-5.1:
-      context_length: 200000
-  headers:
-    Originator: codex_cli_rs
-    User-Agent: codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color
-  enabled: false
+  - name: provider-c
+    base_url: https://example-c.invalid/v1
+    api_key: ${PROVIDER_C_API_KEY}
+    api_mode: codex_responses
+    stream_max_retries: 5
+    models:
+      gpt-5.5:
+        context_length: 400000
+        reasoning_effort: high
+      glm-5.1:
+        context_length: 200000
+    headers:
+      Originator: codex_cli_rs
+      User-Agent: codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color
+    enabled: false
+
+# 队列名和 Provider 名共享 /{name}/v1/... 路由命名空间，不能重名。
+# members 顺序就是请求级回退顺序；同一 Provider + 完全相同的请求模型字符串
+# 会在不同队列之间共享熔断状态。max_attempts: 0 表示尝试全部健康成员。
+# 如果启用了 Keepalive 专用通道，主通道用 --exclude-keepalive，专用通道用
+# --keepalive-only；默认按 18006/18007 推导跨通道地址，也可用
+# --queue-owner-base / --queue-peer-base 显式覆盖。
+queues:
+  - name: coding-main
+    enabled: true
+    members:
+      - provider-a
+      - provider-b
+    failure_threshold: 3
+    cooldown_seconds: 60
+    half_open_successes: 1
+    max_attempts: 0

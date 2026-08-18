@@ -17,13 +17,17 @@ sys.dont_write_bytecode = True
 
 import argparse
 import hashlib
+import io
 import json
+import math
 import queue
 import re
 import signal
+import sqlite3
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -60,12 +64,29 @@ HOP_BY_HOP_HEADERS = {
     "content-length",
 }
 
+# These headers are used only between the two local proxy channels. They must
+# never be forwarded to an actual upstream Provider: besides being an
+# implementation detail, letting a Provider see them could accidentally
+# re-enter the companion-channel routing path.
+QUEUE_OWNER_HEADER = "X-Ai-Api-Queue-Owner"
+QUEUE_ATTEMPT_HEADER = "X-Ai-Api-Queue-Attempt"
+QUEUE_INTERNAL_HEADERS = {
+    QUEUE_OWNER_HEADER.lower(),
+    QUEUE_ATTEMPT_HEADER.lower(),
+}
+
 SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "x-api-key", "api-key"}
 RESPONSES_TO_CHAT_FALLBACK_STATUSES = {404, 405, 501}
 PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VALID_API_MODES = {"", "codex_responses", "responses", "chat_completions", "messages", "custom_endpoint"}
 VALID_AUTH_MODES = {"bearer", "anthropic"}
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_QUEUE_FAILURE_THRESHOLD = 3
+DEFAULT_QUEUE_COOLDOWN_SECONDS = 60.0
+DEFAULT_QUEUE_HALF_OPEN_SUCCESSES = 1
+DEFAULT_QUEUE_MAX_ATTEMPTS = 0
+QUEUE_MAX_ATTEMPTS_LIMIT = 50
+STATS_DB = Path(__file__).with_name("data") / "request_stats.sqlite3"
 # Anthropic 1M-context beta 头。上游中转对声明了 1M 上下文的模型要求请求必须带上
 # 这个 beta，否则拒绝。达到该阈值的模型请求自动注入，无需 provider 手工配置 header。
 CONTEXT_1M_BETA = "context-1m-2025-08-07"
@@ -304,6 +325,16 @@ def _coerce_positive_float(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def _coerce_nonnegative_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
 def _clamp_float(value: float, low: float, high: float) -> float:
     return low if value < low else high if value > high else value
 
@@ -337,6 +368,47 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 
+MODEL_PRICING_FIELDS = (
+    "input_per_million",
+    "output_per_million",
+    "cache_read_per_million",
+    "cache_creation_per_million",
+)
+
+
+def normalize_model_pricing(meta: dict[str, Any]) -> dict[str, float]:
+    """Normalize optional per-million-token prices from provider model metadata.
+
+    Pricing is deliberately a small, config-local extension for this project;
+    it is not a global model database.  The nested ``pricing`` object is the
+    preferred form, while the longer ``*_cost_per_million`` spellings are
+    accepted for hand-written configs.
+    """
+    raw = meta.get("pricing")
+    source = raw if isinstance(raw, dict) else meta
+    aliases = {
+        "input_per_million": ("input_per_million", "input_cost_per_million"),
+        "output_per_million": ("output_per_million", "output_cost_per_million"),
+        "cache_read_per_million": (
+            "cache_read_per_million",
+            "cache_read_cost_per_million",
+        ),
+        "cache_creation_per_million": (
+            "cache_creation_per_million",
+            "cache_creation_cost_per_million",
+            "cache_write_per_million",
+            "cache_write_cost_per_million",
+        ),
+    }
+    normalized: dict[str, float] = {}
+    for field in MODEL_PRICING_FIELDS:
+        value = next((source.get(alias) for alias in aliases[field] if alias in source), None)
+        number = _coerce_nonnegative_float(value)
+        if number is not None:
+            normalized[field] = number
+    return normalized
+
+
 def normalize_models(raw: Any) -> dict[str, dict[str, Any]]:
     """Normalize model metadata from config into {model_id: metadata}."""
     if isinstance(raw, str) and raw.strip():
@@ -362,13 +434,18 @@ def normalize_models(raw: Any) -> dict[str, dict[str, Any]]:
                 effort = effort.get("effort")
             if isinstance(effort, str) and effort.strip():
                 normalized["reasoning_effort"] = effort.strip()
+            pricing = normalize_model_pricing(meta)
+            if pricing:
+                normalized["pricing"] = pricing
         models[name] = normalized
     return models
 
 
 def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str, Any]:
-    if isinstance(cfg, dict) and isinstance(cfg.get("providers"), list):
-        cfg = cfg["providers"]
+    raw_queues: Any = []
+    if isinstance(cfg, dict):
+        raw_queues = cfg.get("queues") or []
+        cfg = cfg.get("providers")
     if not isinstance(cfg, list) or not cfg:
         raise ValueError(f"config root must be a non-empty provider list: {source}")
 
@@ -378,7 +455,15 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
         "trust_env_proxy": False,
         "verbose": False,
         "providers": {},
+        "queues": {},
     }
+    configured_provider_names: dict[str, str] = {}
+    if isinstance(cfg, list):
+        for entry in cfg:
+            if isinstance(entry, dict):
+                entry_name = str(entry.get("name") or "").strip()
+                if entry_name:
+                    configured_provider_names[entry_name.lower()] = entry_name
     for idx, entry in enumerate(cfg, start=1):
         if not isinstance(entry, dict):
             raise ValueError(f"provider #{idx} must be a mapping")
@@ -420,6 +505,7 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
         key = name.lower()
         if key in {existing.lower() for existing in normalized["providers"]}:
             raise ValueError(f"provider {name!r} duplicates an earlier provider name")
+        cost_multiplier = _coerce_nonnegative_float(entry.get("cost_multiplier"))
         normalized["providers"][name] = {
             "base_url": base_url,
             "api_key": str(entry.get("api_key") or entry.get("key") or "").strip(),
@@ -436,7 +522,70 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
             "models": models,
             "reasoning_effort": provider_reasoning.strip() if isinstance(provider_reasoning, str) and provider_reasoning.strip() else "",
             "fallback_responses_to_chat": _coerce_bool(entry.get("fallback_responses_to_chat"), True),
+            "cost_multiplier": cost_multiplier if cost_multiplier is not None else 1.0,
             **keepalive_options_from_entry(entry),
+        }
+    if raw_queues is None:
+        raw_queues = []
+    if not isinstance(raw_queues, list):
+        raise ValueError(f"queues must be a list: {source}")
+    for idx, entry in enumerate(raw_queues, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"queue #{idx} must be a mapping")
+        if not _coerce_bool(entry.get("enabled"), True):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"queue #{idx} missing required field: name")
+        if not PROVIDER_NAME_PATTERN.match(name):
+            raise ValueError(
+                f"queue {name!r} name must be a URL-safe path segment: "
+                "letters, numbers, dot, underscore or hyphen; it must start with a letter or number"
+            )
+        if name.lower() in {existing.lower() for existing in normalized["providers"]}:
+            raise ValueError(f"queue {name!r} conflicts with an existing provider name")
+        if name.lower() in {existing.lower() for existing in normalized["queues"]}:
+            raise ValueError(f"queue {name!r} duplicates an earlier queue name")
+        members = entry.get("members")
+        if members is None:
+            members = entry.get("providers")
+        if not isinstance(members, list) or not members:
+            raise ValueError(f"queue {name!r} members must be a non-empty list")
+        normalized_members: list[str] = []
+        seen_members: set[str] = set()
+        provider_names = {provider_name.lower(): provider_name for provider_name in normalized["providers"]}
+        for member in members:
+            member_name = str(member or "").strip()
+            canonical = provider_names.get(member_name.lower())
+            if canonical is None:
+                if member_name.lower() in configured_provider_names:
+                    # A disabled Provider remains in the saved queue definition,
+                    # but is not a runtime candidate until it is enabled again.
+                    continue
+                raise ValueError(f"queue {name!r} references unknown provider {member_name!r}")
+            if canonical.lower() in seen_members:
+                raise ValueError(f"queue {name!r} contains duplicate provider {canonical!r}")
+            seen_members.add(canonical.lower())
+            normalized_members.append(canonical)
+        try:
+            failure_threshold = int(entry.get("failure_threshold") or DEFAULT_QUEUE_FAILURE_THRESHOLD)
+        except (TypeError, ValueError):
+            failure_threshold = DEFAULT_QUEUE_FAILURE_THRESHOLD
+        try:
+            half_open_successes = int(entry.get("half_open_successes") or DEFAULT_QUEUE_HALF_OPEN_SUCCESSES)
+        except (TypeError, ValueError):
+            half_open_successes = DEFAULT_QUEUE_HALF_OPEN_SUCCESSES
+        try:
+            max_attempts = int(entry.get("max_attempts") or DEFAULT_QUEUE_MAX_ATTEMPTS)
+        except (TypeError, ValueError):
+            max_attempts = DEFAULT_QUEUE_MAX_ATTEMPTS
+        cooldown_seconds = _coerce_positive_float(entry.get("cooldown_seconds")) or DEFAULT_QUEUE_COOLDOWN_SECONDS
+        normalized["queues"][name] = {
+            "members": normalized_members,
+            "failure_threshold": min(max(failure_threshold, 1), 100),
+            "cooldown_seconds": _clamp_float(cooldown_seconds, 1.0, 86400.0),
+            "half_open_successes": min(max(half_open_successes, 1), 100),
+            "max_attempts": min(max(max_attempts, 0), QUEUE_MAX_ATTEMPTS_LIMIT),
         }
     return normalized
 
@@ -454,18 +603,120 @@ def filter_config_providers(config: dict[str, Any], keepalive_only: bool = False
     client traffic; otherwise its warmed ``requests.Session`` pool cannot be
     reused by Codex. The regular process excludes those providers so there is
     only one live route and one connection pool for each keepalive provider.
+
+    ``all_providers`` deliberately remains available after filtering.  It is
+    metadata, not an additional public route: a queue owner needs to know the
+    models and protocol settings of a member that belongs to the companion
+    channel, while ``_route`` must still expose only the providers owned by
+    this process.
     """
     if keepalive_only and exclude_keepalive:
         raise ValueError("keepalive_only and exclude_keepalive are mutually exclusive")
     providers = config.get("providers") or {}
+    all_providers = config.get("all_providers")
+    if not isinstance(all_providers, dict):
+        all_providers = dict(providers)
+    config["all_providers"] = dict(all_providers)
     if keepalive_only:
-        selected = {name: provider for name, provider in providers.items() if provider.get("keepalive")}
+        selected = {
+            name: provider
+            for name, provider in all_providers.items()
+            if _coerce_bool(provider.get("keepalive"), False)
+        }
     elif exclude_keepalive:
-        selected = {name: provider for name, provider in providers.items() if not provider.get("keepalive")}
+        selected = {
+            name: provider
+            for name, provider in all_providers.items()
+            if not _coerce_bool(provider.get("keepalive"), False)
+        }
     else:
-        selected = dict(providers)
+        selected = dict(all_providers)
     config["providers"] = selected
+    # The keepalive-only process is the companion channel by definition.  Set
+    # the role here as well as in ``main()`` so embedders/tests that call the
+    # filtering helper directly get the same routing semantics.
+    if keepalive_only:
+        config["queue_owner"] = False
+    elif exclude_keepalive or "queue_owner" not in config:
+        config["queue_owner"] = True
     return config
+
+
+def _routing_host(host: Any) -> str:
+    """Use a loopback address when a process listens on a wildcard address."""
+    value = str(host or "").strip()
+    if value in {"", "0.0.0.0", "::", "[::]", "*"}:
+        return "127.0.0.1"
+    if ":" in value and not value.startswith("["):
+        return f"[{value}]"
+    return value
+
+
+def _local_proxy_base(host: Any, port: Any) -> str:
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        port_number = 18006
+    if port_number <= 0:
+        port_number = 18006
+    return f"http://{_routing_host(host)}:{port_number}"
+
+
+def _normalize_proxy_base(value: Any, fallback: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return fallback.rstrip("/")
+    if not re.match(r"^https?://", text, re.IGNORECASE):
+        text = "http://" + text
+    return text.rstrip("/")
+
+
+def configure_queue_routing(
+    config: dict[str, Any],
+    *,
+    queue_owner: bool,
+    owner_base: str = "",
+    peer_base: str = "",
+) -> dict[str, Any]:
+    """Populate the local/companion channel addresses used by mixed queues.
+
+    The two systemd services intentionally share one config file.  The main
+    channel owns queue state; the keepalive-only channel owns the warmed
+    Provider sessions.  When no explicit addresses are supplied, the
+    companion port is inferred as ``port + 1`` for the owner and ``port - 1``
+    for the companion process.  This keeps the existing 18006/18007 service
+    layout working without adding a second configuration file.
+    """
+    queue_owner = _coerce_bool(queue_owner, True)
+    current_base = _local_proxy_base(config.get("listen"), config.get("port"))
+    try:
+        port = int(config.get("port") or 18006)
+    except (TypeError, ValueError):
+        port = 18006
+    if port <= 0:
+        port = 18006
+
+    if queue_owner:
+        inferred_owner = current_base
+        inferred_peer = _local_proxy_base(config.get("listen"), port + 1)
+    else:
+        inferred_owner = _local_proxy_base(config.get("listen"), max(port - 1, 1))
+        inferred_peer = current_base
+
+    config["queue_owner"] = bool(queue_owner)
+    config["queue_owner_base"] = _normalize_proxy_base(owner_base, inferred_owner)
+    config["queue_peer_base"] = _normalize_proxy_base(peer_base, inferred_peer)
+    return config
+
+
+def ensure_queue_routing_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Apply safe defaults for tests/embedders that construct a config directly."""
+    return configure_queue_routing(
+        config,
+        queue_owner=_coerce_bool(config.get("queue_owner"), True),
+        owner_base=str(config.get("queue_owner_base") or ""),
+        peer_base=str(config.get("queue_peer_base") or ""),
+    )
 
 
 def _header_contains_token(headers: Any, header_name: str, token: str) -> bool:
@@ -2837,7 +3088,11 @@ class KeepAliveManager:
 
     def enabled_providers(self) -> list[tuple[str, dict[str, Any]]]:
         providers = self._config.get("providers") or {}
-        return [(name, provider) for name, provider in providers.items() if provider.get("keepalive")]
+        return [
+            (name, provider)
+            for name, provider in providers.items()
+            if _coerce_bool(provider.get("keepalive"), False)
+        ]
 
     def start(self) -> int:
         targets = self.enabled_providers()
@@ -3174,15 +3429,565 @@ class KeepAliveManager:
             entry["lastError"] = keepalive_redact(detail, 400)
 
 
+class QueueCircuitRegistry:
+    """In-memory circuit state for queue failover.
+
+    A provider/model key is shared by every queue that references the same
+    provider and sends the exact same model string. Queue-local state is kept
+    separately for the same provider/model so a queue can be disabled without
+    affecting other queues. Restarting the proxy intentionally resets health.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._global: dict[tuple[str, str], dict[str, Any]] = {}
+        self._local: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    @staticmethod
+    def _state(store: dict[tuple[Any, ...], dict[str, Any]], key: tuple[Any, ...]) -> dict[str, Any]:
+        return store.setdefault(
+            key,
+            {
+                "state": "closed",
+                "failureCount": 0,
+                "successCount": 0,
+                "lastError": "",
+                "lastErrorAt": None,
+                "openedAt": None,
+                "retryAt": None,
+                "halfOpenClaimed": False,
+            },
+        )
+
+    @staticmethod
+    def _cooldown(queue: dict[str, Any]) -> float:
+        return float(queue.get("cooldown_seconds") or DEFAULT_QUEUE_COOLDOWN_SECONDS)
+
+    def _allow_state(self, state: dict[str, Any], now: float, cooldown: float) -> bool:
+        current = str(state.get("state") or "closed")
+        if current == "closed":
+            return True
+        if current == "open":
+            if now < float(state.get("retryAt") or 0):
+                return False
+            state["state"] = "half_open"
+            state["halfOpenClaimed"] = False
+            state["successCount"] = 0
+        if state.get("halfOpenClaimed"):
+            return False
+        state["halfOpenClaimed"] = True
+        return True
+
+    def allow(self, queue_name: str, provider_name: str, model: str, queue: dict[str, Any]) -> bool:
+        with self._lock:
+            now = time.time()
+            cooldown = self._cooldown(queue)
+            global_state = self._state(self._global, (provider_name, model))
+            if not self._allow_state(global_state, now, cooldown):
+                return False
+            local_state = self._state(self._local, (queue_name, provider_name, model))
+            if not self._allow_state(local_state, now, cooldown):
+                if global_state.get("state") == "half_open":
+                    global_state["halfOpenClaimed"] = False
+                return False
+            return True
+
+    def _reset(self, state: dict[str, Any]) -> None:
+        state.update(
+            {
+                "state": "closed",
+                "failureCount": 0,
+                "successCount": 0,
+                "lastError": "",
+                "lastErrorAt": None,
+                "openedAt": None,
+                "retryAt": None,
+                "halfOpenClaimed": False,
+            }
+        )
+
+    def success(self, queue_name: str, provider_name: str, model: str, queue: dict[str, Any]) -> None:
+        with self._lock:
+            required = int(queue.get("half_open_successes") or DEFAULT_QUEUE_HALF_OPEN_SUCCESSES)
+            for state in (
+                self._state(self._global, (provider_name, model)),
+                self._state(self._local, (queue_name, provider_name, model)),
+            ):
+                if state.get("state") != "half_open":
+                    self._reset(state)
+                    continue
+                state["successCount"] = int(state.get("successCount") or 0) + 1
+                state["failureCount"] = 0
+                state["lastError"] = ""
+                state["lastErrorAt"] = None
+                state["halfOpenClaimed"] = False
+                if state["successCount"] >= required:
+                    self._reset(state)
+
+    def failure(
+        self,
+        queue_name: str,
+        provider_name: str,
+        model: str,
+        queue: dict[str, Any],
+        detail: str,
+        *,
+        global_failure: bool,
+    ) -> None:
+        with self._lock:
+            local_state = self._state(self._local, (queue_name, provider_name, model))
+            global_key = (provider_name, model)
+            global_state = self._global.get(global_key)
+            targets = [local_state]
+            if global_failure:
+                global_state = self._state(self._global, global_key)
+                targets.append(global_state)
+            elif global_state is not None and global_state.get("state") == "half_open":
+                # A model/queue-level error (for example 404) proves that the
+                # Provider endpoint itself answered.  Do not leave the
+                # provider-wide half-open permit claimed forever while
+                # intentionally keeping this queue's local circuit isolated.
+                self._reset(global_state)
+            threshold = int(queue.get("failure_threshold") or DEFAULT_QUEUE_FAILURE_THRESHOLD)
+            retry_at = time.time() + self._cooldown(queue)
+            for state in targets:
+                state["failureCount"] = int(state.get("failureCount") or 0) + 1
+                state["successCount"] = 0
+                state["lastError"] = str(detail or "")[:500]
+                state["lastErrorAt"] = time.time()
+                state["halfOpenClaimed"] = False
+                if state["failureCount"] >= threshold:
+                    state["state"] = "open"
+                    state["openedAt"] = time.time()
+                    state["retryAt"] = retry_at
+                else:
+                    state["state"] = "closed"
+
+    def snapshot(self, queues: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        with self._lock:
+            now = time.time()
+            result: dict[str, Any] = {"now": now, "queues": {}}
+            for queue_name, queue in queues.items():
+                members = []
+                for provider_name in queue.get("members", []):
+                    model_names = {
+                        model
+                        for (global_provider, model) in self._global
+                        if global_provider == provider_name
+                    }
+                    model_names.update(
+                        model
+                        for (local_queue, local_provider, model) in self._local
+                        if local_queue == queue_name and local_provider == provider_name
+                    )
+                    models = []
+                    for model in sorted(model_names):
+                        global_state = self._global.get((provider_name, model))
+                        local_state = self._local.get((queue_name, provider_name, model))
+                        effective = self._effective_state(global_state, local_state)
+                        if effective is None:
+                            continue
+                        effective["model"] = model
+                        effective["globalState"] = (
+                            dict(global_state) if global_state is not None else None
+                        )
+                        effective["queueState"] = (
+                            dict(local_state) if local_state is not None else None
+                        )
+                        models.append(effective)
+                    members.append({"provider": provider_name, "models": models})
+                result["queues"][queue_name] = {
+                    "members": members,
+                    "failureThreshold": queue.get("failure_threshold"),
+                    "cooldownSeconds": queue.get("cooldown_seconds"),
+                    "maxAttempts": queue.get("max_attempts"),
+                    "now": now,
+                }
+            return result
+
+    @staticmethod
+    def _effective_state(
+        global_state: dict[str, Any] | None,
+        local_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Return the state visible to one queue/member/model row.
+
+        Global state is shared by exact Provider + model pairs, while local
+        state belongs to one queue.  The UI needs both scopes, but the visible
+        state must represent the stricter one: an open circuit in either scope
+        blocks this queue, and a half-open circuit is visible while probing.
+        """
+        states = [state for state in (global_state, local_state) if state is not None]
+        if not states:
+            return None
+        if any(str(state.get("state") or "closed") == "open" for state in states):
+            visible_state = "open"
+        elif any(str(state.get("state") or "closed") == "half_open" for state in states):
+            visible_state = "half_open"
+        else:
+            visible_state = "closed"
+
+        latest_error = max(
+            states,
+            key=lambda state: float(state.get("lastErrorAt") or 0),
+        )
+        retry_at = max(
+            (float(state.get("retryAt") or 0) for state in states if state.get("retryAt")),
+            default=0,
+        )
+        opened_at = max(
+            (float(state.get("openedAt") or 0) for state in states if state.get("openedAt")),
+            default=0,
+        )
+        return {
+            "state": visible_state,
+            "failureCount": max(int(state.get("failureCount") or 0) for state in states),
+            "successCount": max(int(state.get("successCount") or 0) for state in states),
+            "lastError": str(latest_error.get("lastError") or ""),
+            "lastErrorAt": latest_error.get("lastErrorAt"),
+            "openedAt": opened_at or None,
+            "retryAt": retry_at or None,
+            "halfOpenClaimed": any(bool(state.get("halfOpenClaimed")) for state in states),
+        }
+
+
+STATS_BODY_CAPTURE_LIMIT = 2 * 1024 * 1024
+STATS_STREAM_PRODUCTIVE_MARKERS = (
+    "response.output_text.delta",
+    "response.reasoning",
+    "response.function_call_arguments.delta",
+    '"type":"function_call"',
+    '"type": "function_call"',
+    '"choices"',
+    "content_block_delta",
+    "message_stop",
+    "response.completed",
+    "data: [DONE]",
+)
+
+
+def _stats_nonnegative_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def stats_payloads_from_body(body: bytes | bytearray, is_streaming: bool) -> list[dict[str, Any]]:
+    """Extract JSON response envelopes without assuming one wire protocol."""
+    if not body:
+        return []
+    text = bytes(body).decode("utf-8", errors="ignore")
+    if not is_streaming:
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return []
+        return [payload] if isinstance(payload, dict) else []
+
+    payloads: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    if payloads:
+        return payloads
+    # Some gateways ignore stream=true and return one JSON document.
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+    return [payload] if isinstance(payload, dict) else []
+
+
+def _stats_usage_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for value in (
+        payload.get("usage"),
+        (payload.get("response") or {}).get("usage")
+        if isinstance(payload.get("response"), dict)
+        else None,
+        (payload.get("message") or {}).get("usage")
+        if isinstance(payload.get("message"), dict)
+        else None,
+    ):
+        if isinstance(value, dict):
+            candidates.append(value)
+    return candidates
+
+
+def extract_stats_usage(payloads: list[dict[str, Any]]) -> dict[str, int]:
+    """Return the latest useful usage values from Responses/Chat/Anthropic data."""
+    result = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+    for payload in payloads:
+        for usage in _stats_usage_candidates(payload):
+            input_value = _stats_nonnegative_int(
+                usage.get("input_tokens")
+                if "input_tokens" in usage
+                else usage.get("prompt_tokens")
+            )
+            output_value = _stats_nonnegative_int(
+                usage.get("output_tokens")
+                if "output_tokens" in usage
+                else usage.get("completion_tokens")
+            )
+            if input_value is not None:
+                result["input_tokens"] = input_value
+            if output_value is not None:
+                result["output_tokens"] = output_value
+
+            input_details = usage.get("input_tokens_details")
+            if not isinstance(input_details, dict):
+                input_details = {}
+            prompt_details = usage.get("prompt_tokens_details")
+            if not isinstance(prompt_details, dict):
+                prompt_details = {}
+            cache_read = next(
+                (
+                    _stats_nonnegative_int(value)
+                    for value in (
+                        usage.get("cache_read_input_tokens"),
+                        usage.get("cached_tokens"),
+                        input_details.get("cached_tokens"),
+                        prompt_details.get("cached_tokens"),
+                        usage.get("prompt_cache_hit_tokens"),
+                    )
+                    if _stats_nonnegative_int(value) is not None
+                ),
+                None,
+            )
+            cache_creation = next(
+                (
+                    _stats_nonnegative_int(value)
+                    for value in (
+                        usage.get("cache_creation_input_tokens"),
+                        input_details.get("cache_write_tokens"),
+                        prompt_details.get("cache_write_tokens"),
+                        usage.get("cache_write_input_tokens"),
+                    )
+                    if _stats_nonnegative_int(value) is not None
+                ),
+                None,
+            )
+            if cache_read is not None:
+                result["cache_read_tokens"] = cache_read
+            if cache_creation is not None:
+                result["cache_creation_tokens"] = cache_creation
+    return result
+
+
+def _stats_numeric_cost(payloads: list[dict[str, Any]]) -> float | None:
+    for payload in payloads:
+        values: list[Any] = [payload.get("cost"), payload.get("total_cost"), payload.get("estimated_cost")]
+        for usage in _stats_usage_candidates(payload):
+            values.extend((usage.get("cost"), usage.get("total_cost"), usage.get("estimated_cost")))
+        for value in values:
+            number = _coerce_nonnegative_float(value)
+            if number is not None:
+                return number
+    return None
+
+
+def _model_pricing_for(provider: dict[str, Any], model: str) -> dict[str, float]:
+    models = provider.get("models") or {}
+    meta = models.get(model) if isinstance(models, dict) else None
+    if not isinstance(meta, dict):
+        meta = {}
+    pricing = normalize_model_pricing(meta)
+    if pricing:
+        return pricing
+    provider_pricing = provider.get("pricing")
+    return (
+        normalize_model_pricing({"pricing": provider_pricing})
+        if isinstance(provider_pricing, dict)
+        else {}
+    )
+
+
+def estimate_stats_cost(
+    provider: dict[str, Any],
+    model: str,
+    usage: dict[str, int],
+    payloads: list[dict[str, Any]],
+) -> float | None:
+    """Estimate cost from optional local model metadata.
+
+    The proxy intentionally does not ship a global pricing database.  A
+    provider may put a small ``pricing`` object on a model (or provider) with
+    per-million-token values.  If the upstream reports a numeric cost, that
+    value wins; otherwise an estimate is produced only when local prices exist.
+    """
+    reported = _stats_numeric_cost(payloads)
+    if reported is not None:
+        return reported
+    pricing = _model_pricing_for(provider, model)
+    if not pricing:
+        return None
+    try:
+        million = Decimal(1_000_000)
+        input_tokens = Decimal(usage.get("input_tokens") or 0)
+        output_tokens = Decimal(usage.get("output_tokens") or 0)
+        cache_read = Decimal(usage.get("cache_read_tokens") or 0)
+        cache_creation = Decimal(usage.get("cache_creation_tokens") or 0)
+        input_rate = Decimal(str(pricing.get("input_per_million", 0)))
+        output_rate = Decimal(str(pricing.get("output_per_million", 0)))
+        cache_read_rate = Decimal(str(pricing.get("cache_read_per_million", input_rate)))
+        cache_creation_rate = Decimal(
+            str(pricing.get("cache_creation_per_million", input_rate))
+        )
+        input_is_fresh = (
+            str(provider.get("auth_mode") or "").lower() == "anthropic"
+            or str(provider.get("api_mode") or "").lower() == "messages"
+        )
+        billable_input = (
+            input_tokens
+            if input_is_fresh
+            else max(Decimal(0), input_tokens - cache_read - cache_creation)
+        )
+        multiplier = _coerce_nonnegative_float(provider.get("cost_multiplier"))
+        multiplier_decimal = Decimal(str(multiplier if multiplier is not None else 1))
+        total = (
+            billable_input * input_rate
+            + output_tokens * output_rate
+            + cache_read * cache_read_rate
+            + cache_creation * cache_creation_rate
+        ) / million
+        return float(total * multiplier_decimal)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+class RequestStatsStore:
+    """Small SQLite append-only store for proxy attempt telemetry."""
+
+    def __init__(self, path: Path = STATS_DB) -> None:
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path, timeout=5.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS request_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at REAL NOT NULL,
+                    queue_name TEXT NOT NULL,
+                    provider_name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status_code INTEGER,
+                    ok INTEGER NOT NULL,
+                    headers_ms REAL,
+                    first_token_ms REAL,
+                    duration_ms REAL NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                    estimated_cost REAL,
+                    error TEXT NOT NULL DEFAULT '',
+                    is_streaming INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_stats_provider_created "
+                "ON request_stats(provider_name, created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_stats_queue_created "
+                "ON request_stats(queue_name, created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_stats_model_created "
+                "ON request_stats(model, created_at DESC)"
+            )
+            conn.commit()
+
+    def record(self, item: dict[str, Any]) -> None:
+        values = (
+            float(item.get("created_at") or time.time()),
+            str(item.get("queue_name") or ""),
+            str(item.get("provider_name") or ""),
+            str(item.get("model") or ""),
+            item.get("status_code"),
+            1 if item.get("ok") else 0,
+            item.get("headers_ms"),
+            item.get("first_token_ms"),
+            float(item.get("duration_ms") or 0),
+            int(item.get("input_tokens") or 0),
+            int(item.get("output_tokens") or 0),
+            int(item.get("cache_read_tokens") or 0),
+            int(item.get("cache_creation_tokens") or 0),
+            item.get("estimated_cost"),
+            str(item.get("error") or "")[:1000],
+            1 if item.get("is_streaming") else 0,
+        )
+        with self._lock, sqlite3.connect(self.path, timeout=5.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute(
+                """
+                INSERT INTO request_stats (
+                    created_at, queue_name, provider_name, model, status_code,
+                    ok, headers_ms, first_token_ms, duration_ms, input_tokens,
+                    output_tokens, cache_read_tokens, cache_creation_tokens,
+                    estimated_cost, error, is_streaming
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            conn.commit()
+
+
+def record_stats_safely(server: Any, handler: Any, item: dict[str, Any]) -> None:
+    """Telemetry must never turn a completed proxy response into a failure."""
+    try:
+        server.stats.record(item)
+    except Exception as exc:  # pragma: no cover - depends on filesystem/SQLite state
+        try:
+            server.log_error_always(
+                handler,
+                "request stats write failed: %s",
+                f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
+
+
 class HeaderProxyServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address: tuple[str, int], RequestHandlerClass: type[BaseHTTPRequestHandler], config: dict[str, Any]):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+        config: dict[str, Any],
+        stats_path: Path | None = None,
+    ):
         # Initialize fields before ThreadingHTTPServer.__init__ so server_close()
         # is safe even when bind() fails, for example during a port-conflict restart.
         self.config = config
+        ensure_queue_routing_config(self.config)
         self.session_pool = ProviderSessionPool()
+        self.queue_circuits = QueueCircuitRegistry()
+        self.stats = RequestStatsStore(stats_path or STATS_DB)
         self.keepalive: KeepAliveManager | None = None
         super().__init__(server_address, RequestHandlerClass)
 
@@ -4339,10 +5144,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # Expect /<provider>/v1/<upstream-path>. The upstream base_url already includes /v1.
         if len(parts) < 3 or not parts[1]:
             return None, None, split.path
-        provider_name = parts[1]
-        provider = self.server.config["providers"].get(provider_name)
-        if provider is None:
-            names = ", ".join(sorted(self.server.config["providers"].keys()))
+        target_name = parts[1]
+        provider = self.server.config["providers"].get(target_name)
+        is_queue = target_name in self.server.config.get("queues", {})
+        if provider is None and not is_queue:
+            names = ", ".join(
+                sorted(
+                    list(self.server.config["providers"].keys())
+                    + list(self.server.config.get("queues", {}).keys())
+                )
+            )
             self._send_text(404, f"unknown provider path. Use /<provider>/v1/... ; providers: {names}\n")
             return None, None, split.path
         if len(parts) >= 3 and parts[2] == "v1":
@@ -4354,13 +5165,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             route_path = ""
         if split.query:
             route_path += "?" + split.query
-        return provider_name, provider, route_path
+        return target_name, provider, route_path
 
     def _read_body(self) -> bytes | None:
+        if hasattr(self, "_cached_request_body"):
+            return self._cached_request_body
         length = int(self.headers.get("Content-Length") or "0")
         if length <= 0:
-            return None
-        return self.rfile.read(length)
+            self._cached_request_body = None
+        else:
+            self._cached_request_body = self.rfile.read(length)
+        return self._cached_request_body
 
     def _handle_keepalive_status(self) -> None:
         """GET /_keepalive —— 抢通/保温状态。以 _ 开头，过不了 PROVIDER_NAME_PATTERN，
@@ -4373,12 +5188,716 @@ class ProxyHandler(BaseHTTPRequestHandler):
         payload["enabled"] = bool(payload.get("providers"))
         self._send_json(200, payload)
 
+    def _is_queue_owner(self) -> bool:
+        return _coerce_bool(self.server.config.get("queue_owner"), True)
+
+    def _has_internal_header(self, name: str, value: str | None = None) -> bool:
+        expected = str(value or "").strip().lower()
+        for key, raw_value in self.headers.items():
+            if str(key).lower() != name.lower():
+                continue
+            if value is None:
+                return True
+            return str(raw_value or "").strip().lower() == expected
+        return False
+
+    @staticmethod
+    def _target_url(base: str, request_path: str) -> str:
+        split = urlsplit(str(request_path or ""))
+        path = split.path or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        target = str(base or "").rstrip("/") + path
+        if split.query:
+            target += "?" + split.query
+        return target
+
+    def _forward_headers(self, marker: str) -> dict[str, str]:
+        """Copy client headers for an internal hop, excluding hop-by-hop data."""
+        headers: dict[str, str] = {}
+        for key, value in self.headers.items():
+            lower = str(key).lower()
+            if lower in HOP_BY_HOP_HEADERS or lower in QUEUE_INTERNAL_HEADERS:
+                continue
+            headers[str(key)] = str(value)
+        headers[marker] = "1"
+        return headers
+
+    def _relay_internal_response(self, response: requests.Response) -> None:
+        """Relay a companion-channel response without protocol conversion."""
+        self.close_connection = True
+        self.send_response(int(response.status_code))
+        for key, value in response.headers.items():
+            if str(key).lower() in HOP_BY_HOP_HEADERS:
+                continue
+            self.send_header(str(key), str(value))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        response.raw.decode_content = False
+        for chunk in response.raw.stream(8192, decode_content=False):
+            if chunk:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
+    def _forward_request_to_queue_owner(self) -> None:
+        """Send a queue request (or queue status request) to the owner process."""
+        base = str(self.server.config.get("queue_owner_base") or "").strip().rstrip("/")
+        if not base:
+            self._send_json(
+                503,
+                {
+                    "error": {
+                        "type": "queue_owner_unavailable",
+                        "message": "queue owner address is not configured",
+                    }
+                },
+            )
+            return
+        body = self._read_body()
+        url = self._target_url(base, self.path)
+        response: requests.Response | None = None
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.request(
+                method=self.command,
+                url=url,
+                headers=self._forward_headers(QUEUE_OWNER_HEADER),
+                data=body,
+                stream=True,
+                timeout=(DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
+                allow_redirects=False,
+            )
+            self._relay_internal_response(response)
+        except Exception as exc:
+            self.server.log_error_always(
+                self,
+                "queue owner hop %s %s -> %s failed=%s",
+                self.command,
+                self.path,
+                url,
+                repr(exc),
+            )
+            # The owner hop is local infrastructure, so make its failure
+            # distinguishable from an upstream Provider failure.
+            if response is None:
+                self._send_json(
+                    503,
+                    {
+                        "error": {
+                            "type": "queue_owner_unavailable",
+                            "message": "queue owner is unavailable",
+                        }
+                    },
+                )
+        finally:
+            if response is not None:
+                response.close()
+            session.close()
+
+    def _send_queue_routing_loop_error(self) -> None:
+        self._send_json(
+            502,
+            {
+                "error": {
+                    "type": "queue_routing_loop",
+                    "message": "queue owner hop reached a non-owner channel",
+                }
+            },
+        )
+
+    def _forward_remote_provider_attempt(
+        self,
+        provider_name: str,
+        proxied_path: str,
+        body: bytes | None,
+        provider: dict[str, Any],
+    ) -> None:
+        """Ask the companion channel to serve one queue member.
+
+        The caller has already installed the transactional ``AttemptWFile`` and
+        response-header capture.  Consequently this method only emits the
+        companion response into that capture; the queue's normal success/error
+        decision and statistics remain in the owner process.
+        """
+        base = str(self.server.config.get("queue_peer_base") or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("queue peer address is not configured")
+        remote_path = f"/{provider_name}/v1{proxied_path or ''}"
+        url = self._target_url(base, remote_path)
+        response: requests.Response | None = None
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            connect_timeout = float(
+                provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT
+            )
+            read_timeout = float(
+                provider.get("read_timeout") or DEFAULT_READ_TIMEOUT
+            )
+            response = session.request(
+                method=self.command,
+                url=url,
+                headers=self._forward_headers(QUEUE_ATTEMPT_HEADER),
+                data=body,
+                stream=True,
+                timeout=(connect_timeout, read_timeout),
+                allow_redirects=False,
+            )
+            self.close_connection = True
+            self.send_response(int(response.status_code))
+            for key, value in response.headers.items():
+                if str(key).lower() in HOP_BY_HOP_HEADERS:
+                    continue
+                self.send_header(str(key), str(value))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if self.command != "HEAD":
+                response.raw.decode_content = False
+                for chunk in response.raw.stream(8192, decode_content=False):
+                    if chunk:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+        finally:
+            if response is not None:
+                response.close()
+            session.close()
+
+    def _handle_queue_status(self) -> None:
+        if self.command not in {"GET", "HEAD"}:
+            self._send_text(405, "method not allowed\n")
+            return
+        self._send_json(200, self.server.queue_circuits.snapshot(self.server.config.get("queues", {})))
+
+    @staticmethod
+    def _queue_model_from_body(body: bytes | None) -> str:
+        if not body:
+            return ""
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            return ""
+        return str(payload.get("model") or "").strip() if isinstance(payload, dict) else ""
+
+    def _queue_models_payload(self, queue_name: str, queue: dict[str, Any]) -> dict[str, Any]:
+        data: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        providers = self.server.config.get("all_providers")
+        if not isinstance(providers, dict):
+            providers = self.server.config.get("providers") or {}
+        for provider_name in queue.get("members", []):
+            provider = providers.get(provider_name)
+            if not provider:
+                continue
+            for model_id, meta in sorted(provider.get("models", {}).items()):
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+                item: dict[str, Any] = {
+                    "id": model_id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": queue_name,
+                }
+                for key in ("context_length", "max_model_len", "max_tokens", "max_completion_tokens"):
+                    if key in meta:
+                        item[key] = meta[key]
+                if "context_length" in meta:
+                    item.setdefault("max_model_len", meta["context_length"])
+                if meta.get("reasoning_effort"):
+                    item["reasoning_effort"] = meta["reasoning_effort"]
+                data.append(item)
+        return {"object": "list", "data": data}
+
+    @staticmethod
+    def _queue_failure_is_global(status: int | None) -> bool:
+        if status is None:
+            return True
+        return status in {401, 403, 408, 429, 500, 502, 503, 504}
+
+    def _run_queue_attempt(
+        self,
+        queue_name: str,
+        provider_name: str,
+        proxied_path: str,
+        model: str,
+    ) -> tuple[bool, int | None, str, bytes]:
+        """Run one existing provider handler transactionally.
+
+        A queue candidate is allowed to write directly to the client only after
+        it has produced a non-error response body. HTTP errors and empty
+        responses remain buffered so the next candidate can be attempted.
+        """
+        real_wfile = self.wfile
+        buffer = io.BytesIO()
+        started = time.monotonic()
+        status_holder: dict[str, Any] = {
+            "status": None,
+            "headers_ms": None,
+            "error_detail": "",
+        }
+        body_capture = bytearray()
+        providers = self.server.config.get("all_providers")
+        if not isinstance(providers, dict):
+            providers = self.server.config.get("providers") or {}
+        provider = providers.get(provider_name) or {}
+        request_body = getattr(self, "_cached_request_body", None)
+        is_streaming = False
+        try:
+            request_payload = json.loads(request_body.decode("utf-8")) if request_body else {}
+            is_streaming = bool(request_payload.get("stream")) if isinstance(request_payload, dict) else False
+        except Exception:
+            request_payload = {}
+        original_path = self.path
+        original_wfile = self.wfile
+        original_send_response = self.send_response
+        original_end_headers = self.end_headers
+
+        class AttemptWFile:
+            def __init__(self) -> None:
+                self.headers_done = False
+                self.committed = False
+
+            def _commit(self) -> None:
+                if self.committed:
+                    return
+                self.committed = True
+                status_holder["first_token_ms"] = (time.monotonic() - started) * 1000
+                payload = buffer.getvalue()
+                if payload:
+                    real_wfile.write(payload)
+                    real_wfile.flush()
+                    buffer.seek(0)
+                    buffer.truncate(0)
+
+            def write(self, data: bytes) -> int:
+                if not data:
+                    return 0
+                if self.committed:
+                    if len(body_capture) < STATS_BODY_CAPTURE_LIMIT:
+                        body_capture.extend(data[: STATS_BODY_CAPTURE_LIMIT - len(body_capture)])
+                    return real_wfile.write(data)
+                buffer.write(data)
+                if self.headers_done and len(body_capture) < STATS_BODY_CAPTURE_LIMIT:
+                    body_capture.extend(data[: STATS_BODY_CAPTURE_LIMIT - len(body_capture)])
+                should_commit = not is_streaming
+                if is_streaming:
+                    text = body_capture.decode("utf-8", errors="ignore")
+                    should_commit = any(
+                        marker in text for marker in STATS_STREAM_PRODUCTIVE_MARKERS
+                    )
+                if (
+                    self.headers_done
+                    and int(status_holder.get("status") or 0) < 400
+                    and should_commit
+                ):
+                    self._commit()
+                return len(data)
+
+            def flush(self) -> None:
+                if self.committed:
+                    real_wfile.flush()
+
+        attempt_wfile = AttemptWFile()
+
+        def capture_send_response(status: int, message: str | None = None) -> None:
+            status_holder["status"] = int(status)
+            status_holder["headers_ms"] = (time.monotonic() - started) * 1000
+            original_send_response(status, message)
+
+        def capture_end_headers() -> None:
+            original_end_headers()
+            attempt_wfile.headers_done = True
+
+        self.wfile = attempt_wfile  # type: ignore[assignment]
+        self.send_response = capture_send_response  # type: ignore[method-assign]
+        self.end_headers = capture_end_headers  # type: ignore[method-assign]
+        try:
+            if provider_name in (self.server.config.get("providers") or {}):
+                self.path = f"/{provider_name}/v1{proxied_path}"
+                self._handle()
+            else:
+                self._forward_remote_provider_attempt(
+                    provider_name,
+                    proxied_path,
+                    request_body,
+                    provider,
+                )
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            status_holder["status"] = 502
+            status_holder["error_detail"] = (
+                f"queue attempt error: {type(exc).__name__}: {exc}"
+            )
+            # Do not return a body without the captured status line/headers:
+            # _handle_queue() may otherwise write an invalid raw fragment to
+            # the client when this is the last candidate.  The final queue
+            # error envelope will describe the failed attempt instead.
+            buffer.seek(0)
+            buffer.truncate(0)
+            self.server.log_error_always(
+                self,
+                "queue attempt %s/%s failed=%s",
+                queue_name,
+                provider_name,
+                repr(exc),
+            )
+        finally:
+            self.path = original_path
+            self.wfile = original_wfile
+            self.send_response = original_send_response  # type: ignore[method-assign]
+            self.end_headers = original_end_headers  # type: ignore[method-assign]
+
+        status = status_holder.get("status")
+        status = int(status) if status is not None else None
+        buffered = buffer.getvalue()
+        ok = bool(
+            attempt_wfile.committed
+            or status == 204
+            or (
+                self.command == "HEAD"
+                and status is not None
+                and 200 <= status < 400
+            )
+        )
+        if ok and not attempt_wfile.committed:
+            # HEAD/204 responses legitimately have no body, but their captured
+            # status line and headers still need to reach the client.
+            attempt_wfile._commit()
+        if not ok and status is not None and 200 <= status < 400 and not buffered:
+            detail = "empty upstream response"
+        elif not ok:
+            detail = str(status_holder.get("error_detail") or "")
+            if not detail:
+                detail = f"HTTP {status}" if status is not None else "upstream transport error"
+        else:
+            detail = ""
+
+        payloads = stats_payloads_from_body(body_capture, is_streaming)
+        usage = extract_stats_usage(payloads)
+        estimated_cost = estimate_stats_cost(provider, model, usage, payloads)
+        record_stats_safely(
+            self.server,
+            self,
+            {
+                "created_at": time.time(),
+                "queue_name": queue_name,
+                "provider_name": provider_name,
+                "model": model,
+                "status_code": status,
+                "ok": ok,
+                "headers_ms": status_holder.get("headers_ms"),
+                "first_token_ms": status_holder.get("first_token_ms"),
+                "duration_ms": (time.monotonic() - started) * 1000,
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "cache_read_tokens": usage["cache_read_tokens"],
+                "cache_creation_tokens": usage["cache_creation_tokens"],
+                "estimated_cost": estimated_cost,
+                "error": detail,
+                "is_streaming": is_streaming,
+            }
+        )
+        if ok:
+            return True, status, "", b""
+        return False, status, detail, buffered
+
+    def _handle_queue(self, queue_name: str, queue: dict[str, Any], proxied_path: str) -> None:
+        route_path = proxied_path.split("?", 1)[0].rstrip("/") or "/"
+        if self.command in {"GET", "HEAD"} and route_path == "/models":
+            self._send_json(200, self._queue_models_payload(queue_name, queue))
+            return
+
+        body = self._read_body()
+        model = self._queue_model_from_body(body)
+        compatible: list[str] = []
+        providers = self.server.config.get("all_providers")
+        if not isinstance(providers, dict):
+            providers = self.server.config.get("providers") or {}
+        for provider_name in queue.get("members", []):
+            provider = providers.get(provider_name)
+            if not provider:
+                continue
+            models = provider.get("models") or {}
+            if model and models and model not in models:
+                continue
+            compatible.append(provider_name)
+
+        max_attempts = int(queue.get("max_attempts") or 0)
+
+        last_status: int | None = None
+        last_detail = "no healthy provider available"
+        last_buffer = b""
+        attempted = 0
+        attempted_any = False
+        for provider_name in compatible:
+            # The circuit check must happen immediately before the actual
+            # attempt.  In particular, a half-open permit is a reservation for
+            # one real upstream request, not for a name in a pre-built list.
+            if max_attempts and attempted >= max_attempts:
+                break
+            if not self.server.queue_circuits.allow(queue_name, provider_name, model, queue):
+                continue
+            attempted += 1
+            attempted_any = True
+            try:
+                ok, status, detail, buffered = self._run_queue_attempt(
+                    queue_name,
+                    provider_name,
+                    proxied_path,
+                    model,
+                )
+            except Exception as exc:  # pragma: no cover - defensive boundary
+                ok = False
+                status = None
+                detail = f"queue attempt error: {type(exc).__name__}: {exc}"
+                buffered = b""
+            if ok:
+                self.server.queue_circuits.success(queue_name, provider_name, model, queue)
+                return
+            last_status = status
+            last_detail = detail
+            last_buffer = buffered
+            self.server.queue_circuits.failure(
+                queue_name,
+                provider_name,
+                model,
+                queue,
+                detail,
+                global_failure=self._queue_failure_is_global(status),
+            )
+
+        if not attempted_any:
+            self._send_json(
+                503,
+                {
+                    "error": {
+                        "type": "queue_unavailable",
+                        "message": f"queue {queue_name!r} has no healthy provider for model {model or '(unknown)'}",
+                    }
+                },
+            )
+            return
+
+        if last_buffer:
+            self.close_connection = True
+            self.wfile.write(last_buffer)
+            self.wfile.flush()
+            return
+        self._send_json(
+            502 if last_status is None or last_status >= 500 else (last_status or 502),
+            {
+                "error": {
+                    "type": "queue_upstream_error",
+                    "message": f"all providers in queue {queue_name!r} failed: {last_detail}",
+                }
+            },
+        )
+
+    def _direct_stats_context(self) -> tuple[str, dict[str, Any], str] | None:
+        """Identify a direct Provider request without emitting a second route response."""
+        split = urlsplit(self.path)
+        parts = split.path.split("/")
+        if len(parts) < 3 or not parts[1]:
+            return None
+        provider_name = parts[1]
+        provider = self.server.config.get("providers", {}).get(provider_name)
+        if provider is None:
+            return None
+        if len(parts) >= 3 and parts[2] == "v1":
+            rest_parts = parts[3:]
+        else:
+            rest_parts = parts[2:]
+        route_path = "/" + "/".join(rest_parts)
+        if route_path == "/":
+            route_path = ""
+        if self.command in {"GET", "HEAD"} and (route_path.rstrip("/") or "/") == "/models":
+            return None
+        return provider_name, provider, route_path
+
+    def _handle_with_stats(self) -> None:
+        """Run one direct Provider request while collecting downstream telemetry.
+
+        Queue attempts have their own transactional capture in
+        ``_run_queue_attempt``. Recursive calls from that method go through
+        ``_handle`` directly, so this wrapper records each direct request once
+        and each queue attempt once without an aggregate duplicate row.
+        """
+        # A queue owner reaches a Provider on the companion channel through
+        # this marker.  The owner already records the attempt (including the
+        # queue name), so recording it again here would double-count usage and
+        # cost in the dedicated process.
+        if self._has_internal_header(QUEUE_ATTEMPT_HEADER, "1"):
+            self._handle()
+            return
+        context = self._direct_stats_context()
+        if context is None:
+            self._handle()
+            return
+        provider_name, provider, _proxied_path = context
+        started = time.monotonic()
+        status_holder: dict[str, Any] = {
+            "status": None,
+            "headers_ms": None,
+            "first_token_ms": None,
+            "first_body_ms": None,
+        }
+        body_capture = bytearray()
+        request_payload: dict[str, Any] = {}
+        is_streaming = False
+        try:
+            request_body = self._read_body()
+            if request_body:
+                parsed = json.loads(request_body.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    request_payload = parsed
+                    is_streaming = bool(parsed.get("stream"))
+        except Exception:
+            # The normal handler owns malformed-body behavior; telemetry can
+            # still record the request with an empty model/usage.
+            pass
+
+        model = str(request_payload.get("model") or "").strip()
+        real_wfile = self.wfile
+        original_send_response = self.send_response
+        original_send_header = self.send_header
+        original_end_headers = self.end_headers
+        headers_done = False
+        first_body_recorded = False
+
+        class StatsWFile:
+            def write(inner_self, data: bytes) -> int:
+                nonlocal headers_done, first_body_recorded
+                if data and headers_done:
+                    if not first_body_recorded:
+                        status_holder["first_body_ms"] = (time.monotonic() - started) * 1000
+                        first_body_recorded = True
+                    if len(body_capture) < STATS_BODY_CAPTURE_LIMIT:
+                        body_capture.extend(
+                            data[: STATS_BODY_CAPTURE_LIMIT - len(body_capture)]
+                        )
+                    if status_holder["first_token_ms"] is None:
+                        if not is_streaming:
+                            status_holder["first_token_ms"] = status_holder["first_body_ms"]
+                        else:
+                            text = body_capture.decode("utf-8", errors="ignore")
+                            if any(
+                                marker in text
+                                for marker in STATS_STREAM_PRODUCTIVE_MARKERS
+                            ):
+                                status_holder["first_token_ms"] = (
+                                    time.monotonic() - started
+                                ) * 1000
+                return real_wfile.write(data)
+
+            def flush(inner_self) -> None:
+                real_wfile.flush()
+
+        stats_wfile = StatsWFile()
+
+        def capture_send_response(status: int, message: str | None = None) -> None:
+            status_holder["status"] = int(status)
+            status_holder["headers_ms"] = (time.monotonic() - started) * 1000
+            original_send_response(status, message)
+
+        def capture_send_header(key: str, value: str) -> None:
+            original_send_header(key, value)
+
+        def capture_end_headers() -> None:
+            nonlocal headers_done
+            original_end_headers()
+            headers_done = True
+
+        self.wfile = stats_wfile  # type: ignore[assignment]
+        self.send_response = capture_send_response  # type: ignore[method-assign]
+        self.send_header = capture_send_header  # type: ignore[method-assign]
+        self.end_headers = capture_end_headers  # type: ignore[method-assign]
+        try:
+            self._handle()
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            status_holder["status"] = status_holder.get("status") or 500
+            self.server.log_error_always(
+                self,
+                "%s %s direct stats boundary error=%s",
+                provider_name,
+                self.command,
+                repr(exc),
+            )
+        finally:
+            self.wfile = real_wfile
+            self.send_response = original_send_response  # type: ignore[method-assign]
+            self.send_header = original_send_header  # type: ignore[method-assign]
+            self.end_headers = original_end_headers  # type: ignore[method-assign]
+
+        status = status_holder.get("status")
+        status = int(status) if status is not None else None
+        ok = status is not None and 200 <= status < 400
+        if (
+            status_holder.get("first_token_ms") is None
+            and status_holder.get("first_body_ms") is not None
+        ):
+            status_holder["first_token_ms"] = status_holder["first_body_ms"]
+        payloads = stats_payloads_from_body(body_capture, is_streaming)
+        usage = extract_stats_usage(payloads)
+        estimated_cost = estimate_stats_cost(provider, model, usage, payloads)
+        detail = "" if ok else (
+            f"HTTP {status}" if status is not None else "proxy request failed"
+        )
+        record_stats_safely(
+            self.server,
+            self,
+            {
+                "created_at": time.time(),
+                "queue_name": "",
+                "provider_name": provider_name,
+                "model": model,
+                "status_code": status,
+                "ok": ok,
+                "headers_ms": status_holder.get("headers_ms"),
+                "first_token_ms": status_holder.get("first_token_ms"),
+                "duration_ms": (time.monotonic() - started) * 1000,
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "cache_read_tokens": usage["cache_read_tokens"],
+                "cache_creation_tokens": usage["cache_creation_tokens"],
+                "estimated_cost": estimated_cost,
+                "error": detail,
+                "is_streaming": is_streaming,
+            },
+        )
+
     def _handle(self) -> None:
-        if urlsplit(self.path).path.rstrip("/") == "/_keepalive":
+        internal_path = urlsplit(self.path).path.rstrip("/")
+        if internal_path == "/_keepalive":
             self._handle_keepalive_status()
+            return
+        if internal_path == "/_queues":
+            if not self._is_queue_owner():
+                if self._has_internal_header(QUEUE_OWNER_HEADER, "1"):
+                    self._send_queue_routing_loop_error()
+                else:
+                    self._forward_request_to_queue_owner()
+                return
+            self._handle_queue_status()
+            return
+        # The keepalive-only process does not own queue state.  Forward the
+        # whole queue request before _route() can expose a local partial view.
+        # The owner marker prevents a request from bouncing back if the two
+        # companion addresses are misconfigured.
+        first_segment = urlsplit(self.path).path.split("/")
+        queue_name = first_segment[1] if len(first_segment) > 1 else ""
+        if queue_name and queue_name in (self.server.config.get("queues") or {}) and not self._is_queue_owner():
+            if self._has_internal_header(QUEUE_OWNER_HEADER, "1"):
+                self._send_queue_routing_loop_error()
+            else:
+                self._forward_request_to_queue_owner()
             return
         provider_name, provider, proxied_path = self._route()
         if not provider_name or provider is None:
+            queue = self.server.config.get("queues", {}).get(provider_name or "")
+            if provider_name and queue is not None:
+                self._handle_queue(provider_name, queue, proxied_path)
             return
 
         route_path = proxied_path.split("?", 1)[0].rstrip("/") or "/"
@@ -4402,12 +5921,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         headers: dict[str, str] = {}
         for key, value in self.headers.items():
             lower = key.lower()
-            if lower in HOP_BY_HOP_HEADERS:
+            if lower in HOP_BY_HOP_HEADERS or lower in QUEUE_INTERNAL_HEADERS:
                 continue
             headers[key] = value
 
         for key, value in provider.get("headers", {}).items():
             key_s = str(key)
+            if key_s.lower() in QUEUE_INTERNAL_HEADERS:
+                continue
             value_s = "" if value is None else str(value)
             if key_s.lower() == "anthropic-beta":
                 # anthropic-beta 是逗号分隔的多值头：把 provider 配置的 beta 追加到
@@ -4670,22 +6191,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.server.session_pool.release(provider_name, provider, session)
 
     def do_GET(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_HEAD(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_POST(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_PUT(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_PATCH(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_DELETE(self) -> None:
-        self._handle()
+        self._handle_with_stats()
 
     def do_OPTIONS(self) -> None:
         self.close_connection = True
@@ -4714,6 +6235,16 @@ def main() -> int:
         action="store_true",
         help="Serve only providers without keepalive enabled",
     )
+    parser.add_argument(
+        "--queue-owner-base",
+        default="",
+        help="HTTP base URL of the process that owns queue state (defaults to the companion port)",
+    )
+    parser.add_argument(
+        "--queue-peer-base",
+        default="",
+        help="HTTP base URL of the companion Provider channel (defaults to the companion port)",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config).expanduser().resolve()
@@ -4724,11 +6255,26 @@ def main() -> int:
     if args.port:
         cfg["port"] = int(args.port)
     cfg["verbose"] = bool(args.verbose)
+    configure_queue_routing(
+        cfg,
+        queue_owner=not args.keepalive_only,
+        owner_base=args.queue_owner_base or str(cfg.get("queue_owner_base") or ""),
+        peer_base=args.queue_peer_base or str(cfg.get("queue_peer_base") or ""),
+    )
     if args.check:
         print(f"OK config: {cfg_path}")
         print(f"listen: {cfg['listen']}:{cfg['port']}")
         print("providers: " + ", ".join(sorted(cfg["providers"].keys())))
-        warm = sorted(name for name, provider in cfg["providers"].items() if provider.get("keepalive"))
+        print(
+            "queue routing: "
+            f"{'owner' if cfg['queue_owner'] else 'companion'} "
+            f"owner={cfg['queue_owner_base']} peer={cfg['queue_peer_base']}"
+        )
+        warm = sorted(
+            name
+            for name, provider in cfg["providers"].items()
+            if _coerce_bool(provider.get("keepalive"), False)
+        )
         print("keepalive: " + (", ".join(warm) if warm else "(none)"))
         if args.keepalive_only:
             print("provider scope: keepalive-only")

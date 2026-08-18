@@ -57,6 +57,8 @@
     h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
     .subtle { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tab-link { min-height: 36px; display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text); text-decoration: none; font: inherit; }
+    .tab-link:hover { border-color: #aab8b3; background: #fbfcfc; }
     .check-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 13px; font-weight: 650; white-space: nowrap; }
     .check-toggle input { width: auto; min-height: 0; padding: 0; }
     main { padding: 18px 0 42px; }
@@ -207,8 +209,10 @@
 
   <main class="wrap">
     <nav class="tabs">
-      <button class="tab active" data-tab="config" type="button">Provider 维护</button>
-      <button class="tab" data-tab="aiproxy" type="button">AIProxy 服务</button>
+      <button class="tab active" data-tab="config" type="button">上游管理</button>
+      <a class="tab-link" href="/queues.html">路由策略</a>
+      <button class="tab" data-tab="aiproxy" type="button">本地代理</button>
+      <a class="tab-link" href="/stats.html">数据统计</a>
     </nav>
 
     <section id="config" class="view active">
@@ -216,7 +220,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2>Provider 维护</h2>
+              <h2>上游管理</h2>
               <div class="subtle">保存会先备份 config.yaml，再原子写入。</div>
             </div>
             <div class="actions">
@@ -319,7 +323,7 @@
       <section class="panel service-panel">
         <div class="panel-head">
           <div>
-            <h2>AIProxy 服务状态</h2>
+            <h2>本地代理状态</h2>
             <div class="subtle">查看当前 AIProxy：systemd 状态、HTTP 响应和启动/停止/重启。</div>
           </div>
         </div>
@@ -1055,7 +1059,7 @@
     function restartSummary(restart) {
       if (!restart) return '未返回重启结果';
       if (restart.configCheck?.ok === false) return `未重启：配置检查失败${restart.configCheck.output ? '：' + restart.configCheck.output : ''}`;
-      if (restart.ok === false) return restart.skipped || '自动重启失败，请到 AIProxy 服务页查看详情';
+      if (restart.ok === false) return restart.skipped || '自动重启失败，请到本地代理页查看详情';
       const manual = restart.manualProxy || {};
       const services = restart.aiproxyServices || {};
       const parts = ['配置检查通过'];
@@ -1202,6 +1206,8 @@
       if (models && typeof models === 'object') {
         return Object.entries(models).filter(([name]) => String(name).trim()).map(([name, meta]) => ({
           name,
+          originalName: name,
+          meta: meta && typeof meta === 'object' && !Array.isArray(meta) ? { ...meta } : {},
           context: meta?.context_length || meta?.max_model_len || meta?.max_tokens || '',
           effort: meta?.reasoning_effort || meta?.reasoning || ''
         }));
@@ -1214,10 +1220,19 @@
       document.querySelectorAll('[data-model-row]').forEach(row => {
         const name = row.querySelector('[data-model-name]').value.trim();
         if (!name) return;
+        const originalName = row.dataset.modelOriginalName || name;
         const context = row.querySelector('[data-model-context]').value.trim();
         const effort = row.querySelector('[data-model-effort]').value;
         const contextValue = Number(context);
-        models[name] = {};
+        const existingModels = state.providers[state.selectedProvider]?.models;
+        const existingMeta = existingModels && typeof existingModels === 'object' && !Array.isArray(existingModels)
+          ? existingModels[originalName]
+          : null;
+        models[name] = existingMeta && typeof existingMeta === 'object' && !Array.isArray(existingMeta)
+          ? { ...existingMeta }
+          : {};
+        ['context_length', 'max_model_len', 'max_tokens', 'max_completion_tokens', 'reasoning_effort', 'reasoning']
+          .forEach(key => delete models[name][key]);
         if (context && Number.isFinite(contextValue) && contextValue > 0) models[name].context_length = contextValue;
         if (effort) models[name].reasoning_effort = effort;
       });
@@ -1230,7 +1245,7 @@
     }
 
     function modelRowHtml(row, i) {
-      return `<div class="mini-row" data-model-row="${i}"><input data-model-name value="${esc(row.name || '')}" placeholder="模型名称"><input data-model-context type="number" min="0" step="100000" value="${esc(row.context || '')}" placeholder="上下文"><select data-model-effort><option value="">默认</option>${['minimal','low','medium','high','xhigh','max','none'].map(v => `<option value="${v}" ${row.effort === v ? 'selected' : ''}>${v}</option>`).join('')}</select><button data-remove-model="${i}" type="button">x</button></div>`;
+      return `<div class="mini-row" data-model-row="${i}" data-model-original-name="${esc(row.originalName || row.name || '')}"><input data-model-name value="${esc(row.name || '')}" placeholder="模型名称"><input data-model-context type="number" min="0" step="100000" value="${esc(row.context || '')}" placeholder="上下文"><select data-model-effort><option value="">默认</option>${['minimal','low','medium','high','xhigh','max','none'].map(v => `<option value="${v}" ${row.effort === v ? 'selected' : ''}>${v}</option>`).join('')}</select><button data-remove-model="${i}" type="button">x</button></div>`;
     }
 
     function renderModelChoices(models) {
@@ -1388,7 +1403,7 @@
       if (!restart || restart.ok !== false) return '';
       if (restart.configCheck && restart.configCheck.ok === false) return '，AIProxy 未重启：配置检查失败';
       if (restart.skipped) return '，AIProxy 未重启';
-      return '，AIProxy 重启失败，请到 AIProxy 页查看';
+      return '，本地代理重启失败，请到本地代理页查看';
     }
 
     async function persistProviders() {
@@ -1568,7 +1583,7 @@
 
     async function saveAiproxyEditor() {
       const item = collectAiproxyEditor();
-      $('serverState').textContent = 'AIProxy 服务保存并重启中';
+      $('serverState').textContent = '本地代理保存并重启中';
       const data = await api('/aiproxy', { method: 'POST', body: JSON.stringify({ item }) });
       closeAiproxyEditor();
       await loadAiproxyServices();
