@@ -2803,7 +2803,6 @@ class ProviderSessionPool:
 
 KEEPALIVE_STATE_COLD = "cold"
 KEEPALIVE_STATE_WARM = "warm"
-KEEPALIVE_STATE_BUSY = "busy"
 KEEPALIVE_STATE_LOST = "lost"
 KEEPALIVE_STATE_FAILED = "failed"
 KEEPALIVE_STATE_STOPPED = "stopped"
@@ -3146,8 +3145,7 @@ class KeepAliveManager:
     每个勾选了 ``keepalive`` 的 provider 一个 daemon 线程，状态机是::
 
         COLD ──抢通(并发 N)──→ WARM ──保温(每 interval 秒)──→ WARM
-         ↑                       │  │
-         │                       │  └──上游繁忙/读超时──→ BUSY ──短间隔重试──┘
+         ↑                       │
          └──固定间隔重抢(并发 1)─ LOST
 
     保温对象是 ``ProviderSessionPool`` 里那条 per-provider requests.Session ——
@@ -3411,10 +3409,10 @@ class KeepAliveManager:
             return True, "ok", ""
 
         if outcome.kind in {"busy", "timeout", "auth"}:
-            # HTTP 繁忙/鉴权响应已经完整返回，Session 仍可复用；流式读超时由
-            # response.close() 清掉当前响应，Session 自身也可在下一轮重新建连接。
-            # 它们都不是“对端关闭了池化连接”，不得误记为 stale。
-            self._pool.release(name, provider, session)
+            # 对保活而言，只要 429/5xx、读取超时或鉴权失败没有拿到真实回复，
+            # 当前 Session 就不再具备“新窗口可用”的证明。不要把它放回池里继续
+            # 维持半失效状态；状态机随后会用全新 Session 单并发重新抢通。
+            self._pool.discard(session)
             return False, outcome.kind, outcome.detail
 
         if outcome.kind == "stale":
@@ -3431,10 +3429,7 @@ class KeepAliveManager:
                         state["latencyMs"] = int(retry.elapsed * 1000)
                 self._log("%s recycled a stale pooled connection (%s)", name, outcome.detail)
                 return True, "ok", ""
-            if retry.kind == "stale":
-                self._pool.discard(session)
-            else:
-                self._pool.release(name, provider, session)
+            self._pool.discard(session)
             return False, retry.kind, f"{outcome.detail}; retry={retry.detail}"
 
         # 协议层失败：socket 本身没问题，是上游的回答不对。同一条连接立刻重试一次,
@@ -3444,10 +3439,7 @@ class KeepAliveManager:
             self._pool.release(name, provider, session)
             self._update(name, latencyMs=int(retry.elapsed * 1000))
             return True, "ok", ""
-        if retry.kind == "stale":
-            self._pool.discard(session)
-        else:
-            self._pool.release(name, provider, session)
+        self._pool.discard(session)
         return False, retry.kind, f"{outcome.detail}; retry={retry.detail}"
 
     # ---- state machine ------------------------------------------------
@@ -3468,29 +3460,23 @@ class KeepAliveManager:
             return
 
         while not self._stop.is_set():
-            if state in {KEEPALIVE_STATE_WARM, KEEPALIVE_STATE_BUSY}:
-                probe_delay = interval if state == KEEPALIVE_STATE_WARM else retry_interval
-                self._update(name, nextProbeAt=time.time() + probe_delay)
-                if not self._sleep(probe_delay):
+            if state == KEEPALIVE_STATE_WARM:
+                self._update(name, nextProbeAt=time.time() + interval)
+                if not self._sleep(interval):
                     break
                 ok, kind, detail = self._keepalive_once(name, provider)
                 if ok:
-                    state = KEEPALIVE_STATE_WARM
                     self._note_ok(name, KEEPALIVE_STATE_WARM, "keepalive ok")
                     self._log("%s keepalive ok", name)
                     continue
                 self._note_fail(name, detail, kind)
-                if kind in {"busy", "timeout"}:
-                    state = KEEPALIVE_STATE_BUSY
-                    self._update(name, state=state, note=f"upstream {kind}; retrying")
-                    self._log("%s keepalive %s: %s", name, kind, detail, always=True)
-                    continue
                 if kind == "auth":
                     self._update(name, state=KEEPALIVE_STATE_FAILED, note="authentication failed")
                     self._log("%s keepalive authentication failed: %s", name, detail, always=True)
                     return
-                # 一次保温 miss 不能扇出成又一批并发请求：重抢并发降到 1。
-                self._log("%s keepalive lost: %s", name, detail, always=True)
+                # 保温没有拿到真实回复，就不再维持中间繁忙态：立即用全新 Session
+                # 单并发重抢。成功直接恢复 WARM；失败才按 retry_interval 继续重抢。
+                self._log("%s keepalive lost (%s): %s", name, kind, detail, always=True)
                 state = KEEPALIVE_STATE_LOST
                 attempts = 0
                 continue

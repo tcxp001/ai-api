@@ -1105,7 +1105,6 @@
       if (entry.latencyMs != null) detail.push(entry.latencyMs + 'ms');
       const title = esc(detail.join(' | '));
       if (entry.state === 'warm') return `<span class="status ok" title="${title}">🟢 保活</span>`;
-      if (entry.state === 'busy') return `<span class="status warn" title="${title}">🟠 上游繁忙</span>`;
       if (entry.state === 'failed') return `<span class="status fail" title="${title}">🔴 失败</span>`;
       if (entry.state === 'stopped') return `<span class="status muted" title="${title}">保活已停</span>`;
       return `<span class="status warn" title="${title}">🟡 抢通</span>`;
