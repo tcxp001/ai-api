@@ -35,6 +35,8 @@ from proxy import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_KEEPALIVE_CONCURRENCY,
     DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS,
+    DEFAULT_KEEPALIVE_REASONING_EFFORT,
     DEFAULT_KEEPALIVE_RETRY_INTERVAL,
     DEFAULT_KEEPALIVE_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
@@ -377,6 +379,8 @@ KEEPALIVE_FIELDS = (
     "keepalive_concurrency",
     "keepalive_model",
     "keepalive_max_attempts",
+    "keepalive_reasoning_effort",
+    "keepalive_max_output_tokens",
 )
 
 
@@ -419,9 +423,26 @@ def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
         provider["keepalive_max_attempts"] = int(
             normalize_keepalive_number(provider.get("keepalive_max_attempts"), "keepalive_max_attempts", 0, 100000, 0)
         )
+        provider["keepalive_max_output_tokens"] = int(
+            normalize_keepalive_number(
+                provider.get("keepalive_max_output_tokens"),
+                "keepalive_max_output_tokens",
+                16,
+                4096,
+                DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS,
+            )
+        )
     except ValueError as exc:
         raise ValueError(f"{label} {exc}") from exc
     provider["keepalive_model"] = str(provider.get("keepalive_model") or "").strip()
+    effort = str(
+        provider.get("keepalive_reasoning_effort") or DEFAULT_KEEPALIVE_REASONING_EFFORT
+    ).strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise ValueError(
+            f"{label} keepalive_reasoning_effort must be one of: low, medium, high, xhigh, max"
+        )
+    provider["keepalive_reasoning_effort"] = effort
 
 
 def validate_provider(entry: Any, index: int) -> dict[str, Any]:
@@ -593,6 +614,10 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
         item.pop("keepalive_max_attempts", None)
     if not item.get("keepalive_model"):
         item.pop("keepalive_model", None)
+    if item.get("keepalive_reasoning_effort") == DEFAULT_KEEPALIVE_REASONING_EFFORT:
+        item.pop("keepalive_reasoning_effort", None)
+    if item.get("keepalive_max_output_tokens") == DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS:
+        item.pop("keepalive_max_output_tokens", None)
     for key in ("note", "api_key", "key", "reasoning_effort", "reasoning", "anthropic_version"):
         if item.get(key) == "":
             item.pop(key, None)

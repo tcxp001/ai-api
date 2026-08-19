@@ -267,18 +267,49 @@ TRANSPORT_RETRY_EXCEPTIONS = (
 )
 
 # 抢通 / 保温 (keepalive) defaults. See KeepAliveManager below.
-DEFAULT_KEEPALIVE_INTERVAL = 30.0
+DEFAULT_KEEPALIVE_INTERVAL = 60.0
 DEFAULT_KEEPALIVE_CONCURRENCY = 10
-DEFAULT_KEEPALIVE_TIMEOUT = 30.0
+DEFAULT_KEEPALIVE_TIMEOUT = 60.0
+DEFAULT_KEEPALIVE_REASONING_EFFORT = "medium"
+DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS = 32
 KEEPALIVE_CONCURRENCY_MAX = 50
 # Cap in-flight probes across every provider so N providers x concurrency does not
 # open a burst of sockets at startup.
 KEEPALIVE_GLOBAL_INFLIGHT = 16
 # 一整轮抢通失败后固定等待，再开始下一轮；与成功后的保活间隔相互独立。
 DEFAULT_KEEPALIVE_RETRY_INTERVAL = 5.0
-KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS = 32
+KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS = DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
 # Upstream text that means "try again later", not "this provider is broken".
 KEEPALIVE_RETRYABLE_BODY_MARKERS = ("rate_limit", "rate limit", "overloaded", "too many requests")
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """Return nested transport exceptions, including wrappers stored in ``args``."""
+    pending = [exc]
+    seen: set[int] = set()
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        for nested in (getattr(current, "__cause__", None), getattr(current, "__context__", None)):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+        for nested in getattr(current, "args", ()):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return chain
+
+
+def _is_read_timeout_error(exc: BaseException) -> bool:
+    """True for requests/urllib3 read timeouts, even when iter_lines wraps them."""
+    return any(
+        isinstance(current, requests.exceptions.ReadTimeout)
+        or type(current).__name__ == "ReadTimeoutError"
+        for current in _exception_chain(exc)
+    )
 
 
 def _is_stale_connection_error(exc: BaseException) -> bool:
@@ -287,7 +318,9 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
     requests.ConnectTimeout subclasses ConnectionError but means the upstream is
     unreachable, so it must not be treated as a recyclable stale connection.
     """
-    if isinstance(exc, requests.exceptions.ConnectTimeout):
+    if any(isinstance(current, requests.exceptions.ConnectTimeout) for current in _exception_chain(exc)):
+        return False
+    if _is_read_timeout_error(exc):
         return False
     return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError))
 
@@ -352,6 +385,15 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
     retry_interval = _coerce_positive_float(entry.get("keepalive_retry_interval")) or DEFAULT_KEEPALIVE_RETRY_INTERVAL
     timeout = _coerce_positive_float(entry.get("keepalive_timeout")) or DEFAULT_KEEPALIVE_TIMEOUT
     concurrency = _coerce_positive_int(entry.get("keepalive_concurrency")) or DEFAULT_KEEPALIVE_CONCURRENCY
+    max_output_tokens = (
+        _coerce_positive_int(entry.get("keepalive_max_output_tokens"))
+        or DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
+    )
+    reasoning_effort = str(
+        entry.get("keepalive_reasoning_effort") or DEFAULT_KEEPALIVE_REASONING_EFFORT
+    ).strip().lower()
+    if reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
+        reasoning_effort = DEFAULT_KEEPALIVE_REASONING_EFFORT
     try:
         max_attempts = int(entry.get("keepalive_max_attempts") or 0)
     except (TypeError, ValueError):
@@ -364,6 +406,8 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "keepalive_concurrency": min(max(concurrency, 1), KEEPALIVE_CONCURRENCY_MAX),
         "keepalive_model": str(entry.get("keepalive_model") or "").strip(),
         "keepalive_max_attempts": max(max_attempts, 0),
+        "keepalive_reasoning_effort": reasoning_effort,
+        "keepalive_max_output_tokens": min(max(max_output_tokens, 16), 4096),
     }
 
 
@@ -2759,6 +2803,7 @@ class ProviderSessionPool:
 
 KEEPALIVE_STATE_COLD = "cold"
 KEEPALIVE_STATE_WARM = "warm"
+KEEPALIVE_STATE_BUSY = "busy"
 KEEPALIVE_STATE_LOST = "lost"
 KEEPALIVE_STATE_FAILED = "failed"
 KEEPALIVE_STATE_STOPPED = "stopped"
@@ -2827,7 +2872,7 @@ def keepalive_model_for(provider: dict[str, Any]) -> str:
 
 
 def keepalive_codex_context() -> dict[str, str]:
-    """为一条 keepalive 对话生成与 Codex 请求对应的关联标识。"""
+    """为每次 keepalive 请求生成独立的 Codex 逻辑会话标识。"""
     session_id = str(uuid.uuid4())
     return {
         "session_id": session_id,
@@ -2862,9 +2907,13 @@ def build_keepalive_payload(
             "store": False,
             "stream": True,
             "text": {"verbosity": "low"},
+            "max_output_tokens": int(
+                (provider or {}).get("keepalive_max_output_tokens")
+                or DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
+            ),
         }
-        # Codex 会把会话上下文标识放在 prompt_cache_key；每次请求独立生成，
-        # 避免多个并发抢通请求共享一个缓存键。
+        # 每次探测使用独立逻辑会话，避免保温请求串成一段持续对话。底层
+        # requests.Session/HTTP 连接池仍由调用方复用，二者互不绑定。
         context = codex_context or keepalive_codex_context()
         session_id = context["session_id"]
         payload["prompt_cache_key"] = session_id
@@ -2874,17 +2923,18 @@ def build_keepalive_payload(
             "thread_id": context["thread_id"],
             "x-codex-window-id": context["window_id"],
         }
-        # 真实 Codex 请求会把 reasoning.context 一并发送。provider 的
-        # reasoning_effort 仍是唯一配置来源，避免改变现有 provider 语义。
-        if isinstance(provider, dict):
-            effort = configured_reasoning_effort(provider, payload)
-            if effort and effort.strip().lower() != "none":
-                payload["reasoning"] = {
-                    "effort": effort,
-                    "summary": "auto",
-                    "context": "all_turns",
-                }
-                payload.setdefault("include", ["reasoning.encrypted_content"])
+        # 探测只验证通道，不继承业务请求的 high/xhigh。固定 medium 可兼顾真实
+        # Codex 请求形态和探测成本，并避免一句短提示也进入长时间高推理。
+        effort = str(
+            (provider or {}).get("keepalive_reasoning_effort")
+            or DEFAULT_KEEPALIVE_REASONING_EFFORT
+        ).strip().lower()
+        payload["reasoning"] = {
+            "effort": effort,
+            "summary": "auto",
+            "context": "all_turns",
+        }
+        payload.setdefault("include", ["reasoning.encrypted_content"])
         return payload
     # /chat/completions 与 /messages 的最小请求体一致
     return {
@@ -2966,6 +3016,15 @@ def _keepalive_meta_markers(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _keepalive_incomplete_reason(payload: dict[str, Any]) -> str:
+    details = payload.get("incomplete_details")
+    if not isinstance(details, dict) and isinstance(payload.get("response"), dict):
+        details = payload["response"].get("incomplete_details")
+    if not isinstance(details, dict):
+        return ""
+    return str(details.get("reason") or "").strip().lower()
+
+
 def _validate_keepalive_json(response: requests.Response, path: str) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/html" in content_type:
@@ -2982,6 +3041,8 @@ def _validate_keepalive_json(response: requests.Response, path: str) -> tuple[bo
     if marker:
         return False, f"upstream throttled ({marker})"
     if path.endswith("/responses"):
+        if payload.get("status") == "incomplete" and _keepalive_incomplete_reason(payload) == "max_output_tokens":
+            return True, ""
         if payload.get("output_text") or isinstance(payload.get("output"), list) or payload.get("status") in {"completed", "in_progress"}:
             return True, ""
         return False, "responses body without output"
@@ -3016,6 +3077,7 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
         return _validate_keepalive_json(response, "/responses")
     saw_event = False
     saw_completed = False
+    saw_output_limited = False
     for raw in response.iter_lines(decode_unicode=False):
         if not raw:
             continue
@@ -3040,11 +3102,18 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
             # 而不是可复用的热 TCP 连接。继续消费到正常 EOF，才允许复用。
             saw_completed = True
             continue
-        if event_type in {"response.failed", "response.incomplete"}:
+        if event_type == "response.incomplete":
+            if _keepalive_incomplete_reason(event) == "max_output_tokens":
+                # 探测有意限制输出；跑到 token 上限已经足以证明模型通道可用。
+                # 仍继续消费到 EOF，确保底层 HTTP 连接可以复用。
+                saw_output_limited = True
+                continue
+            return False, event_type
+        if event_type == "response.failed":
             return False, event_type
         if event_type == "error" or event.get("error"):
             return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'))}"
-    if saw_completed:
+    if saw_completed or saw_output_limited:
         return True, ""
     if saw_event:
         return False, "stream ended without response.completed"
@@ -3062,14 +3131,24 @@ def validate_keepalive_response(response: requests.Response, path: str) -> tuple
     return _validate_keepalive_json(response, path)
 
 
+def keepalive_response_failure_kind(response: requests.Response) -> str:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in {401, 403}:
+        return "auth"
+    if status in {408, 409, 425, 429} or status >= 500:
+        return "busy"
+    return "protocol"
+
+
 class KeepAliveManager:
     """抢通 + 保温：把 atry 对 Codex CLI 做的事搬到 HTTP 上游连接上。
 
     每个勾选了 ``keepalive`` 的 provider 一个 daemon 线程，状态机是::
 
         COLD ──抢通(并发 N)──→ WARM ──保温(每 interval 秒)──→ WARM
-         ↑                       │
-         └──退避重抢(并发 1)──── LOST
+         ↑                       │  │
+         │                       │  └──上游繁忙/读超时──→ BUSY ──短间隔重试──┘
+         └──固定间隔重抢(并发 1)─ LOST
 
     保温对象是 ``ProviderSessionPool`` 里那条 per-provider requests.Session ——
     真实代理流量就是从这个池子 borrow() 的，所以必须跑在 proxy 进程里。
@@ -3114,6 +3193,14 @@ class KeepAliveManager:
                     ),
                     "concurrency": int(provider.get("keepalive_concurrency") or DEFAULT_KEEPALIVE_CONCURRENCY),
                     "timeout": float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT),
+                    "reasoningEffort": str(
+                        provider.get("keepalive_reasoning_effort")
+                        or DEFAULT_KEEPALIVE_REASONING_EFFORT
+                    ),
+                    "maxOutputTokens": int(
+                        provider.get("keepalive_max_output_tokens")
+                        or DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
+                    ),
                     "maxAttempts": int(provider.get("keepalive_max_attempts") or 0),
                     "attempts": 0,
                     "okCount": 0,
@@ -3122,6 +3209,7 @@ class KeepAliveManager:
                     "lastOkAt": None,
                     "lastErrorAt": None,
                     "lastError": "",
+                    "lastErrorKind": "",
                     "latencyMs": None,
                     "nextProbeAt": None,
                 }
@@ -3208,9 +3296,19 @@ class KeepAliveManager:
                 allow_redirects=False,
             )
             ok, detail = validate_keepalive_response(response, path)
-            return KeepAliveProbe(ok, "ok" if ok else "protocol", detail, time.monotonic() - started)
+            return KeepAliveProbe(
+                ok,
+                "ok" if ok else keepalive_response_failure_kind(response),
+                detail,
+                time.monotonic() - started,
+            )
         except Exception as exc:
-            kind = "stale" if _is_stale_connection_error(exc) else "protocol"
+            if _is_read_timeout_error(exc):
+                kind = "timeout"
+            elif _is_stale_connection_error(exc):
+                kind = "stale"
+            else:
+                kind = "protocol"
             return KeepAliveProbe(False, kind, f"{type(exc).__name__}: {keepalive_redact(exc)}", time.monotonic() - started)
         finally:
             if response is not None:
@@ -3298,7 +3396,7 @@ class KeepAliveManager:
 
     # ---- 保温 ---------------------------------------------------------
 
-    def _keepalive_once(self, name: str, provider: dict[str, Any]) -> tuple[bool, str]:
+    def _keepalive_once(self, name: str, provider: dict[str, Any]) -> tuple[bool, str, str]:
         """borrow 池中连接 → 发一句轮换提示词 → release 回池，走的是真实请求同一条路径。
 
         失败要区分两种原因。HTTPAdapter 是 ``max_retries=0``，若上游空闲超时短于
@@ -3310,7 +3408,14 @@ class KeepAliveManager:
         if outcome.ok:
             self._pool.release(name, provider, session)
             self._update(name, latencyMs=int(outcome.elapsed * 1000))
-            return True, ""
+            return True, "ok", ""
+
+        if outcome.kind in {"busy", "timeout", "auth"}:
+            # HTTP 繁忙/鉴权响应已经完整返回，Session 仍可复用；流式读超时由
+            # response.close() 清掉当前响应，Session 自身也可在下一轮重新建连接。
+            # 它们都不是“对端关闭了池化连接”，不得误记为 stale。
+            self._pool.release(name, provider, session)
+            return False, outcome.kind, outcome.detail
 
         if outcome.kind == "stale":
             # 连接层异常：池里那条连接被上游掐了，换一条新连接立刻重试一次。
@@ -3325,9 +3430,12 @@ class KeepAliveManager:
                         state["recycled"] = int(state.get("recycled") or 0) + 1
                         state["latencyMs"] = int(retry.elapsed * 1000)
                 self._log("%s recycled a stale pooled connection (%s)", name, outcome.detail)
-                return True, ""
-            self._pool.discard(session)
-            return False, f"{outcome.detail}; retry={retry.detail}"
+                return True, "ok", ""
+            if retry.kind == "stale":
+                self._pool.discard(session)
+            else:
+                self._pool.release(name, provider, session)
+            return False, retry.kind, f"{outcome.detail}; retry={retry.detail}"
 
         # 协议层失败：socket 本身没问题，是上游的回答不对。同一条连接立刻重试一次,
         # 再失败才判 LOST（即状态图里的"连续 2 次失败"）。
@@ -3335,12 +3443,12 @@ class KeepAliveManager:
         if retry.ok:
             self._pool.release(name, provider, session)
             self._update(name, latencyMs=int(retry.elapsed * 1000))
-            return True, ""
+            return True, "ok", ""
         if retry.kind == "stale":
             self._pool.discard(session)
         else:
             self._pool.release(name, provider, session)
-        return False, f"{outcome.detail}; retry={retry.detail}"
+        return False, retry.kind, f"{outcome.detail}; retry={retry.detail}"
 
     # ---- state machine ------------------------------------------------
 
@@ -3360,16 +3468,27 @@ class KeepAliveManager:
             return
 
         while not self._stop.is_set():
-            if state == KEEPALIVE_STATE_WARM:
-                self._update(name, nextProbeAt=time.time() + interval)
-                if not self._sleep(interval):
+            if state in {KEEPALIVE_STATE_WARM, KEEPALIVE_STATE_BUSY}:
+                probe_delay = interval if state == KEEPALIVE_STATE_WARM else retry_interval
+                self._update(name, nextProbeAt=time.time() + probe_delay)
+                if not self._sleep(probe_delay):
                     break
-                ok, detail = self._keepalive_once(name, provider)
+                ok, kind, detail = self._keepalive_once(name, provider)
                 if ok:
+                    state = KEEPALIVE_STATE_WARM
                     self._note_ok(name, KEEPALIVE_STATE_WARM, "keepalive ok")
                     self._log("%s keepalive ok", name)
                     continue
-                self._note_fail(name, detail)
+                self._note_fail(name, detail, kind)
+                if kind in {"busy", "timeout"}:
+                    state = KEEPALIVE_STATE_BUSY
+                    self._update(name, state=state, note=f"upstream {kind}; retrying")
+                    self._log("%s keepalive %s: %s", name, kind, detail, always=True)
+                    continue
+                if kind == "auth":
+                    self._update(name, state=KEEPALIVE_STATE_FAILED, note="authentication failed")
+                    self._log("%s keepalive authentication failed: %s", name, detail, always=True)
+                    return
                 # 一次保温 miss 不能扇出成又一批并发请求：重抢并发降到 1。
                 self._log("%s keepalive lost: %s", name, detail, always=True)
                 state = KEEPALIVE_STATE_LOST
@@ -3387,7 +3506,7 @@ class KeepAliveManager:
                 self._note_ok(name, KEEPALIVE_STATE_WARM, f"acquired with concurrency={concurrency}")
                 self._log("%s acquired upstream connection (concurrency=%d)", name, concurrency, always=True)
                 continue
-            self._note_fail(name, detail)
+            self._note_fail(name, detail, "acquire")
             if max_attempts and attempts >= max_attempts:
                 self._update(name, state=KEEPALIVE_STATE_FAILED, note=f"gave up after {attempts} attempts")
                 self._log("%s giving up after %d attempts: %s", name, attempts, detail, always=True)
@@ -3418,8 +3537,9 @@ class KeepAliveManager:
             entry["okCount"] = int(entry.get("okCount") or 0) + 1
             entry["lastOkAt"] = time.time()
             entry["lastError"] = ""
+            entry["lastErrorKind"] = ""
 
-    def _note_fail(self, name: str, detail: str) -> None:
+    def _note_fail(self, name: str, detail: str, kind: str = "protocol") -> None:
         with self._lock:
             entry = self._states.get(name)
             if entry is None:
@@ -3427,6 +3547,7 @@ class KeepAliveManager:
             entry["failCount"] = int(entry.get("failCount") or 0) + 1
             entry["lastErrorAt"] = time.time()
             entry["lastError"] = keepalive_redact(detail, 400)
+            entry["lastErrorKind"] = str(kind or "protocol")
 
 
 class QueueCircuitRegistry:

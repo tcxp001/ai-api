@@ -27,10 +27,12 @@ providers:
     # 只有 keepalive 在维护页有勾选框，其余是 config-only 高级项。
     # 成本：每个开启的 provider 每天约 86400/keepalive_interval 次短请求，别全开。
     keepalive: false
-    # keepalive_interval: 30        # 保活间隔秒数，5~3600
+    # keepalive_interval: 60        # 保活间隔秒数，5~3600
     # keepalive_concurrency: 10     # 冷启动抢通并发，1~50；保温 miss 后重抢固定为 1
     # keepalive_retry_interval: 5   # 整轮抢通失败后等待秒数，1~3600
-    # keepalive_timeout: 30         # 单次探活超时秒数，5~600
+    # keepalive_timeout: 60         # SSE 连续无数据的读取超时秒数，5~600
+    # keepalive_reasoning_effort: medium  # 探测专用推理强度，不继承业务模型的 high/xhigh
+    # keepalive_max_output_tokens: 32     # 探测输出上限；命中上限的 incomplete 也算通
     # keepalive_model: ''           # 留空取 models 第一个
     # keepalive_max_attempts: 0     # 0 = 永不放弃
 
