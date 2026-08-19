@@ -25,7 +25,8 @@ pip install -r requirements.txt
 复制示例配置：
 
 ```bash
-cp config.example.yaml config.yaml
+mkdir -p config
+cp config.example.yaml config/config.yaml
 ```
 
 最小配置：
@@ -66,7 +67,7 @@ http://127.0.0.1:18080
 ## 启动 AIProxy
 
 ```bash
-python3 proxy.py --config config.yaml --listen 127.0.0.1 --port 18006
+python3 proxy.py --config config/config.yaml --listen 127.0.0.1 --port 18006
 ```
 
 本地 Provider 入口：
@@ -100,9 +101,9 @@ Provider + 模型维护熔断状态。
 默认端口为主通道 `18006`、专用通道 `18007`。自定义端口或部署拓扑时可显式指定：
 
 ```bash
-python3 proxy.py --config config.yaml --listen 127.0.0.1 --port 18006 \
+python3 proxy.py --config config/config.yaml --listen 127.0.0.1 --port 18006 \
   --exclude-keepalive --queue-peer-base http://127.0.0.1:18007
-python3 proxy.py --config config.yaml --listen 127.0.0.1 --port 18007 \
+python3 proxy.py --config config/config.yaml --listen 127.0.0.1 --port 18007 \
   --keepalive-only --queue-owner-base http://127.0.0.1:18006
 ```
 
@@ -133,7 +134,8 @@ ai-api/
   prompts.py
   dashboard.py
   dashboard.html
-  config.yaml
+  config/
+    config.yaml
   backup/
   data/
   log/
@@ -145,4 +147,4 @@ ai-api/
 
 ## 注意
 
-`config.yaml` 包含 API Key，不要提交到 GitHub。
+`config/config.yaml` 包含 API Key，不要提交到 GitHub。

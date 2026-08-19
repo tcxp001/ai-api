@@ -46,8 +46,9 @@ from proxy import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_YAML_FILE = BASE_DIR / "config.yaml"
-CONFIG_JSON_FILE = BASE_DIR / "config.json"
+CONFIG_DIR = BASE_DIR / "config"
+CONFIG_YAML_FILE = CONFIG_DIR / "config.yaml"
+CONFIG_JSON_FILE = CONFIG_DIR / "config.json"
 CONFIG_FILE = CONFIG_JSON_FILE if CONFIG_JSON_FILE.exists() else CONFIG_YAML_FILE
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "log"
@@ -251,6 +252,7 @@ def backup_destination(path: Path, now: datetime) -> Path:
 
     for source_root, target_root in (
         (CODEX_DIR, CODEX_DIR / "backup"),
+        (CONFIG_DIR, BACKUP_DIR),
         (BASE_DIR, BACKUP_DIR),
     ):
         try:
@@ -330,6 +332,7 @@ def restore_config_backup(name: str) -> Path:
     target = CONFIG_JSON_FILE if backup_name.startswith("config.json") else CONFIG_YAML_FILE
     with write_lock:
         current_backup = backup_file(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(backup.read_bytes())
     return current_backup or Path("")
 
@@ -756,6 +759,7 @@ def save_queue_list(queues: list[Any], fmt: str = "auto") -> tuple[Path | None, 
     payload: Any = {"providers": persisted_providers, "queues": persisted_queues}
     with write_lock:
         backup = backup_file(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
             tmp_name = f.name
             if target.suffix == ".json":
@@ -809,6 +813,7 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
         target = CONFIG_YAML_FILE
     with write_lock:
         backup = backup_file(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
             tmp_name = f.name
             payload: Any = persisted

@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - prompts.py missing from a partial depl
 else:
     PROMPTS_MODULE_AVAILABLE = True
 
-DEFAULT_CONFIG = Path(__file__).with_name("config.yaml")
+DEFAULT_CONFIG = Path(__file__).with_name("config") / "config.yaml"
 
 HOP_BY_HOP_HEADERS = {
     "connection",

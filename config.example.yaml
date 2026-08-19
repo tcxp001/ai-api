@@ -1,4 +1,4 @@
-# 示例配置文件：请复制为 config.yaml 后填入你自己的 Provider 信息。
+# 示例配置文件：请复制为 config/config.yaml 后填入你自己的 Provider 信息。
 #
 # 注意：公开仓库不要提交真实 config.yaml、真实 Provider 域名、真实 API Key、
 # 运行状态文件或测活结果。

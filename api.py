@@ -55,7 +55,7 @@ UA_ORDER = ["Python默认UA", "Curl", "Chrome电脑", "空字符串", "Codex", "
 TEST_UAS = {name: value for name, value in UA_PROFILES.values()}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
+CONFIG_FILE = os.path.join(BASE_DIR, "config", "config.yaml")
 
 print_lock = threading.Lock()
 

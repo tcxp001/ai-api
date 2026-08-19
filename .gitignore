@@ -1,7 +1,9 @@
 # Local runtime config and state
 config.yaml
 config.json
+/config/
 data/
+backup/
 config.yaml.bak-*
 config.json.bak-*
 checkins.json
