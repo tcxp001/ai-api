@@ -55,7 +55,6 @@ LOG_DIR = BASE_DIR / "log"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 CHECKINS_FILE = DATA_DIR / "checkins.json"
 DASHBOARD_HTML = BASE_DIR / "dashboard.html"
-QUEUES_HTML = BASE_DIR / "queues.html"
 STATS_HTML = BASE_DIR / "stats.html"
 STATS_DB = DATA_DIR / "request_stats.sqlite3"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
@@ -99,11 +98,6 @@ aiproxy_http_probe_state: dict[str, dict[str, Any]] = {}
 
 PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BACKUP_DIR = BASE_DIR / "backup"
-QUEUE_FAILURE_THRESHOLD_DEFAULT = 3
-QUEUE_COOLDOWN_SECONDS_DEFAULT = 60
-QUEUE_HALF_OPEN_SUCCESSES_DEFAULT = 1
-QUEUE_MAX_ATTEMPTS_DEFAULT = 0
-STATS_DIRECT_FILTER_VALUE = "__direct__"
 
 if ZoneInfo is not None:
     try:
@@ -354,20 +348,6 @@ def load_provider_list() -> list[dict[str, Any]]:
     if isinstance(cfg, list):
         return cfg
     raise ValueError("config.yaml root must be a provider list or {providers: [...]}")
-
-
-def load_config_document() -> dict[str, Any]:
-    cfg = load_raw_config()
-    if isinstance(cfg, list):
-        return {"providers": cfg, "queues": []}
-    if isinstance(cfg, dict) and isinstance(cfg.get("providers"), list):
-        queues = cfg.get("queues")
-        return {"providers": cfg["providers"], "queues": queues if isinstance(queues, list) else []}
-    raise ValueError("config.yaml root must be a provider list or {providers: [...]}")
-
-
-def load_queue_list() -> list[dict[str, Any]]:
-    return list(load_config_document().get("queues") or [])
 
 
 def provider_validation_label(index: int, name: str = "") -> str:
@@ -643,134 +623,6 @@ def validate_provider_list(providers: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
-def validate_queue_list(queues: list[Any], providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    provider_names = {
-        str(provider.get("name") or "").strip().lower()
-        for provider in providers
-        if str(provider.get("name") or "").strip()
-    }
-    normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(queues, start=1):
-        if not isinstance(entry, dict):
-            raise ValueError(f"queue #{index} must be an object")
-        queue = dict(entry)
-        name = str(queue.get("name") or "").strip()
-        if not name:
-            raise ValueError(f"queue #{index} missing name")
-        if not PROVIDER_NAME_PATTERN.match(name):
-            raise ValueError(
-                f"queue {name!r} name must be a URL-safe path segment: letters, numbers, dot, underscore or hyphen"
-            )
-        if name.lower() in seen:
-            raise ValueError(f"queue {name!r} duplicates an earlier queue")
-        seen.add(name.lower())
-        if name.lower() in {
-            str(provider.get("name") or "").strip().lower()
-            for provider in providers
-            if str(provider.get("name") or "").strip()
-        }:
-            raise ValueError(f"queue {name!r} conflicts with a provider name")
-        members = queue.get("members")
-        if members is None:
-            members = queue.get("providers")
-        if not isinstance(members, list) or not members:
-            raise ValueError(f"queue {name!r} members must be a non-empty array")
-        normalized_members: list[str] = []
-        member_seen: set[str] = set()
-        provider_by_name = {
-            str(provider.get("name") or "").strip().lower(): str(provider.get("name") or "").strip()
-            for provider in providers
-        }
-        for member in members:
-            member_name = str(member or "").strip()
-            canonical = provider_by_name.get(member_name.lower())
-            if canonical is None or canonical.lower() not in provider_names:
-                raise ValueError(f"queue {name!r} references unknown provider {member_name!r}")
-            if canonical.lower() in member_seen:
-                raise ValueError(f"queue {name!r} contains duplicate provider {canonical!r}")
-            member_seen.add(canonical.lower())
-            normalized_members.append(canonical)
-        try:
-            failure_threshold = int(queue.get("failure_threshold") or QUEUE_FAILURE_THRESHOLD_DEFAULT)
-            cooldown_seconds = float(queue.get("cooldown_seconds") or QUEUE_COOLDOWN_SECONDS_DEFAULT)
-            half_open_successes = int(queue.get("half_open_successes") or QUEUE_HALF_OPEN_SUCCESSES_DEFAULT)
-            max_attempts = int(queue.get("max_attempts") or QUEUE_MAX_ATTEMPTS_DEFAULT)
-        except (TypeError, ValueError):
-            raise ValueError(f"queue {name!r} numeric settings are invalid") from None
-        if failure_threshold < 1 or failure_threshold > 100:
-            raise ValueError(f"queue {name!r} failure_threshold must be between 1 and 100")
-        if cooldown_seconds < 1 or cooldown_seconds > 86400:
-            raise ValueError(f"queue {name!r} cooldown_seconds must be between 1 and 86400")
-        if half_open_successes < 1 or half_open_successes > 100:
-            raise ValueError(f"queue {name!r} half_open_successes must be between 1 and 100")
-        if max_attempts < 0 or max_attempts > 50:
-            raise ValueError(f"queue {name!r} max_attempts must be between 0 and 50")
-        normalized.append(
-            {
-                "name": name,
-                "enabled": api_checks.coerce_bool(queue.get("enabled"), True),
-                "members": normalized_members,
-                "failure_threshold": failure_threshold,
-                "cooldown_seconds": int(cooldown_seconds) if cooldown_seconds.is_integer() else cooldown_seconds,
-                "half_open_successes": half_open_successes,
-                "max_attempts": max_attempts,
-            }
-        )
-    return normalized
-
-
-def compact_queue(queue: dict[str, Any]) -> dict[str, Any]:
-    item = {
-        "name": str(queue.get("name") or "").strip(),
-        "enabled": api_checks.coerce_bool(queue.get("enabled"), True),
-        "members": [str(value).strip() for value in (queue.get("members") or []) if str(value).strip()],
-    }
-    defaults = {
-        "failure_threshold": QUEUE_FAILURE_THRESHOLD_DEFAULT,
-        "cooldown_seconds": QUEUE_COOLDOWN_SECONDS_DEFAULT,
-        "half_open_successes": QUEUE_HALF_OPEN_SUCCESSES_DEFAULT,
-        "max_attempts": QUEUE_MAX_ATTEMPTS_DEFAULT,
-    }
-    for key, default in defaults.items():
-        value = queue.get(key)
-        if value is not None and value != default:
-            item[key] = value
-    if item["enabled"]:
-        item.pop("enabled", None)
-    return item
-
-
-def queue_yaml_text() -> str:
-    queues = validate_queue_list(load_queue_list(), load_provider_list())
-    return yaml.safe_dump([compact_queue(queue) for queue in queues], allow_unicode=True, sort_keys=False)
-
-
-def save_queue_list(queues: list[Any], fmt: str = "auto") -> tuple[Path | None, list[str]]:
-    providers = validate_provider_list(load_provider_list())
-    normalized_queues = validate_queue_list(queues, providers)
-    persisted_providers = compact_provider_list(providers)
-    persisted_queues = [compact_queue(queue) for queue in normalized_queues]
-    target = active_config_file()
-    if fmt == "json":
-        target = CONFIG_JSON_FILE
-    elif fmt == "yaml":
-        target = CONFIG_YAML_FILE
-    payload: Any = {"providers": persisted_providers, "queues": persisted_queues}
-    with write_lock:
-        backup = backup_file(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
-            tmp_name = f.name
-            if target.suffix == ".json":
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            else:
-                yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
-        os.replace(tmp_name, target)
-    return backup, provider_config_warnings(providers)
-
-
 def provider_yaml_text(providers: list[dict[str, Any]]) -> str:
     normalized = compact_provider_list(validate_provider_list(providers))
     return yaml.safe_dump(normalized, allow_unicode=True, sort_keys=False)
@@ -801,11 +653,7 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
     normalized = validate_provider_list(providers)
     warnings = provider_config_warnings(normalized)
     persisted = compact_provider_list(normalized)
-    existing_document = load_config_document()
-    persisted_queues = [
-        compact_queue(queue)
-        for queue in validate_queue_list(existing_document.get("queues") or [], normalized)
-    ]
+    raw_config = load_raw_config()
     target = active_config_file()
     if fmt == "json":
         target = CONFIG_JSON_FILE
@@ -817,8 +665,8 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
             tmp_name = f.name
             payload: Any = persisted
-            if persisted_queues or isinstance(load_raw_config(), dict):
-                payload = {"providers": persisted, "queues": persisted_queues}
+            if isinstance(raw_config, dict):
+                payload = {"providers": persisted}
             if target.suffix == ".json":
                 json.dump(payload, f, ensure_ascii=False, indent=2)
                 f.write("\n")
@@ -2339,33 +2187,6 @@ def keepalive_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
     return payload
 
 
-def queue_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
-    base = (proxy_base or current_aiproxy_proxy_base()).rstrip("/")
-    if not base:
-        return {"ok": False, "error": "aiproxy address unknown", "queues": {}}
-    try:
-        response = requests.get(f"{base}/_queues", timeout=(3, 5))
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 400),
-            "queues": {},
-            "proxyBase": base,
-        }
-    if response.status_code != 200:
-        return {"ok": False, "error": f"HTTP {response.status_code}", "queues": {}, "proxyBase": base}
-    try:
-        payload = response.json()
-    except Exception:
-        return {"ok": False, "error": "non-JSON reply from aiproxy", "queues": {}, "proxyBase": base}
-    if not isinstance(payload, dict):
-        return {"ok": False, "error": "unexpected reply from aiproxy", "queues": {}, "proxyBase": base}
-    payload["ok"] = True
-    payload["proxyBase"] = base
-    payload.setdefault("queues", {})
-    return payload
-
-
 def stats_connect() -> sqlite3.Connection | None:
     if not STATS_DB.exists():
         return None
@@ -2389,7 +2210,7 @@ def stats_date_clause(query: dict[str, list[str]] | None) -> tuple[str, list[flo
 
 
 def stats_filter_options(query: dict[str, list[str]] | None = None) -> dict[str, list[dict[str, str]]]:
-    """Return only Provider and route-strategy names seen in the selected day."""
+    """Return Provider names seen in the selected day."""
     date_clause, date_params = stats_date_clause(query)
     if not date_clause:
         return {
@@ -2398,15 +2219,10 @@ def stats_filter_options(query: dict[str, list[str]] | None = None) -> dict[str,
                 for provider in load_provider_list()
                 if str(provider.get("name") or "").strip()
             ],
-            "queues": [
-                {"name": str(queue.get("name") or "")}
-                for queue in load_queue_list()
-                if str(queue.get("name") or "").strip()
-            ],
         }
     conn = stats_connect()
     if conn is None:
-        return {"providers": [], "queues": []}
+        return {"providers": []}
     try:
         provider_rows = conn.execute(
             f"""
@@ -2417,34 +2233,7 @@ def stats_filter_options(query: dict[str, list[str]] | None = None) -> dict[str,
             """,
             date_params,
         ).fetchall()
-        queue_rows = conn.execute(
-            f"""
-            SELECT DISTINCT queue_name AS name
-            FROM request_stats
-            WHERE {date_clause} AND TRIM(queue_name) <> ''
-            ORDER BY name
-            """,
-            date_params,
-        ).fetchall()
-        direct_row = conn.execute(
-            f"""
-            SELECT 1
-            FROM request_stats
-            WHERE {date_clause} AND TRIM(queue_name) = ''
-            LIMIT 1
-            """,
-            date_params,
-        ).fetchone()
-        queues = [{"name": str(row["name"])} for row in queue_rows]
-        if direct_row is not None:
-            queues.insert(
-                0,
-                {"name": "直连", "value": STATS_DIRECT_FILTER_VALUE},
-            )
-        return {
-            "providers": [{"name": str(row["name"])} for row in provider_rows],
-            "queues": queues,
-        }
+        return {"providers": [{"name": str(row["name"])} for row in provider_rows]}
     finally:
         conn.close()
 
@@ -2510,7 +2299,7 @@ def stats_grouped(
     column: str,
     query: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    if column not in {"provider_name", "queue_name", "model"}:
+    if column not in {"provider_name", "model"}:
         raise ValueError("invalid stats group")
     date_clause, date_params = stats_date_clause(query)
     where = f" WHERE {date_clause}" if date_clause else ""
@@ -2579,14 +2368,11 @@ def stats_requests(query: dict[str, list[str]]) -> list[dict[str, Any]]:
     if date_clause:
         clauses.append(date_clause)
         params.extend(date_params)
-    for query_name, column in (("provider", "provider_name"), ("queue", "queue_name"), ("model", "model")):
+    for query_name, column in (("provider", "provider_name"), ("model", "model")):
         value = str((query.get(query_name) or [""])[0]).strip()
         if value:
-            if query_name == "queue" and value == STATS_DIRECT_FILTER_VALUE:
-                clauses.append("queue_name = ''")
-            else:
-                clauses.append(f"{column} = ?")
-                params.append(value)
+            clauses.append(f"{column} = ?")
+            params.append(value)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     conn = stats_connect()
     if conn is None:
@@ -2594,7 +2380,7 @@ def stats_requests(query: dict[str, list[str]]) -> list[dict[str, Any]]:
     try:
         rows = conn.execute(
             """
-            SELECT id, created_at, queue_name, provider_name, model, status_code,
+            SELECT id, created_at, provider_name, model, status_code,
                    ok, headers_ms, first_token_ms, duration_ms, input_tokens,
                    output_tokens, cache_read_tokens, cache_creation_tokens,
                    estimated_cost, error, is_streaming
@@ -2611,7 +2397,6 @@ def stats_requests(query: dict[str, list[str]]) -> list[dict[str, Any]]:
                     float(row["created_at"]),
                     timezone.utc,
                 ).astimezone(STATS_TIMEZONE).isoformat(timespec="seconds"),
-                "queue": str(row["queue_name"] or ""),
                 "provider": str(row["provider_name"] or ""),
                 "model": str(row["model"] or ""),
                 "statusCode": row["status_code"],
@@ -3028,8 +2813,6 @@ def request_exception_detail(exc: Exception, limit: int = 160) -> str:
 DASHBOARD_PAGE_PATHS = {
     "/",
     "/dashboard.html",
-    "/queues",
-    "/queues.html",
     "/stats",
     "/stats.html",
     "/config",
@@ -3081,13 +2864,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # navigation to /config or /aiproxy should open the dashboard,
             # while the frontend's fetch('/config') request (Accept: */*) must
             # continue to receive the JSON configuration API below.
-            if path in {"/", "/dashboard.html"} or (
+            if path == "/":
+                self.send_response(302)
+                self.send_header("Location", "/config")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path == "/dashboard.html" or (
                 path in {"/config", "/aiproxy"} and wants_html
             ):
                 self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
-                return
-            if path == "/queues.html" or (path == "/queues" and wants_html):
-                self.send_text(200, QUEUES_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/stats.html" or (path == "/stats" and wants_html):
                 self.send_text(200, STATS_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
@@ -3099,20 +2885,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 providers = load_provider_list()
                 self.send_json(200, {
                     "providers": providers,
-                    "queues": load_queue_list(),
                     "publicProviders": [provider_public(p) for p in providers],
                     "configPath": str(active_config_file()),
                     "configFormat": active_config_file().suffix.lstrip("."),
                     "settings": load_app_settings(),
                 })
-                return
-            if path == "/api/queues":
-                self.send_json(200, {"queues": load_queue_list(), "providers": load_provider_list()})
-                return
-            if path == "/api/queues/state":
-                query = parse_qs(split.query)
-                proxy_base = (query.get("proxyBase") or [""])[0]
-                self.send_json(200, queue_status_from_proxy(proxy_base))
                 return
             if path == "/api/stats/config":
                 self.send_json(200, stats_filter_options(parse_qs(split.query)))
@@ -3122,9 +2899,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/stats/providers":
                 self.send_json(200, {"items": stats_grouped("provider_name", parse_qs(split.query))})
-                return
-            if path == "/api/stats/queues":
-                self.send_json(200, {"items": stats_grouped("queue_name", parse_qs(split.query))})
                 return
             if path == "/api/stats/models":
                 self.send_json(200, {"items": stats_grouped("model", parse_qs(split.query))})
@@ -3179,20 +2953,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("content must be a YAML string")
                 providers = parse_provider_yaml_text(content)
                 self.send_json(200, {"providers": providers, "warnings": provider_config_warnings(providers), "configFormat": "yaml"})
-                return
-            if path == "/api/queues":
-                queues = payload.get("queues")
-                if not isinstance(queues, list):
-                    raise ValueError("queues must be an array")
-                backup, warnings = save_queue_list(queues, str(payload.get("format") or "yaml"))
-                restart = restart_after_config_write()
-                self.send_json(200, {
-                    "ok": True,
-                    "backup": str(backup) if backup else "",
-                    "warnings": warnings,
-                    "restart": restart,
-                    "queues": load_queue_list(),
-                })
                 return
             if path == "/config":
                 providers = payload.get("providers")

@@ -23,10 +23,9 @@
 <header><div class="wrap topbar"><div><h1>Ai-api 公益服管理</h1><div class="muted" id="serverState">数据统计 · 读取中</div></div><div class="actions"><button id="reloadBtn" type="button">刷新</button></div></div></header>
 <main class="wrap">
   <nav class="tabs" aria-label="页面导航">
-    <a class="tab" href="/">上游管理</a>
-    <a class="tab" href="/queues.html">路由策略</a>
+    <a class="tab" href="/config">上游管理</a>
     <a class="tab" href="/aiproxy">本地代理</a>
-    <a class="tab active" href="/stats.html">数据统计</a>
+    <a class="tab active" href="/stats">数据统计</a>
   </nav>
   <section class="panel summary-panel">
     <div class="summary-head"><h2>数据看板</h2><div class="date-scope"><input id="statsDate" type="date"></div></div>
@@ -44,14 +43,13 @@
   </section>
   <section class="panel">
     <div class="filters">
-      <div class="field"><label>路由策略</label><select id="queueFilter"><option value="">全部路由策略</option></select></div>
       <div class="field"><label>上游</label><select id="providerFilter"><option value="">全部上游</option></select></div>
       <div class="field"><label>模型</label><input id="modelFilter" placeholder="精确模型名"></div>
       <div class="field"><label>数量</label><select id="limit"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select></div>
       <button class="primary" id="apply">刷新</button>
       <span class="muted" id="message"></span>
     </div>
-    <div class="table-wrap" style="margin-top:12px"><table class="request-table"><thead><tr><th>时间</th><th>路由策略</th><th>上游</th><th>模型</th><th>状态</th><th>响应头（s）</th><th>首字（s）</th><th>总耗时（s）</th><th>输入</th><th>输出</th><th>缓存读取</th><th>错误</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+    <div class="table-wrap" style="margin-top:12px"><table class="request-table"><thead><tr><th>时间</th><th>上游</th><th>模型</th><th>状态</th><th>响应头（s）</th><th>首字（s）</th><th>总耗时（s）</th><th>输入</th><th>输出</th><th>缓存读取</th><th>错误</th></tr></thead><tbody id="requestRows"></tbody></table></div>
   </section>
 </main>
 <script>
@@ -61,8 +59,8 @@
   const n=v=>Number(v||0).toLocaleString();const seconds=v=>v==null?'—':(Number(v)/1000).toFixed(1);const dateTime=v=>{const text=String(v??'');return text.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/,'$1 $2')||text};const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   async function loadSummary(){const s=await api(statsPath('/api/stats/summary'));$('requests').textContent=n(s.requests);$('successes').textContent=n(s.successes);$('successRate').textContent=`${s.successRate||0}%`;$('tokens').textContent=`${n(s.inputTokens)} / ${n(s.outputTokens)}`;$('cacheRead').textContent=n(s.cacheReadTokens);$('latency').textContent=`${seconds(s.averageFirstTokenMs)} / ${seconds(s.averageDurationMs)}`}
   async function loadProviders(){const d=await api(statsPath('/api/stats/providers'));$('groupRows').innerHTML=(d.items||[]).map(x=>`<tr><td><strong>${esc(x.name||'—')}</strong></td><td>${n(x.requests)}</td><td>${x.successRate||0}%</td><td>${seconds(x.averageHeadersMs)}</td><td>${seconds(x.averageFirstTokenMs)}</td><td>${seconds(x.averageDurationMs)}</td><td>${n(x.inputTokens)}</td><td>${n(x.outputTokens)}</td><td>${n(x.cacheReadTokens)}</td></tr>`).join('')||'<tr><td colspan="9" class="muted">暂无统计数据。</td></tr>'}
-  async function loadConfig(){const d=await api(statsPath('/api/stats/config'));$('providerFilter').innerHTML='<option value="">全部上游</option>'+(d.providers||[]).map(p=>`<option value="${esc(p.value||p.name)}">${esc(p.name)}</option>`).join('');$('queueFilter').innerHTML='<option value="">全部路由策略</option>'+(d.queues||[]).map(q=>`<option value="${esc(q.value||q.name)}">${esc(q.name)}</option>`).join('')}
-  async function loadRequests(){const q=new URLSearchParams({limit:$('limit').value,date:selectedDate()});if($('queueFilter').value)q.set('queue',$('queueFilter').value);if($('providerFilter').value)q.set('provider',$('providerFilter').value);if($('modelFilter').value.trim())q.set('model',$('modelFilter').value.trim());const d=await api(`/api/stats/requests?${q}`);$('requestRows').innerHTML=(d.items||[]).map(x=>`<tr><td>${esc(dateTime(x.createdAt))}</td><td>${esc(x.queue||'直连')}</td><td>${esc(x.provider)}</td><td>${esc(x.model||'—')}</td><td class="${x.ok?'ok':'bad'}">${x.ok?'成功':`失败 ${x.statusCode||''}`}</td><td>${seconds(x.headersMs)}</td><td>${seconds(x.firstTokenMs)}</td><td>${seconds(x.durationMs)}</td><td>${n(x.inputTokens)}</td><td>${n(x.outputTokens)}</td><td>${n(x.cacheReadTokens)}</td><td title="${esc(x.error)}">${esc(x.error||'—')}</td></tr>`).join('')||'<tr><td colspan="12" class="muted">暂无请求数据。</td></tr>';$('message').textContent=`${selectedDate()} · 已读取 ${(d.items||[]).length} 条`}
+  async function loadConfig(){const d=await api(statsPath('/api/stats/config'));$('providerFilter').innerHTML='<option value="">全部上游</option>'+(d.providers||[]).map(p=>`<option value="${esc(p.value||p.name)}">${esc(p.name)}</option>`).join('')}
+  async function loadRequests(){const q=new URLSearchParams({limit:$('limit').value,date:selectedDate()});if($('providerFilter').value)q.set('provider',$('providerFilter').value);if($('modelFilter').value.trim())q.set('model',$('modelFilter').value.trim());const d=await api(`/api/stats/requests?${q}`);$('requestRows').innerHTML=(d.items||[]).map(x=>`<tr><td>${esc(dateTime(x.createdAt))}</td><td>${esc(x.provider)}</td><td>${esc(x.model||'—')}</td><td class="${x.ok?'ok':'bad'}">${x.ok?'成功':`失败 ${x.statusCode||''}`}</td><td>${seconds(x.headersMs)}</td><td>${seconds(x.firstTokenMs)}</td><td>${seconds(x.durationMs)}</td><td>${n(x.inputTokens)}</td><td>${n(x.outputTokens)}</td><td>${n(x.cacheReadTokens)}</td><td title="${esc(x.error)}">${esc(x.error||'—')}</td></tr>`).join('')||'<tr><td colspan="11" class="muted">暂无请求数据。</td></tr>';$('message').textContent=`${selectedDate()} · 已读取 ${(d.items||[]).length} 条`}
   function show(e){$('message').textContent=`读取失败：${e.message}`;$('serverState').textContent=`数据统计 · 读取失败：${e.message}`}
   async function loadAll(){await Promise.all([loadConfig(),loadSummary(),loadProviders(),loadRequests()]);$('serverState').textContent=`数据统计 · ${selectedDate()} · 已更新 ${new Date().toLocaleTimeString()}`}
   $('reloadBtn').onclick=()=>loadAll().catch(show);$('apply').onclick=()=>loadAll().catch(show);$('statsDate').onchange=()=>loadAll().catch(show);

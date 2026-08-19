@@ -67,20 +67,3 @@ providers:
       Originator: codex_cli_rs
       User-Agent: codex_cli_rs/0.139.0 (Debian 12.0.0; x86_64) xterm-256color
     enabled: false
-
-# 队列名和 Provider 名共享 /{name}/v1/... 路由命名空间，不能重名。
-# members 顺序就是请求级回退顺序；同一 Provider + 完全相同的请求模型字符串
-# 会在不同队列之间共享熔断状态。max_attempts: 0 表示尝试全部健康成员。
-# 如果启用了 Keepalive 专用通道，主通道用 --exclude-keepalive，专用通道用
-# --keepalive-only；默认按 18006/18007 推导跨通道地址，也可用
-# --queue-owner-base / --queue-peer-base 显式覆盖。
-queues:
-  - name: coding-main
-    enabled: true
-    members:
-      - provider-a
-      - provider-b
-    failure_threshold: 3
-    cooldown_seconds: 60
-    half_open_successes: 1
-    max_attempts: 0
