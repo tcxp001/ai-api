@@ -41,6 +41,7 @@ from proxy import (
     DEFAULT_KEEPALIVE_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     KEEPALIVE_CONCURRENCY_MAX,
+    config_fingerprint,
     load_config as load_proxy_config,
 )
 
@@ -78,6 +79,8 @@ DEFAULT_PROXY_BASE = "http://127.0.0.1:18006"
 DEFAULT_KEEPALIVE_PROXY_BASE = "http://127.0.0.1:18007"
 AIPROXY_HTTP_TRANSIENT_SECONDS = 12
 AIPROXY_HTTP_FAILURE_THRESHOLD = 3
+RUNTIME_SYNC_MAX_ATTEMPTS = 6
+RUNTIME_SYNC_RETRY_DELAY_SECONDS = 0.5
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 DEFAULT_LISTEN = "0.0.0.0"
@@ -2167,13 +2170,17 @@ def current_keepalive_proxy_base() -> str:
     return (aiproxy_probe_url(item or {}) or DEFAULT_KEEPALIVE_PROXY_BASE).rstrip("/")
 
 
-def keepalive_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
+def keepalive_status_from_proxy(
+    proxy_base: str = "",
+    *,
+    timeout: tuple[float, float] = (3, 5),
+) -> dict[str, Any]:
     """向 aiproxy 进程要抢通/保活状态。保活线程活在 proxy 里，dashboard 只是转发。"""
     base = (proxy_base or current_keepalive_proxy_base()).rstrip("/")
     if not base:
         return {"ok": False, "error": "aiproxy address unknown", "providers": {}}
     try:
-        response = requests.get(f"{base}/_keepalive", timeout=(3, 5))
+        response = requests.get(f"{base}/_keepalive", timeout=timeout)
     except Exception as exc:
         return {"ok": False, "error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 400), "providers": {}, "proxyBase": base}
     if response.status_code != 200:
@@ -2188,6 +2195,130 @@ def keepalive_status_from_proxy(proxy_base: str = "") -> dict[str, Any]:
     payload["proxyBase"] = base
     payload.setdefault("providers", {})
     return payload
+
+
+def expected_keepalive_provider_names(providers: list[dict[str, Any]]) -> list[str]:
+    """Return the keepalive provider names expected by the dedicated proxy."""
+    return sorted(
+        str(provider.get("name") or "").strip()
+        for provider in providers
+        if api_checks.coerce_bool(provider.get("keepalive"), False)
+        and api_checks.coerce_bool(provider.get("enabled"), True)
+        and str(provider.get("name") or "").strip()
+    )
+
+
+def verify_keepalive_runtime(
+    providers: list[dict[str, Any]],
+    proxy_base: str = "",
+    *,
+    max_attempts: int = RUNTIME_SYNC_MAX_ATTEMPTS,
+    retry_delay: float = RUNTIME_SYNC_RETRY_DELAY_SECONDS,
+) -> dict[str, Any]:
+    """Confirm the running keepalive proxy loaded the saved provider scope.
+
+    A successful systemd restart only proves that systemd accepted the command.
+    The proxy can still be an old process, or it can start with an unexpected
+    config path.  ``/_keepalive`` exposes the provider scope actually loaded,
+    which is the authoritative check for this split process.
+    """
+    expected = expected_keepalive_provider_names(providers)
+    expected_fingerprint = ""
+    try:
+        expected_fingerprint = config_fingerprint(load_proxy_config(active_config_file()))
+    except Exception:
+        # The provider scope check still gives a useful diagnosis if the file
+        # cannot be parsed again after the pre-restart config check succeeded.
+        pass
+    base = (proxy_base or current_keepalive_proxy_base()).rstrip("/")
+    if not base:
+        return {
+            "ok": False,
+            "proxyBase": base,
+            "expectedProviders": expected,
+            "actualProviders": [],
+            "attempts": 0,
+            "error": "keepalive proxy address unknown",
+        }
+
+    attempts_limit = max(int(max_attempts), 1)
+    last_status: dict[str, Any] = {}
+    for attempt in range(1, attempts_limit + 1):
+        status = keepalive_status_from_proxy(base, timeout=(0.75, 1.5))
+        last_status = status
+        actual = sorted(
+            str(name).strip()
+            for name in (status.get("providers") or {})
+            if str(name).strip()
+        )
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        actual_fingerprint = str(status.get("configFingerprint") or "")
+        fingerprint_mismatch = bool(
+            expected_fingerprint
+            and actual_fingerprint != expected_fingerprint
+        )
+        if not expected and not status.get("ok"):
+            # When the last keepalive provider is disabled, the dedicated
+            # keepalive proxy is intentionally stopped.  Connection refused
+            # is therefore the expected runtime state, not a sync failure.
+            return {
+                "ok": True,
+                "proxyBase": base,
+                "expectedProviders": [],
+                "actualProviders": actual,
+                "expectedFingerprint": expected_fingerprint,
+                "actualFingerprint": actual_fingerprint,
+                "attempts": attempt,
+                "stopped": True,
+            }
+        if status.get("ok") and not missing and not unexpected and not fingerprint_mismatch:
+            return {
+                "ok": True,
+                "proxyBase": base,
+                "expectedProviders": expected,
+                "actualProviders": actual,
+                "expectedFingerprint": expected_fingerprint,
+                "actualFingerprint": actual_fingerprint,
+                "attempts": attempt,
+            }
+        if attempt < attempts_limit:
+            time.sleep(max(float(retry_delay), 0.0))
+
+    actual = sorted(
+        str(name).strip()
+        for name in (last_status.get("providers") or {})
+        if str(name).strip()
+    )
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    if not last_status.get("ok"):
+        error = str(last_status.get("error") or "keepalive proxy status unavailable")
+    elif missing or unexpected or (
+        expected_fingerprint
+        and last_status.get("configFingerprint", "") != expected_fingerprint
+    ):
+        details: list[str] = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected: " + ", ".join(unexpected))
+        actual_fingerprint = str(last_status.get("configFingerprint") or "")
+        if expected_fingerprint and expected_fingerprint != actual_fingerprint:
+            details.append(f"fingerprint mismatch: expected {expected_fingerprint}, actual {actual_fingerprint}")
+        error = "running keepalive config does not match saved config (" + "; ".join(details) + ")"
+    else:
+        error = "running keepalive config could not be verified"
+    return {
+        "ok": False,
+        "proxyBase": base,
+        "expectedProviders": expected,
+        "actualProviders": actual,
+        "expectedFingerprint": expected_fingerprint,
+        "actualFingerprint": str(last_status.get("configFingerprint") or ""),
+        "attempts": attempts_limit,
+        "error": error,
+    }
 
 
 def stats_connect() -> sqlite3.Connection | None:
@@ -2511,6 +2642,7 @@ def manual_proxy_service_assignment(args: list[str]) -> str | None:
 def restart_manual_proxy_processes(
     config_path: Path,
     services: set[str] | None = None,
+    start_services: set[str] | None = None,
 ) -> dict[str, Any]:
     matches = []
     for item in iter_matching_manual_proxy_processes(config_path):
@@ -2551,6 +2683,9 @@ def restart_manual_proxy_processes(
     PROXY_RESTART_LOG.parent.mkdir(parents=True, exist_ok=True)
     with PROXY_RESTART_LOG.open("ab") as log:
         for command in commands:
+            assigned_service = manual_proxy_service_assignment(command)
+            if start_services is not None and assigned_service not in start_services:
+                continue
             try:
                 process = subprocess.Popen(command, cwd=str(BASE_DIR), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 result["started"].append({"pid": process.pid, "cmd": " ".join(shlex.quote(part) for part in command)})
@@ -2559,7 +2694,12 @@ def restart_manual_proxy_processes(
     return result
 
 
-def restart_aiproxy_service_item(item: dict[str, Any], config_path: Path) -> dict[str, Any] | None:
+def restart_aiproxy_service_item(
+    item: dict[str, Any],
+    config_path: Path,
+    *,
+    start: bool = True,
+) -> dict[str, Any] | None:
     service_id = normalize_service_id(str(item.get("id") or ""))
     configured = str(item.get("config") or "")
     if configured and not path_matches(configured, config_path, BASE_DIR):
@@ -2573,11 +2713,14 @@ def restart_aiproxy_service_item(item: dict[str, Any], config_path: Path) -> dic
             entry["restarted"] = False
             entry["skipped"] = "inactive"
         else:
-            code, output = run_systemctl(["restart", name])
+            action = "restart" if start else "stop"
+            code, output = run_systemctl([action, name])
             entry.update(aiproxy_status(item))
             entry["returnCode"] = code
             entry["output"] = output
             entry["restarted"] = code == 0
+            if not start:
+                entry["stopped"] = code == 0
     except Exception as exc:
         entry["restarted"] = False
         entry["error"] = f"{type(exc).__name__}: {exc}"
@@ -2625,6 +2768,7 @@ def changed_aiproxy_services(
 def restart_aiproxy_services_for_config(
     config_path: Path,
     services: set[str] | None = None,
+    start_services: set[str] | None = None,
 ) -> dict[str, Any]:
     items = []
     seen_services: set[str] = set()
@@ -2640,7 +2784,11 @@ def restart_aiproxy_services_for_config(
         seen_services.add(service)
         if services is not None and service not in services:
             continue
-        entry = restart_aiproxy_service_item(item, config_path)
+        entry = restart_aiproxy_service_item(
+            item,
+            config_path,
+            start=start_services is None or service in start_services,
+        )
         if entry is not None:
             items.append(entry)
     return {"matched": len(items), "items": items}
@@ -2674,17 +2822,34 @@ def restart_after_config_write(
             result["ok"] = True
             result["skipped"] = "no effective provider changes"
             return result
+    start_services = changed_services
+    if (
+        after_providers is not None
+        and changed_services is not None
+        and AIPROXY_KEEPALIVE_SERVICE in changed_services
+        and not expected_keepalive_provider_names(after_providers)
+    ):
+        # 关闭最后一个 Keepalive provider 时，不能把 dedicated proxy 重启
+        # 成一个“空抢通”进程；必须停掉它，避免后台继续抢通。
+        start_services = set(changed_services) - {AIPROXY_KEEPALIVE_SERVICE}
+        result["keepaliveAction"] = "stop"
     result["configCheck"] = check_proxy_config_before_restart(config_path)
     if not result["configCheck"].get("ok"):
         result["ok"] = False
         result["skipped"] = "proxy config check failed; existing proxy processes were left unchanged"
         return result
     try:
-        result["manualProxy"] = restart_manual_proxy_processes(config_path, changed_services)
+        if start_services is changed_services:
+            result["manualProxy"] = restart_manual_proxy_processes(config_path, changed_services)
+        else:
+            result["manualProxy"] = restart_manual_proxy_processes(config_path, changed_services, start_services)
     except Exception as exc:
         result["manualProxy"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
     try:
-        result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path, changed_services)
+        if start_services is changed_services:
+            result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path, changed_services)
+        else:
+            result["aiproxyServices"] = restart_aiproxy_services_for_config(config_path, changed_services, start_services)
     except Exception as exc:
         result["aiproxyServices"] = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
 
@@ -2701,6 +2866,11 @@ def restart_after_config_write(
         elif item.get("skipped") == "inactive":
             continue
         elif item.get("restarted") is False:
+            ok = False
+    if changed_services is None or AIPROXY_KEEPALIVE_SERVICE in changed_services:
+        runtime_providers = after_providers if after_providers is not None else load_provider_list()
+        result["runtimeSync"] = verify_keepalive_runtime(runtime_providers)
+        if not result["runtimeSync"].get("ok"):
             ok = False
     result["ok"] = ok
     return result

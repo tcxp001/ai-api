@@ -604,6 +604,33 @@ def load_config(path: Path) -> dict[str, Any]:
     return load_config_from_data(cfg, path)
 
 
+def _fingerprint_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _fingerprint_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (set, frozenset)):
+        return sorted(_fingerprint_value(item) for item in value)
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    return value
+
+
+def config_fingerprint(config: dict[str, Any]) -> str:
+    """Stable effective-config fingerprint without exposing provider secrets."""
+    providers = config.get("providers") or {}
+    public_providers: dict[str, Any] = {}
+    for name, provider in sorted(providers.items(), key=lambda item: str(item[0]).lower()):
+        normalized = _fingerprint_value(provider)
+        if isinstance(normalized, dict) and "api_key" in normalized:
+            key = str(normalized.pop("api_key") or "")
+            normalized["api_key_sha256"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        public_providers[str(name)] = normalized
+    encoded = json.dumps(public_providers, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
 def filter_config_providers(config: dict[str, Any], keepalive_only: bool = False, exclude_keepalive: bool = False) -> dict[str, Any]:
     """Select the provider set owned by one proxy process.
 
@@ -3065,6 +3092,7 @@ class KeepAliveManager:
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._states: dict[str, dict[str, Any]] = {}
+        self._external_warm: dict[str, threading.Event] = {}
         self._inflight = threading.BoundedSemaphore(KEEPALIVE_GLOBAL_INFLIGHT)
 
     # ---- lifecycle ----------------------------------------------------
@@ -3125,6 +3153,7 @@ class KeepAliveManager:
                     "latencyMs": None,
                     "nextProbeAt": None,
                 }
+                self._external_warm[name] = threading.Event()
             thread = threading.Thread(
                 target=self._run_provider,
                 args=(name, provider, index * 0.25),
@@ -3150,6 +3179,41 @@ class KeepAliveManager:
             "globalInflightLimit": KEEPALIVE_GLOBAL_INFLIGHT,
             "providers": states,
         }
+
+    def observe_client_success(self, name: str, status_code: int = 200) -> None:
+        """Treat a completed real client request as proof that the channel is warm.
+
+        Keepalive runs in the same proxy process and borrows the same per-provider
+        Session pool as real traffic.  A successful client response therefore
+        proves more than an HTTP listener being alive: the upstream channel
+        accepted a genuine request and the pooled Session can be reused.
+        """
+        if int(status_code or 0) >= 400:
+            return
+        with self._lock:
+            state = self._states.get(name)
+            event = self._external_warm.get(name)
+            if state is None or event is None:
+                return
+            if state.get("state") not in {KEEPALIVE_STATE_COLD, KEEPALIVE_STATE_LOST}:
+                return
+            state["state"] = KEEPALIVE_STATE_WARM
+            state["since"] = time.time()
+            state["note"] = "real client request succeeded"
+            state["attempts"] = 0
+            state["okCount"] = int(state.get("okCount") or 0) + 1
+            state["lastOkAt"] = time.time()
+            state["lastError"] = ""
+            state["lastErrorKind"] = ""
+            state["nextProbeAt"] = time.time() + float(
+                state.get("interval") or DEFAULT_KEEPALIVE_INTERVAL
+            )
+            state["lastPhase"] = "client_success"
+            event.set()
+
+    def _external_warm_event(self, name: str) -> threading.Event | None:
+        with self._lock:
+            return self._external_warm.get(name)
 
     # ---- bookkeeping --------------------------------------------------
 
@@ -3322,6 +3386,7 @@ class KeepAliveManager:
         decided = threading.Event()
         details: list[str] = []
         killed: set[int] = set()
+        external_warm = self._external_warm_event(name)
 
         def kill(index: int, session: requests.Session | None) -> None:
             """关掉一条输家 session，且只关一次。"""
@@ -3341,7 +3406,9 @@ class KeepAliveManager:
         def attempt(index: int, session: requests.Session) -> None:
             outcome = KeepAliveProbe(False, "protocol", "probe did not run")
             try:
-                if decided.is_set() or self._stop.is_set():
+                if decided.is_set() or self._stop.is_set() or (
+                    external_warm is not None and external_warm.is_set()
+                ):
                     outcome = KeepAliveProbe(False, "skipped")
                 else:
                     outcome = self._probe(provider, session)
@@ -3364,12 +3431,33 @@ class KeepAliveManager:
             thread.start()
 
         deadline = time.monotonic() + float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT) + 120.0
-        for _ in threads:
+        received = 0
+        while received < len(threads):
+            if self._stop.is_set():
+                decided.set()
+                for other_index, other in sessions.items():
+                    kill(other_index, other)
+                for thread in threads:
+                    thread.join(timeout=2.0)
+                return False, "keepalive stopped"
+            if external_warm is not None and external_warm.is_set():
+                decided.set()
+                for other_index, other in sessions.items():
+                    kill(other_index, other)
+                external_warm.clear()
+                for thread in threads:
+                    thread.join(timeout=2.0)
+                return True, "real client request succeeded"
             try:
-                index, session, outcome = results.get(timeout=max(deadline - time.monotonic(), 1.0))
+                index, session, outcome = results.get(
+                    timeout=min(max(deadline - time.monotonic(), 0.25), 0.25)
+                )
             except queue.Empty:
-                details.append("probe thread did not report in time")
-                break
+                if time.monotonic() >= deadline:
+                    details.append("probe thread did not report in time")
+                    break
+                continue
+            received += 1
             if outcome.ok:
                 decided.set()
                 # 首胜即返回：先关掉所有输家 session，使其在途 socket 尽快退出；不再
@@ -5170,6 +5258,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         manager = getattr(self.server, "keepalive", None)
         payload = manager.snapshot() if manager is not None else {"now": time.time(), "providers": {}}
         payload["enabled"] = bool(payload.get("providers"))
+        payload["configPath"] = str(getattr(self.server, "config_path", "") or "")
+        payload["configFingerprint"] = str(
+            self.server.config.get("config_fingerprint")
+            or config_fingerprint(self.server.config)
+        )
         self._send_json(200, payload)
 
     def _direct_stats_context(self) -> tuple[str, dict[str, Any], str] | None:
@@ -5308,6 +5401,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         detail = "" if ok else (
             f"HTTP {status}" if status is not None else "proxy request failed"
         )
+        if ok:
+            manager = getattr(self.server, "keepalive", None)
+            if manager is not None:
+                manager.observe_client_success(provider_name, status or 0)
         record_stats_safely(
             self.server,
             self,
@@ -5676,6 +5773,7 @@ def main() -> int:
 
     cfg_path = Path(args.config).expanduser().resolve()
     cfg = load_config(cfg_path)
+    cfg["config_fingerprint"] = config_fingerprint(cfg)
     filter_config_providers(cfg, keepalive_only=args.keepalive_only, exclude_keepalive=args.exclude_keepalive)
     if args.listen:
         cfg["listen"] = args.listen
@@ -5701,6 +5799,7 @@ def main() -> int:
         return 0
 
     server = HeaderProxyServer((cfg["listen"], cfg["port"]), ProxyHandler, cfg)
+    server.config_path = str(cfg_path)
 
     def stop(_signum: int | None = None, _frame: Any = None) -> None:
         print("\nshutting down")
@@ -5713,6 +5812,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
 
     print(f"Header proxy listening on http://{cfg['listen']}:{cfg['port']} verbose={cfg.get('verbose', False)}")
+    print(f"config: {cfg_path}")
     print("providers:")
     for name, provider in sorted(cfg["providers"].items()):
         h = {k: redact_header(k, v) for k, v in provider["headers"].items()}
@@ -5729,6 +5829,16 @@ def main() -> int:
             f"timeout=({provider.get('connect_timeout', DEFAULT_CONNECT_TIMEOUT)}, {provider.get('read_timeout', DEFAULT_READ_TIMEOUT)})"
             f"{keepalive_note}"
         )
+    warm = sorted(
+        name
+        for name, provider in cfg["providers"].items()
+        if _coerce_bool(provider.get("keepalive"), False)
+    )
+    print("keepalive: " + (", ".join(warm) if warm else "(none)"))
+    if args.keepalive_only:
+        print("provider scope: keepalive-only")
+    elif args.exclude_keepalive:
+        print("provider scope: exclude-keepalive")
     sys.stdout.flush()
 
     # 保温必须跑在 proxy 进程里：真实流量从 ProviderSessionPool.borrow() 取连接,

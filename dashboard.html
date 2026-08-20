@@ -1058,7 +1058,10 @@
     function restartSummary(restart) {
       if (!restart) return '未返回重启结果';
       if (restart.configCheck?.ok === false) return `未重启：配置检查失败${restart.configCheck.output ? '：' + restart.configCheck.output : ''}`;
-      if (restart.ok === false) return restart.skipped || '自动重启失败，请到本地代理页查看详情';
+      if (restart.ok === false) {
+        if (restart.runtimeSync?.error) return `运行配置未同步：${restart.runtimeSync.error}`;
+        return restart.skipped || '自动重启失败，请到本地代理页查看详情';
+      }
       const manual = restart.manualProxy || {};
       const services = restart.aiproxyServices || {};
       const parts = ['配置检查通过'];
@@ -1067,6 +1070,10 @@
         const restarted = (services.items || []).filter(item => item.restarted).length;
         const inactive = (services.items || []).filter(item => item.skipped === 'inactive').length;
         parts.push(`systemd 服务 ${services.matched} 个，重启 ${restarted} 个${inactive ? `，未运行 ${inactive} 个` : ''}`);
+      }
+      if (restart.runtimeSync?.ok) {
+        const count = (restart.runtimeSync.expectedProviders || []).length;
+        parts.push(`抢通配置已同步（${count} 个 provider）`);
       }
       if (!manual.matched && !services.matched) parts.push('未发现当前配置对应的运行中 AIProxy，无需自动重启');
       return parts.join('；');
@@ -1097,7 +1104,13 @@
     function keepaliveBadge(provider) {
       if (!provider || provider.keepalive !== true) return '';
       const entry = (state.keepalive && state.keepalive.providers || {})[provider.name];
-      if (!entry) return '<span class="status muted" title="aiproxy 尚未上报该 provider 的保活状态；保存配置会自动重启 aiproxy">待启动</span>';
+      if (!entry) {
+        const status = state.keepalive || {};
+        if (status.ok === true) {
+          return '<span class="status fail" title="运行中的 keepalive 进程未加载该 provider；请重启抢通保活通道">未加载</span>';
+        }
+        return '<span class="status muted" title="aiproxy 尚未上报该 provider 的保活状态；保存配置会自动重启 aiproxy">待启动</span>';
+      }
       const detail = [];
       if (entry.lastError) detail.push(entry.lastError);
       if (entry.note) detail.push(entry.note);
