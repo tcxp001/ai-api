@@ -262,6 +262,12 @@ KEEPALIVE_GLOBAL_INFLIGHT = 16
 # 一整轮抢通失败后固定等待，再开始下一轮；与成功后的保活间隔相互独立。
 DEFAULT_KEEPALIVE_RETRY_INTERVAL = 5.0
 KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS = DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
+KEEPALIVE_TIMEOUT_RETRY_MULTIPLIER = 2.0
+KEEPALIVE_TIMEOUT_RETRY_MAX = 600.0
+# A warm connection is reacquired conservatively first. If connection-level
+# failures persist, gradually widen the race instead of immediately creating
+# another upstream burst.
+KEEPALIVE_REACQUIRE_CONCURRENCIES = (1, 1, 1, 5, 5, 10)
 # Upstream text that means "try again later", not "this provider is broken".
 KEEPALIVE_RETRYABLE_BODY_MARKERS = ("rate_limit", "rate limit", "overloaded", "too many requests")
 
@@ -306,6 +312,53 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
     if _is_read_timeout_error(exc):
         return False
     return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError))
+
+
+def keepalive_reacquire_concurrency(scale_step: int) -> int:
+    index = min(max(int(scale_step), 0), len(KEEPALIVE_REACQUIRE_CONCURRENCIES) - 1)
+    return KEEPALIVE_REACQUIRE_CONCURRENCIES[index]
+
+
+def keepalive_detail_allows_concurrency_scale(detail: str) -> bool:
+    """Only transport failures justify widening the reacquire race.
+
+    HTTP 429/5xx and provider messages such as ``get_channel_failed`` are
+    upstream capacity decisions, not evidence that racing more Sessions will
+    help.  Keep those retries single-flight.
+    """
+    text = str(detail or "").lower()
+    busy_markers = (
+        "http 408",
+        "http 409",
+        "http 425",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "get_channel_failed",
+        "负载已经达到上限",
+        "rate limit",
+        "rate_limit",
+        "overloaded",
+        "too many requests",
+    )
+    if any(marker in text for marker in busy_markers):
+        return False
+    transport_markers = (
+        "connectionerror",
+        "chunkedencodingerror",
+        "connection reset",
+        "remote end closed",
+        "remotedisconnected",
+        "broken pipe",
+        "invalidchunklength",
+        "read timed out",
+        "readtimeout",
+        "sslerror",
+        "bad record mac",
+    )
+    return any(marker in text for marker in transport_markers)
 
 
 
@@ -2660,13 +2713,45 @@ class KeepAliveProbe:
     属于正常现象，换条连接重试即可）；``protocol`` 表示上游真的有问题。
     """
 
-    __slots__ = ("ok", "kind", "detail", "elapsed")
+    __slots__ = (
+        "ok",
+        "kind",
+        "detail",
+        "elapsed",
+        "session_tag",
+        "logical_session",
+        "request_id",
+        "read_timeout",
+        "status_code",
+    )
 
-    def __init__(self, ok: bool, kind: str = "ok", detail: str = "", elapsed: float = 0.0) -> None:
+    def __init__(
+        self,
+        ok: bool,
+        kind: str = "ok",
+        detail: str = "",
+        elapsed: float = 0.0,
+        *,
+        session_tag: str = "",
+        logical_session: str = "",
+        request_id: str = "",
+        read_timeout: float = 0.0,
+        status_code: int | None = None,
+    ) -> None:
         self.ok = ok
         self.kind = kind
         self.detail = detail
         self.elapsed = elapsed
+        self.session_tag = session_tag
+        self.logical_session = logical_session
+        self.request_id = request_id
+        self.read_timeout = read_timeout
+        self.status_code = status_code
+
+
+def keepalive_session_tag(session: requests.Session) -> str:
+    """Return a short process-local tag for correlating Session reuse in logs."""
+    return f"{id(session):x}"[-8:]
 
 
 def keepalive_target_path(provider: dict[str, Any]) -> str:
@@ -3029,6 +3114,14 @@ class KeepAliveManager:
                     "lastErrorAt": None,
                     "lastError": "",
                     "lastErrorKind": "",
+                    "lastPhase": "",
+                    "lastHttpSession": "",
+                    "lastLogicalSession": "",
+                    "lastRequestId": "",
+                    "lastProbeElapsedMs": None,
+                    "lastProbeTimeout": None,
+                    "reacquireAttempt": 0,
+                    "reacquireConcurrency": 0,
                     "latencyMs": None,
                     "nextProbeAt": None,
                 }
@@ -3067,6 +3160,47 @@ class KeepAliveManager:
         sys.stdout.write("keepalive - - [%s] %s\n" % (time.strftime("%d/%b/%Y %H:%M:%S"), message))
         sys.stdout.flush()
 
+    def _log_probe(
+        self,
+        name: str,
+        phase: str,
+        outcome: KeepAliveProbe,
+        *,
+        attempt: str = "",
+        action: str = "",
+    ) -> None:
+        detail = keepalive_redact(outcome.detail, 240)
+        self._update(
+            name,
+            lastPhase=phase,
+            lastHttpSession=outcome.session_tag,
+            lastLogicalSession=outcome.logical_session,
+            lastRequestId=outcome.request_id,
+            lastProbeElapsedMs=int(outcome.elapsed * 1000),
+            lastProbeTimeout=outcome.read_timeout,
+        )
+        self._log(
+            (
+                "%s phase=%s attempt=%s result=%s kind=%s status=%s "
+                "http_session=%s logical_session=%s request_id=%s "
+                "read_timeout=%.0fs elapsed=%.2fs action=%s detail=%s"
+            ),
+            name,
+            phase,
+            attempt or "-",
+            "ok" if outcome.ok else "failed",
+            outcome.kind or "unknown",
+            outcome.status_code if outcome.status_code is not None else "-",
+            outcome.session_tag or "-",
+            outcome.logical_session or "-",
+            outcome.request_id or "-",
+            outcome.read_timeout,
+            outcome.elapsed,
+            action or "-",
+            detail or "-",
+            always=True,
+        )
+
     def _update(self, name: str, **fields: Any) -> None:
         with self._lock:
             state = self._states.get(name)
@@ -3082,13 +3216,29 @@ class KeepAliveManager:
 
     # ---- one probe ----------------------------------------------------
 
-    def _probe(self, provider: dict[str, Any], session: requests.Session) -> KeepAliveProbe:
+    def _probe(
+        self,
+        provider: dict[str, Any],
+        session: requests.Session,
+        *,
+        read_timeout_override: float | None = None,
+    ) -> KeepAliveProbe:
+        session_tag = keepalive_session_tag(session)
         model = keepalive_model_for(provider)
         if not model:
-            return KeepAliveProbe(False, "protocol", "provider has no model configured")
+            return KeepAliveProbe(
+                False,
+                "protocol",
+                "provider has no model configured",
+                session_tag=session_tag,
+            )
         path = keepalive_target_path(provider)
         url = str(provider.get("base_url") or "").rstrip("/") + path
-        read_timeout = float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT)
+        read_timeout = float(
+            read_timeout_override
+            if read_timeout_override is not None
+            else provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT
+        )
         connect_timeout = min(float(provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT), read_timeout)
         codex_context = keepalive_codex_context() if path.endswith("/responses") else None
         payload = build_keepalive_payload(
@@ -3102,7 +3252,15 @@ class KeepAliveManager:
         streaming = bool(payload.get("stream"))
 
         if not self._inflight.acquire(timeout=max(60.0, read_timeout)):
-            return KeepAliveProbe(False, "protocol", "global keepalive slot timeout")
+            return KeepAliveProbe(
+                False,
+                "protocol",
+                "global keepalive slot timeout",
+                session_tag=session_tag,
+                logical_session=str((codex_context or {}).get("session_id") or "")[:8],
+                request_id=str((codex_context or {}).get("request_id") or "")[:8],
+                read_timeout=read_timeout,
+            )
         started = time.monotonic()
         response = None
         try:
@@ -3120,6 +3278,11 @@ class KeepAliveManager:
                 "ok" if ok else keepalive_response_failure_kind(response),
                 detail,
                 time.monotonic() - started,
+                session_tag=session_tag,
+                logical_session=str((codex_context or {}).get("session_id") or "")[:8],
+                request_id=str((codex_context or {}).get("request_id") or "")[:8],
+                read_timeout=read_timeout,
+                status_code=int(getattr(response, "status_code", 0) or 0),
             )
         except Exception as exc:
             if _is_read_timeout_error(exc):
@@ -3128,7 +3291,16 @@ class KeepAliveManager:
                 kind = "stale"
             else:
                 kind = "protocol"
-            return KeepAliveProbe(False, kind, f"{type(exc).__name__}: {keepalive_redact(exc)}", time.monotonic() - started)
+            return KeepAliveProbe(
+                False,
+                kind,
+                f"{type(exc).__name__}: {keepalive_redact(exc)}",
+                time.monotonic() - started,
+                session_tag=session_tag,
+                logical_session=str((codex_context or {}).get("session_id") or "")[:8],
+                request_id=str((codex_context or {}).get("request_id") or "")[:8],
+                read_timeout=read_timeout,
+            )
         finally:
             if response is not None:
                 try:
@@ -3175,6 +3347,13 @@ class KeepAliveManager:
                     outcome = self._probe(provider, session)
             except Exception as exc:
                 outcome = KeepAliveProbe(False, "protocol", f"{type(exc).__name__}: {keepalive_redact(exc)}")
+            self._log_probe(
+                name,
+                f"acquire_c{concurrency}",
+                outcome,
+                attempt=str(index + 1),
+                action="candidate_result",
+            )
             results.put((index, session, outcome))
 
         threads = [
@@ -3224,15 +3403,53 @@ class KeepAliveManager:
         """
         session = self._pool.borrow(name, provider)
         outcome = self._probe(provider, session)
+        self._log_probe(name, "warm", outcome, attempt="1", action="keep_session" if outcome.ok else "classify")
         if outcome.ok:
             self._pool.release(name, provider, session)
             self._update(name, latencyMs=int(outcome.elapsed * 1000))
             return True, "ok", ""
 
-        if outcome.kind in {"busy", "timeout", "auth"}:
-            # 对保活而言，只要 429/5xx、读取超时或鉴权失败没有拿到真实回复，
-            # 当前 Session 就不再具备“新窗口可用”的证明。不要把它放回池里继续
-            # 维持半失效状态；状态机随后会用全新 Session 单并发重新抢通。
+        if outcome.kind == "timeout":
+            retry_timeout = min(
+                max(
+                    outcome.read_timeout * KEEPALIVE_TIMEOUT_RETRY_MULTIPLIER,
+                    outcome.read_timeout,
+                ),
+                KEEPALIVE_TIMEOUT_RETRY_MAX,
+            )
+            self._log(
+                "%s phase=warm action=retry_same_http_session http_session=%s "
+                "logical_session=%s request_id=%s read_timeout=%.0fs",
+                name,
+                outcome.session_tag or "-",
+                outcome.logical_session or "-",
+                outcome.request_id or "-",
+                retry_timeout,
+                always=True,
+            )
+            retry = self._probe(
+                provider,
+                session,
+                read_timeout_override=retry_timeout,
+            )
+            self._log_probe(
+                name,
+                "warm_timeout_retry",
+                retry,
+                attempt="2",
+                action="keep_session" if retry.ok else "discard_session",
+            )
+            if retry.ok:
+                self._pool.release(name, provider, session)
+                self._update(name, latencyMs=int(retry.elapsed * 1000))
+                return True, "ok", ""
+            self._pool.discard(session)
+            return False, retry.kind, f"{outcome.detail}; timeout_retry={retry.detail}"
+
+        if outcome.kind in {"busy", "auth"}:
+            # HTTP 429/5xx and authentication failures are complete upstream
+            # decisions, not stale sockets.  The failed Session is still
+            # discarded, but the state machine will not fan out busy retries.
             self._pool.discard(session)
             return False, outcome.kind, outcome.detail
 
@@ -3241,6 +3458,13 @@ class KeepAliveManager:
             self._pool.discard(session)
             session = self._pool.fresh(provider)
             retry = self._probe(provider, session)
+            self._log_probe(
+                name,
+                "warm_stale_retry",
+                retry,
+                attempt="2",
+                action="keep_session" if retry.ok else "discard_session",
+            )
             if retry.ok:
                 self._pool.release(name, provider, session)
                 with self._lock:
@@ -3256,6 +3480,13 @@ class KeepAliveManager:
         # 协议层失败：socket 本身没问题，是上游的回答不对。同一条连接立刻重试一次,
         # 再失败才判 LOST（即状态图里的"连续 2 次失败"）。
         retry = self._probe(provider, session)
+        self._log_probe(
+            name,
+            "warm_protocol_retry",
+            retry,
+            attempt="2",
+            action="keep_session" if retry.ok else "discard_session",
+        )
         if retry.ok:
             self._pool.release(name, provider, session)
             self._update(name, latencyMs=int(retry.elapsed * 1000))
@@ -3275,6 +3506,8 @@ class KeepAliveManager:
         state = KEEPALIVE_STATE_COLD
         first_acquire = True
         attempts = 0
+        reacquire_scale_step = 0
+        reacquire_transport_failure = True
 
         if startup_delay and not self._sleep(startup_delay):
             self._update(name, state=KEEPALIVE_STATE_STOPPED, note="stopped before first probe")
@@ -3300,20 +3533,71 @@ class KeepAliveManager:
                 self._log("%s keepalive lost (%s): %s", name, kind, detail, always=True)
                 state = KEEPALIVE_STATE_LOST
                 attempts = 0
+                reacquire_scale_step = 0
+                reacquire_transport_failure = (
+                    kind in {"stale", "timeout"}
+                    or keepalive_detail_allows_concurrency_scale(detail)
+                )
                 continue
 
             attempts += 1
-            concurrency = cold_concurrency if (state == KEEPALIVE_STATE_COLD and first_acquire) else 1
+            if state == KEEPALIVE_STATE_COLD and first_acquire:
+                concurrency = cold_concurrency
+            elif state == KEEPALIVE_STATE_LOST and reacquire_transport_failure:
+                concurrency = keepalive_reacquire_concurrency(reacquire_scale_step)
+            else:
+                # Upstream HTTP 429/5xx capacity decisions stay single-flight.
+                concurrency = 1
+            acquire_phase = (
+                "initial_acquire"
+                if state == KEEPALIVE_STATE_COLD and first_acquire
+                else "reacquire"
+            )
             self._update(name, state=state, attempts=attempts, note=f"acquiring (concurrency={concurrency})", nextProbeAt=None)
+            self._update(
+                name,
+                reacquireAttempt=attempts if state == KEEPALIVE_STATE_LOST else 0,
+                reacquireConcurrency=concurrency if state == KEEPALIVE_STATE_LOST else 0,
+            )
+            self._log(
+                "%s phase=%s attempt=%d concurrency=%d retry_interval=%.0fs",
+                name,
+                acquire_phase,
+                attempts,
+                concurrency,
+                retry_interval,
+                always=True,
+            )
             ok, detail = self._acquire(name, provider, concurrency)
             if ok:
                 first_acquire = False
                 attempts = 0
+                reacquire_scale_step = 0
                 state = KEEPALIVE_STATE_WARM
                 self._note_ok(name, KEEPALIVE_STATE_WARM, f"acquired with concurrency={concurrency}")
-                self._log("%s acquired upstream connection (concurrency=%d)", name, concurrency, always=True)
+                self._log(
+                    "%s acquired upstream connection (concurrency=%d, phase=%s)",
+                    name,
+                    concurrency,
+                    "initial" if acquire_phase == "initial_acquire" else "reacquire",
+                    always=True,
+                )
                 continue
             self._note_fail(name, detail, "acquire")
+            if state == KEEPALIVE_STATE_LOST:
+                reacquire_transport_failure = keepalive_detail_allows_concurrency_scale(detail)
+                if reacquire_transport_failure:
+                    reacquire_scale_step = min(
+                        reacquire_scale_step + 1,
+                        len(KEEPALIVE_REACQUIRE_CONCURRENCIES) - 1,
+                    )
+                else:
+                    # A capacity/auth/protocol decision is not evidence that
+                    # widening the transport race will help.  Start the next
+                    # transport-recovery sequence from the single-flight
+                    # entry again instead of carrying a previous 5/10-way
+                    # scale step across unrelated failures.
+                    reacquire_scale_step = 0
             if max_attempts and attempts >= max_attempts:
                 self._update(name, state=KEEPALIVE_STATE_FAILED, note=f"gave up after {attempts} attempts")
                 self._log("%s giving up after %d attempts: %s", name, attempts, detail, always=True)
