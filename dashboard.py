@@ -2088,13 +2088,16 @@ def merged_aiproxy_service_items() -> list[dict[str, Any]]:
         elif str(item.get("service") or "") == AIPROXY_KEEPALIVE_SERVICE:
             configured_keepalive = item
     discovered_main = named_aiproxy_service_item(AIPROXY_SINGLE_SERVICE)
-    main = default_aiproxy_item({**(discovered_main or {}), **(configured_main or {})})
+    # The installed unit is the source of truth for runtime fields.  Persisted
+    # dashboard metadata can outlive a config-path migration and must not hide
+    # the command line that the running service actually uses.
+    main = default_aiproxy_item({**(configured_main or {}), **(discovered_main or {})})
     discovered_keepalive = named_aiproxy_service_item(AIPROXY_KEEPALIVE_SERVICE)
     keepalive = keepalive_aiproxy_item(
         main,
         {
-            **(discovered_keepalive or {}),
             **(configured_keepalive or {}),
+            **(discovered_keepalive or {}),
         },
     )
     return [main, keepalive]
