@@ -1067,9 +1067,19 @@
       const parts = ['配置检查通过'];
       if (manual.matched) parts.push(`手动进程 ${manual.matched} 个，已启动 ${(manual.started || []).length} 个`);
       if (services.matched) {
-        const restarted = (services.items || []).filter(item => item.restarted).length;
-        const inactive = (services.items || []).filter(item => item.skipped === 'inactive').length;
-        parts.push(`systemd 服务 ${services.matched} 个，重启 ${restarted} 个${inactive ? `，未运行 ${inactive} 个` : ''}`);
+        const serviceItems = services.items || [];
+        const started = serviceItems.filter(item => item.action === 'start' || item.started).length;
+        const stopped = serviceItems.filter(item => item.action === 'stop' || (item.stopped && item.skipped !== 'inactive')).length;
+        const restarted = serviceItems.filter(item => item.action === 'restart' || (
+          !item.action && item.restarted && !item.started && !item.stopped
+        )).length;
+        const inactive = serviceItems.filter(item => item.skipped === 'inactive').length;
+        const actions = [];
+        if (started) actions.push(`启动 ${started} 个`);
+        if (restarted) actions.push(`重启 ${restarted} 个`);
+        if (stopped) actions.push(`关闭 ${stopped} 个`);
+        if (inactive) actions.push(`未运行 ${inactive} 个`);
+        parts.push(`systemd 服务 ${services.matched} 个${actions.length ? '，' + actions.join('，') : ''}`);
       }
       if (restart.runtimeSync?.ok) {
         const count = (restart.runtimeSync.expectedProviders || []).length;
@@ -1465,6 +1475,18 @@
       return 'warn';
     }
 
+    function aiproxyActiveLabel(item) {
+      const active = String(item?.active || 'unknown').trim() || 'unknown';
+      if (active === 'inactive') return 'inactive 已关闭';
+      return active;
+    }
+
+    function aiproxyActiveKind(item) {
+      const active = String(item?.active || '').trim();
+      if (active === 'inactive') return 'muted';
+      return item?.activeOk ? 'ok' : 'fail';
+    }
+
     function renderAiproxy() {
       const containers = ['aiproxyRows', 'aiproxyPageRows'].map(id => $(id)).filter(Boolean);
       if (!containers.length) return;
@@ -1479,9 +1501,13 @@
         const id = item.id || '';
         const name = item.name || item.service || id;
         const latency = Number.isFinite(Number(item.httpLatencyMs)) ? ` · ${Number(item.httpLatencyMs)}ms` : '';
-        const httpText = item.httpAlive ? `HTTP 响应${latency}` : (item.httpTransient ? `探测重试中${latency}` : (item.httpDetail || 'HTTP 未通'));
-        const httpKind = item.httpAlive ? '' : (item.httpTransient ? 'warn' : 'fail');
-        const activeText = item.active || 'unknown';
+        const serviceClosed = String(item.active || '') === 'inactive';
+        const httpText = serviceClosed
+          ? 'HTTP 已关闭'
+          : (item.httpAlive ? `HTTP 响应${latency}` : (item.httpTransient ? `探测重试中${latency}` : (item.httpDetail || 'HTTP 未通')));
+        const httpKind = serviceClosed ? 'muted' : (item.httpAlive ? '' : (item.httpTransient ? 'warn' : 'fail'));
+        const httpTitle = serviceClosed ? httpText : (item.httpDetail || httpText);
+        const activeText = aiproxyActiveLabel(item);
         const url = item.url || '';
         return `<article class="service-card">
           <div class="service-title">
@@ -1489,8 +1515,8 @@
             ${statusPill(null, aiproxyHealthLabel(item), aiproxyHealthKind(item))}
           </div>
           <div class="service-health">
-            ${statusPill(!!item.activeOk, activeText)}
-            <span title="${esc(item.httpDetail || httpText)}">${statusPill(item.httpAlive ? true : false, httpText, httpKind)}</span>
+            ${statusPill(!!item.activeOk, activeText, aiproxyActiveKind(item))}
+            <span title="${esc(httpTitle)}">${statusPill(item.httpAlive ? true : false, httpText, httpKind)}</span>
           </div>
           <div class="service-meta">
             <div title="${esc(item.service || '')}">服务：${esc(item.service || '-')}</div>

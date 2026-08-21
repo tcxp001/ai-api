@@ -1751,7 +1751,19 @@ def aiproxy_status(item: dict[str, Any]) -> dict[str, Any]:
     enabled_code, enabled = run_systemctl(["is-enabled", name])
     unit_path = str(item.get("unitPath") or (SYSTEMD_DIR / name))
     status = {**item, "id": service_id, "service": name, "unitPath": unit_path, "active": active.strip(), "enabledState": enabled.strip(), "activeOk": active_code == 0, "enabledOk": enabled_code == 0}
-    status.update(aiproxy_http_status(status))
+    if status["activeOk"]:
+        status.update(aiproxy_http_status(status))
+    else:
+        status.update({
+            "url": aiproxy_probe_url(status),
+            "httpAlive": False,
+            "httpStatus": "",
+            "httpLatencyMs": None,
+            "httpDetail": "",
+            "httpCheckedAt": "",
+            "httpTransient": False,
+            "httpFailureCount": 0,
+        })
     if status["activeOk"] and status.get("httpAlive"):
         status["health"] = "healthy"
     elif not status["activeOk"]:
@@ -2709,17 +2721,30 @@ def restart_aiproxy_service_item(
     try:
         active_code, active = run_systemctl(["is-active", name])
         entry["active"] = active.strip()
-        if active_code != 0:
+        start_inactive_keepalive = (
+            start
+            and active_code != 0
+            and name == AIPROXY_KEEPALIVE_SERVICE
+        )
+        if active_code != 0 and not start_inactive_keepalive:
             entry["restarted"] = False
             entry["skipped"] = "inactive"
+            if not start:
+                # 停止一个已经 inactive 的通道是幂等成功；保留状态供页面展示。
+                entry["stopped"] = True
         else:
-            action = "restart" if start else "stop"
+            # 启用第一个 Keepalive provider 时，专用通道通常因之前关闭而处于
+            # inactive；此时不能跳过，必须显式启动。运行中的通道仍正常重启。
+            action = "start" if start_inactive_keepalive else ("restart" if start else "stop")
             code, output = run_systemctl([action, name])
             entry.update(aiproxy_status(item))
             entry["returnCode"] = code
             entry["output"] = output
+            entry["action"] = action
             entry["restarted"] = code == 0
-            if not start:
+            if action == "start":
+                entry["started"] = code == 0
+            elif action == "stop":
                 entry["stopped"] = code == 0
     except Exception as exc:
         entry["restarted"] = False
