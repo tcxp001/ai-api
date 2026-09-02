@@ -236,6 +236,11 @@ def normalize_auth_mode(value: Any, api_mode: str, custom_endpoint: str = "") ->
 
 
 DEFAULT_POOL_MAXSIZE = 20
+# A provider may close an idle keep-alive socket without the proxy noticing until
+# that socket is borrowed again. Reap only Sessions that are already idle in the
+# outer pool so stale sockets do not remain there indefinitely.
+DEFAULT_SESSION_IDLE_TTL = 300.0
+DEFAULT_SESSION_REAP_INTERVAL = 60.0
 DEFAULT_CONNECT_TIMEOUT = 30
 # Some client stream stale detectors kill local requests after ~120s without
 # stream bytes. Keep the proxy read timeout slightly lower so the proxy closes
@@ -2646,16 +2651,39 @@ def chat_payload_to_responses(
 class ProviderSessionPool:
     """Small per-provider Session pool so keep-alive survives across requests."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        idle_ttl: float = DEFAULT_SESSION_IDLE_TTL,
+        reap_interval: float = DEFAULT_SESSION_REAP_INTERVAL,
+    ) -> None:
         self._lock = threading.Lock()
+        self._idle_lock = threading.Lock()
         self._pools: dict[str, queue.LifoQueue[requests.Session]] = {}
+        self._idle_since: dict[int, float] = {}
+        self._idle_ttl = max(float(idle_ttl), 0.0)
+        self._reap_interval = max(float(reap_interval), 0.1)
+        self._reaper_stop = threading.Event()
+        self._reaper_thread = threading.Thread(
+            target=self._reaper_loop,
+            name="provider-session-reaper",
+            daemon=True,
+        )
+        self._reaper_thread.start()
+
+    def _queue_for_locked(
+        self,
+        provider_name: str,
+        provider: dict[str, Any],
+    ) -> queue.LifoQueue[requests.Session]:
+        if provider_name not in self._pools:
+            maxsize = int(provider.get("pool_maxsize") or DEFAULT_POOL_MAXSIZE)
+            self._pools[provider_name] = queue.LifoQueue(maxsize=maxsize)
+        return self._pools[provider_name]
 
     def _queue_for(self, provider_name: str, provider: dict[str, Any]) -> queue.LifoQueue[requests.Session]:
         with self._lock:
-            if provider_name not in self._pools:
-                maxsize = int(provider.get("pool_maxsize") or DEFAULT_POOL_MAXSIZE)
-                self._pools[provider_name] = queue.LifoQueue(maxsize=maxsize)
-            return self._pools[provider_name]
+            return self._queue_for_locked(provider_name, provider)
 
     def _new_session(self, provider: dict[str, Any]) -> requests.Session:
         maxsize = int(provider.get("pool_maxsize") or DEFAULT_POOL_MAXSIZE)
@@ -2668,20 +2696,37 @@ class ProviderSessionPool:
         return session
 
     def borrow(self, provider_name: str, provider: dict[str, Any]) -> requests.Session:
-        pool = self._queue_for(provider_name, provider)
-        try:
-            return pool.get_nowait()
-        except queue.Empty:
+        with self._lock:
+            pool = self._queue_for_locked(provider_name, provider)
+            try:
+                session = pool.get_nowait()
+            except queue.Empty:
+                session = None
+            if session is not None:
+                with self._idle_lock:
+                    self._idle_since.pop(id(session), None)
+        if session is None:
             return self._new_session(provider)
+        return session
 
     def release(self, provider_name: str, provider: dict[str, Any], session: requests.Session) -> None:
-        pool = self._queue_for(provider_name, provider)
-        try:
-            pool.put_nowait(session)
-        except queue.Full:
+        should_close = False
+        with self._lock:
+            pool = self._queue_for_locked(provider_name, provider)
+            with self._idle_lock:
+                self._idle_since[id(session)] = time.monotonic()
+            try:
+                pool.put_nowait(session)
+            except queue.Full:
+                with self._idle_lock:
+                    self._idle_since.pop(id(session), None)
+                should_close = True
+        if should_close:
             session.close()
 
     def discard(self, session: requests.Session) -> None:
+        with self._idle_lock:
+            self._idle_since.pop(id(session), None)
         try:
             session.close()
         except Exception:
@@ -2690,10 +2735,55 @@ class ProviderSessionPool:
     def fresh(self, provider: dict[str, Any]) -> requests.Session:
         return self._new_session(provider)
 
+    def _reaper_loop(self) -> None:
+        while not self._reaper_stop.wait(self._reap_interval):
+            self._reap_idle_sessions()
+
+    def _reap_idle_sessions(self, now: float | None = None) -> int:
+        """Close only Sessions that have been idle in the outer pool past the TTL."""
+        now = time.monotonic() if now is None else float(now)
+        expired: list[requests.Session] = []
+        with self._lock:
+            for pool in self._pools.values():
+                retained: list[requests.Session] = []
+                while True:
+                    try:
+                        session = pool.get_nowait()
+                    except queue.Empty:
+                        break
+                    with self._idle_lock:
+                        idle_since = self._idle_since.get(id(session))
+                    # Sessions inserted by older code/tests without a timestamp are
+                    # treated as newly idle rather than closed unexpectedly.
+                    if idle_since is None:
+                        idle_since = now
+                        with self._idle_lock:
+                            self._idle_since[id(session)] = idle_since
+                    if now - idle_since >= self._idle_ttl:
+                        with self._idle_lock:
+                            self._idle_since.pop(id(session), None)
+                        expired.append(session)
+                    else:
+                        retained.append(session)
+                for session in retained:
+                    pool.put_nowait(session)
+
+        for session in expired:
+            try:
+                session.close()
+            except Exception:
+                pass
+        return len(expired)
+
     def close_all(self) -> None:
+        self._reaper_stop.set()
+        if threading.current_thread() is not self._reaper_thread:
+            self._reaper_thread.join(timeout=max(self._reap_interval + 1.0, 1.0))
         with self._lock:
             pools = list(self._pools.values())
             self._pools.clear()
+        with self._idle_lock:
+            self._idle_since.clear()
         for pool in pools:
             while True:
                 try:
