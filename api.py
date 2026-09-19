@@ -12,6 +12,7 @@ import unicodedata
 
 import requests
 import yaml
+from secret_utils import provider_secrets, redact_text
 
 try:
     from prompts import next_prompt as next_probe_prompt
@@ -106,7 +107,8 @@ def load_config():
         print(f"配置文件根节点必须是 provider 列表，实际是: {type(cfg).__name__}")
         return []
     except Exception as e:
-        print(f"读取 YAML 配置文件失败: {e}")
+        # Parser messages can include entire config lines with credentials.
+        print(f"读取 YAML 配置文件失败: {type(e).__name__}")
         return []
 
 
@@ -283,31 +285,39 @@ def build_payload(model, endpoint, variant="basic"):
     }
 
 
-SENSITIVE_VALUE_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
-    re.compile(r"\b(?:ak|pk|rk)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{12,}"),
-    re.compile(r"(?i)((?:api[_-]?key|x-api-key|authorization|token)[\s:=\"]+)[^\s,;\"'}]{8,}"),
-]
+def redact_sensitive(value, limit=None, secrets=()):
+    return redact_text(value, secrets, limit)
 
 
-def redact_sensitive(value, limit=None):
-    text = "" if value is None else str(value)
-    for pattern in SENSITIVE_VALUE_PATTERNS:
-        text = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "<redacted>", text)
-    if limit is not None and len(text) > limit:
-        text = text[:limit]
-    return text
+def probe_request_secrets(base_url, api_key, endpoint, user_agent, provider_headers=None):
+    secrets = provider_secrets({
+        "api_key": api_key,
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "headers": provider_headers,
+    })
+    ua_headers = user_agent if isinstance(user_agent, dict) else {"User-Agent": user_agent}
+    return secrets + provider_secrets({"headers": ua_headers})
 
 
-def response_text(response):
+def probe_task_secrets(args, kwargs):
+    def argument(name, index, default=None):
+        return kwargs.get(name, args[index] if len(args) > index else default)
+    return probe_request_secrets(
+        argument("base_url", 0), argument("api_key", 1),
+        argument("endpoint", 3), argument("user_agent", 4),
+        argument("provider_headers", 6),
+    )
+
+
+def response_text(response, secrets=()):
     text = getattr(response, "text", "") or ""
-    return redact_sensitive(" ".join(text.split()))
+    return " ".join(redact_text(text, secrets).split())
 
 
-def validate_success_response(response, endpoint):
+def validate_success_response(response, endpoint, secrets=()):
     content_type = str(response.headers.get("content-type") or "").lower()
-    body = response_text(response)
+    body = response_text(response, secrets)
     lower_body = body.lower()
     if "text/html" in content_type or lower_body.startswith("<!doctype html") or lower_body.startswith("<html"):
         return False, "返回HTML"
@@ -336,8 +346,8 @@ def validate_success_response(response, endpoint):
     return True, ""
 
 
-def format_http_error(status_code, response):
-    body = response_text(response)
+def format_http_error(status_code, response, secrets=()):
+    body = response_text(response, secrets)
     lower_body = body.lower()
 
     if "insufficient_user_quota" in lower_body or "用户额度不足" in body:
@@ -374,6 +384,7 @@ def request_total_timeout_for(endpoint, variant="basic"):
 
 
 def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY, auth_mode="bearer", anthropic_version="2023-06-01"):
+    secrets = probe_request_secrets(base_url, api_key, endpoint, user_agent, provider_headers)
     url = base_url.rstrip("/") + endpoint
     request_timeout = request_timeout_for(endpoint, variant)
     start_time = time.time()
@@ -389,11 +400,11 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
             )
         elapsed_time = time.time() - start_time
         if response.status_code == 200:
-            ok, reason = validate_success_response(response, endpoint)
+            ok, reason = validate_success_response(response, endpoint, secrets)
             if ok:
                 return "✅ 成功", f"耗时 {elapsed_time:.2f}s"
             return "❌ 失败", reason
-        return "❌ 失败", format_http_error(response.status_code, response)
+        return "❌ 失败", format_http_error(response.status_code, response, secrets)
     except requests.exceptions.ConnectTimeout:
         return "❌ 失败", f"连接超时(>{CONNECT_TIMEOUT}s)"
     except requests.exceptions.ReadTimeout:
@@ -403,10 +414,11 @@ def _check_endpoint_direct(base_url, api_key, model, endpoint, user_agent, varia
         _, read_timeout = request_timeout_for(endpoint, variant)
         return "❌ 失败", f"请求超时(connect>{CONNECT_TIMEOUT}s/read>{read_timeout}s)"
     except Exception as e:
-        return "❌ 失败", f"{type(e).__name__}: {str(e)[:100]}"
+        return "❌ 失败", redact_text(f"{type(e).__name__}: {e}", secrets, limit=100)
 
 
 def check_endpoint(base_url, api_key, model, endpoint, user_agent, variant="basic", provider_headers=None, remove_headers=None, trust_env_proxy=DEFAULT_TRUST_ENV_PROXY, auth_mode="bearer", anthropic_version="2023-06-01"):
+    secrets = probe_request_secrets(base_url, api_key, endpoint, user_agent, provider_headers)
     total_timeout = request_total_timeout_for(endpoint, variant)
     payload = {
         "args": [base_url, api_key, model, endpoint, user_agent],
@@ -430,15 +442,15 @@ def check_endpoint(base_url, api_key, model, endpoint, user_agent, variant="basi
     except subprocess.TimeoutExpired:
         return "❌ 失败", f"总超时(>{total_timeout}s)"
     except Exception as e:
-        return "❌ 失败", f"{type(e).__name__}: {str(e)[:100]}"
+        return "❌ 失败", redact_text(f"{type(e).__name__}: {e}", secrets, limit=100)
 
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "子进程异常").strip().splitlines()[-1:]
+        detail = redact_text(completed.stderr or completed.stdout or "子进程异常", secrets).strip().splitlines()[-1:]
         return "❌ 失败", detail[0][:100] if detail else "子进程异常"
     try:
         result = json.loads(completed.stdout)
         if isinstance(result, list) and len(result) == 2:
-            return result[0], result[1]
+            return redact_text(result[0], secrets), redact_text(result[1], secrets)
     except Exception as e:
         return "❌ 失败", f"结果解析失败: {type(e).__name__}"
     return "❌ 失败", "结果格式异常"
@@ -566,18 +578,18 @@ def run_limited_checks(tasks, max_workers=None, progress_label=None, provider_he
     progress_lines = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
         future_to_key = {
-            executor.submit(check_endpoint_compact, *args, **kwargs): key
+            executor.submit(check_endpoint_compact, *args, **kwargs): (key, probe_task_secrets(args, kwargs))
             for key, args, kwargs in tasks
         }
         for future in concurrent.futures.as_completed(future_to_key):
-            key = future_to_key[future]
+            key, secrets = future_to_key[future]
             try:
                 results[key] = future.result()
             except Exception as e:
-                detail = f"{type(e).__name__}: {str(e)[:100]}"
+                detail = redact_text(f"{type(e).__name__}: {e}", secrets, limit=100)
                 results[key] = ("❌ 失败", detail, compact_result("❌ 失败", detail, include_latency=True))
             if progress_label:
-                progress_lines.append(f"⏱️  {progress_label} {format_task_key(key, provider_headers)} -> {results[key][2]}")
+                progress_lines.append(redact_text(f"⏱️  {progress_label} {format_task_key(key, provider_headers)} -> {results[key][2]}", secrets))
     return (results, progress_lines) if progress_label else results
 
 
@@ -690,7 +702,7 @@ def test_single_provider(provider):
 
     with print_lock:
         for line in output_lines:
-            print(line)
+            print(redact_text(line, provider_secrets(provider)))
 
 
 def test_provider_ua_matrix(provider):
@@ -809,11 +821,12 @@ def stream_concurrently(providers, worker):
             try:
                 output_lines, progress_lines = future.result()
             except Exception as e:
-                detail = f"{type(e).__name__}: {str(e)[:100]}"
+                detail = redact_text(f"{type(e).__name__}: {e}", provider_secrets(providers[index]), limit=100)
                 name = provider_name(providers[index])
-                output_lines = [matrix_table_row(name, "-", "-", compact_result("❌ 失败", detail), "-", "-", "-", "-")]
+                output_lines = [matrix_table_row(name, "-", "-", compact_result("❌ 失败", detail), "-", "-", "-", "-", "-")]
                 progress_lines = []
-            yield index, output_lines, progress_lines
+            secrets = provider_secrets(providers[index])
+            yield index, [redact_text(line, secrets) for line in output_lines], [redact_text(line, secrets) for line in progress_lines]
 
 
 def run_single_mode(providers, skipped_providers=None):

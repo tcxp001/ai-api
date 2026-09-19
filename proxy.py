@@ -17,8 +17,10 @@ sys.dont_write_bytecode = True
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
+import os
 import queue
 import re
 import signal
@@ -26,6 +28,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import zlib
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +38,7 @@ from urllib.parse import urlsplit
 import requests
 from requests.adapters import HTTPAdapter
 import yaml
+from secret_utils import provider_secrets, redact_text, redact_url
 
 try:
     from prompts import next_prompt as next_keepalive_prompt
@@ -700,9 +704,8 @@ def should_discard_upstream_response(resp: Any) -> bool:
 
 
 def redact_header(name: str, value: str) -> str:
-    if name.lower() in SENSITIVE_HEADERS:
-        return "<redacted>"
-    return value
+    # Only used to display configured headers. Any custom value may be a key.
+    return "<redacted>"
 
 
 def compact_body(text: str, limit: int = 500) -> str:
@@ -710,6 +713,271 @@ def compact_body(text: str, limit: int = 500) -> str:
     if len(text) > limit:
         return text[:limit] + "..."
     return text
+
+
+def config_secrets(config: dict[str, Any]) -> list[str]:
+    return [
+        secret
+        for provider in (config.get("providers") or {}).values()
+        for secret in provider_secrets(provider)
+    ]
+
+
+def redact_error_value(value: Any, secrets=()) -> Any:
+    """Keep error schemas/types intact; never apply this to successful output."""
+    if isinstance(value, str):
+        return redact_text(value, secrets)
+    if isinstance(value, dict):
+        return {key: redact_error_value(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_error_value(item, secrets) for item in value]
+    return value
+
+
+SECURITY_READ_CHUNK = 8192
+SECURITY_ERROR_BODY_LIMIT = 1024 * 1024
+# Inspection window, NOT a maximum successful response/frame size. Unknown
+# oversized content keeps streaming unchanged instead of growing this buffer.
+SECURITY_INSPECTION_WINDOW = 1024 * 1024
+SECURITY_BODY_TOO_LARGE = "upstream error body exceeds inspection limit"
+SECURITY_BODY_UNAVAILABLE = "upstream error body unavailable"
+
+
+class SecurityInspectionLimitError(ValueError):
+    """A diagnostic must be replaced, not truncated with a possible partial key."""
+
+
+def bounded_zlib_chunks(chunks, encoding: str):
+    """Decode gzip/deflate without allocating an unbounded expansion per read."""
+    decoder = None
+    prefix = b""
+    for chunk in chunks:
+        data = chunk
+        if decoder is None:
+            if encoding == "deflate":
+                prefix += data
+                if len(prefix) < 2:
+                    continue
+                # Accept both RFC zlib framing and the raw deflate used by some
+                # gateways, as requests does. Only retain the first input chunk.
+                wrapped = prefix[0] & 15 == 8 and int.from_bytes(prefix[:2], "big") % 31 == 0
+                decoder = zlib.decompressobj(zlib.MAX_WBITS if wrapped else -zlib.MAX_WBITS)
+                data, prefix = prefix, b""
+            else:
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        while data:
+            if decoder.eof:
+                if encoding != "gzip":
+                    raise ValueError("unexpected data after deflate stream")
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            output = decoder.decompress(data, SECURITY_READ_CHUNK)
+            data = decoder.unused_data if decoder.eof else decoder.unconsumed_tail
+            if output:
+                yield output
+    if decoder is None or not decoder.eof:
+        raise ValueError("incomplete compressed upstream response")
+
+
+def decoded_response_chunks(resp: requests.Response, wire_limit: int | None = None):
+    """Use bounded input/output chunks for the stdlib-supported encodings."""
+    encoding = str(resp.headers.get("Content-Encoding") or "").strip().lower()
+    wire_read = 0
+
+    def wire_chunks():
+        nonlocal wire_read
+        for chunk in resp.raw.stream(SECURITY_READ_CHUNK, decode_content=False):
+            wire_read += len(chunk)
+            if wire_limit is not None and wire_read > wire_limit:
+                raise SecurityInspectionLimitError(SECURITY_BODY_TOO_LARGE)
+            yield chunk
+
+    if encoding in {"", "identity"}:
+        yield from wire_chunks()
+    elif encoding in {"gzip", "x-gzip", "deflate"}:
+        yield from bounded_zlib_chunks(wire_chunks(), "gzip" if encoding == "x-gzip" else encoding)
+    else:
+        # An unknown/unbounded decoder must not expose an error body. In
+        # particular older Brotli bindings offer no bounded-output operation.
+        raise ValueError("unsupported bounded content decoder")
+
+
+def read_bounded_error_body(resp: requests.Response) -> bytes:
+    body = bytearray()
+    limit = SECURITY_ERROR_BODY_LIMIT
+    for chunk in decoded_response_chunks(resp, wire_limit=limit):
+        if len(body) + len(chunk) > limit:
+            raise SecurityInspectionLimitError(SECURITY_BODY_TOO_LARGE)
+        body.extend(chunk)
+    return bytes(body)
+
+
+def inspect_native_json(resp: requests.Response, secrets=()):
+    """Inspect ordinary JSON errors without capping or rewriting success bytes.
+
+    Retain the wire prefix as well as bounded decoded content: successful,
+    oversized or uninspectable replies can keep their ORIGINAL compression.
+    """
+    raw_chunks = iter(resp.raw.stream(SECURITY_READ_CHUNK, decode_content=False))
+    encoding = str(resp.headers.get("Content-Encoding") or "").strip().lower()
+    if encoding not in {"", "identity", "gzip", "x-gzip", "deflate"}:
+        return raw_chunks, False
+    wire = bytearray()
+    decoded = bytearray()
+
+    def source():
+        for chunk in raw_chunks:
+            wire.extend(chunk)
+            if len(wire) > SECURITY_INSPECTION_WINDOW:
+                raise SecurityInspectionLimitError("JSON inspection window exceeded")
+            yield chunk
+
+    chunks = source()
+    if encoding not in {"", "identity"}:
+        chunks = bounded_zlib_chunks(chunks, "gzip" if encoding == "x-gzip" else encoding)
+    try:
+        for chunk in chunks:
+            if len(decoded) + len(chunk) > SECURITY_INSPECTION_WINDOW:
+                raise SecurityInspectionLimitError("JSON inspection window exceeded")
+            decoded.extend(chunk)
+        payload = json.loads(decoded)
+        sanitized = redact_stream_error(payload, secrets=secrets)
+        if sanitized != payload:
+            body = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            return iter((body,)), True
+    except (ValueError, UnicodeError, RecursionError, zlib.error):
+        # The status was successful and no complete, explicit error was found.
+        # Do not turn an inspection limitation into a new response size limit.
+        pass
+    return itertools.chain((bytes(wire),), raw_chunks), False
+
+
+def redact_stream_error(payload: Any, event: str = "", secrets=()) -> Any:
+    if not isinstance(payload, dict):
+        return redact_error_value(payload, secrets) if event in {"error", "response.failed"} else payload
+    result = dict(payload)
+    if payload.get("error") is not None:
+        result["error"] = redact_error_value(payload["error"], secrets)
+    response = payload.get("response")
+    if isinstance(response, dict) and response.get("error") is not None:
+        result["response"] = dict(response, error=redact_error_value(response["error"], secrets))
+    if event in {"error", "response.failed"} or payload.get("type") in {"error", "response.failed"}:
+        # IDs and event metadata retain their existing meaning/order.
+        for key in payload:
+            if key not in {"id", "type", "object", "response", "error", "sequence_number"}:
+                result[key] = redact_error_value(payload[key], secrets)
+    return result
+
+
+def redact_native_sse_frame(frame: bytes, secrets=(), http_error: bool = False) -> bytes:
+    """Only rewrite data fields of explicit error frames; preserve all others."""
+    lines = frame.splitlines(keepends=True)
+    data = []
+    event = ""
+    for line in lines:
+        content = line.rstrip(b"\r\n")
+        if content.startswith(b"event:"):
+            event = content[6:].strip().decode("utf-8", "replace")
+        if content.startswith(b"data:"):
+            part = content[5:]
+            data.append(part[1:] if part.startswith(b" ") else part)
+    if b"\n".join(data).strip() == b"[DONE]":
+        return frame
+    try:
+        payload = json.loads(b"\n".join(data))
+    except (ValueError, UnicodeError):
+        if not http_error and event not in {"error", "response.failed"}:
+            return frame
+        # Malformed/plain-text explicit errors still must not expose a key.
+        return b"".join(
+            b"data: " + redact_text(line[5:].rstrip(b"\r\n").decode("utf-8", "replace"), secrets).encode("utf-8")
+            + line[len(line.rstrip(b"\r\n")):]
+            if line.startswith(b"data:") else line
+            for line in lines
+        )
+    sanitized = redact_error_value(payload, secrets) if http_error else redact_stream_error(payload, event, secrets)
+    if sanitized == payload:
+        return frame
+    encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    output = []
+    written = False
+    for line in lines:
+        if line.startswith(b"data:"):
+            if not written:
+                ending = line[len(line.rstrip(b"\r\n")):]
+                output.append(b"data: " + encoded + ending)
+                written = True
+        else:
+            output.append(line)
+    return b"".join(output)
+
+
+def redact_native_sse_chunks(chunks, secrets=(), http_error: bool = False):
+    """Bound inspection memory while preserving arbitrarily large normal frames.
+
+    An oversized frame already declared as event:error/response.failed is
+    replaced, not truncated. Other oversized frames pass through uninspected.
+    """
+    frame = bytearray()
+    line_has_content = False
+    pending_cr = False
+    blank_line = False
+    bypass = False
+    suppress = False
+
+    def finish_frame():
+        nonlocal bypass, suppress
+        if suppress:
+            result = b""
+        elif bypass:
+            result = bytes(frame)
+        else:
+            result = redact_native_sse_frame(bytes(frame), secrets, http_error)
+        frame.clear()
+        bypass = suppress = False
+        return result
+
+    for chunk in chunks:
+        for byte in chunk:
+            if pending_cr:
+                pending_cr = False
+                if byte == 10:
+                    if not suppress:
+                        frame.append(byte)
+                    if blank_line:
+                        yield finish_frame()
+                    continue
+                if blank_line:
+                    yield finish_frame()
+            if not suppress:
+                frame.append(byte)
+            if byte == 13:
+                blank_line = not line_has_content
+                line_has_content = False
+                pending_cr = True
+            elif byte == 10:
+                if not line_has_content:
+                    yield finish_frame()
+                line_has_content = False
+            else:
+                line_has_content = True
+            if not bypass and not suppress and len(frame) > SECURITY_INSPECTION_WINDOW:
+                events = re.findall(rb"(?:^|[\r\n])event: *([^\r\n]*)[\r\n]", frame)
+                event = events[-1].strip() if events else b""
+                if http_error or event in {b"error", b"response.failed"}:
+                    # Do not emit any prefix that could contain half a key.
+                    name = event if event in {b"error", b"response.failed"} else b"error"
+                    yield (b"event: " + name + b'\ndata: {"error":{"message":"'
+                           + SECURITY_BODY_TOO_LARGE.encode("ascii") + b'"}}\n\n')
+                    suppress = True
+                else:
+                    yield bytes(frame)
+                    bypass = True
+                frame.clear()
+        if bypass and frame:
+            yield bytes(frame)
+            frame.clear()
+    if frame:
+        yield finish_frame()
 
 
 def build_models_payload(provider_name: str, provider: dict[str, Any]) -> dict[str, Any]:
@@ -2221,7 +2489,7 @@ def strip_html_error_text(text: str) -> str:
     if "<" not in text or ">" not in text:
         return text
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"(?s)<(?!redacted>)[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -2278,7 +2546,7 @@ def extract_error_from_sse_text(text: str) -> dict[str, Any] | None:
         except Exception:
             continue
         extracted = extract_stream_error_object_from_chunk(parsed)
-        if extracted.get("message") or extracted.get("type") or extracted.get("code") is not None:
+        if extracted and (extracted.get("message") or extracted.get("type") or extracted.get("code") is not None):
             return extracted
     return None
 
@@ -2293,8 +2561,8 @@ def extract_stream_error_object_from_chunk(chunk: Any) -> dict[str, Any] | None:
     return None
 
 
-def stream_error_to_openai_error(error_payload: Any, upstream_route_path: str = "") -> dict[str, Any]:
-    extracted = extract_error_object_from_payload(error_payload)
+def stream_error_to_openai_error(error_payload: Any, upstream_route_path: str = "", secrets=()) -> dict[str, Any]:
+    extracted = redact_error_value(extract_error_object_from_payload(error_payload), secrets)
     message = str(extracted.get("message") or "").strip()
     if not message:
         message = "stream error"
@@ -2325,16 +2593,17 @@ def empty_stream_to_openai_error(upstream_route_path: str = "") -> dict[str, Any
     }
 
 
-def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "") -> dict[str, Any]:
+def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "", secrets=()) -> dict[str, Any]:
     status = int(getattr(resp, "status_code", 0) or 0)
-    raw_text = ""
     try:
-        raw_text = resp.text
+        raw = read_bounded_error_body(resp)
+        raw_text = raw.decode(getattr(resp, "encoding", None) or "utf-8", errors="replace")
+    except SecurityInspectionLimitError:
+        raw = b""
+        raw_text = SECURITY_BODY_TOO_LARGE
     except Exception:
-        try:
-            raw_text = resp.content.decode("utf-8", errors="replace")
-        except Exception:
-            raw_text = ""
+        raw = b""
+        raw_text = SECURITY_BODY_UNAVAILABLE
 
     extracted: dict[str, Any] | None = None
     content_type = str(resp.headers.get("Content-Type") or "").lower()
@@ -2343,13 +2612,14 @@ def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path:
 
     if extracted is None:
         try:
-            extracted = extract_error_object_from_payload(resp.json())
+            extracted = extract_error_object_from_payload(json.loads(raw))
         except Exception:
             extracted = extract_error_object_from_payload(strip_html_error_text(raw_text))
 
+    extracted = redact_error_value(extracted, secrets)
     message = str((extracted or {}).get("message") or "").strip()
     if not message:
-        message = str(getattr(resp, "reason", "") or "").strip() or f"HTTP {status}"
+        message = redact_text(getattr(resp, "reason", ""), secrets).strip() or f"HTTP {status}"
     message = compact_body(strip_html_error_text(message), limit=2000)
     source = upstream_route_path or "upstream"
     if not message.lower().startswith("upstream "):
@@ -2977,18 +3247,9 @@ KEEPALIVE_CLAUDE_HEADERS = {
     "User-Agent": "claude-code/2.1.153 (linux; x64; node/v24.16.0)",
 }
 
-KEEPALIVE_SECRET_PATTERNS = (
-    re.compile(r"\b(?:sk|ak|pk|rk)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{12,}"),
-)
-
-
-def keepalive_redact(text: Any, limit: int = 200) -> str:
-    """探活失败详情会进日志和 /_keepalive，先把可能的密钥抹掉。"""
-    value = " ".join(str("" if text is None else text).split())
-    for pattern in KEEPALIVE_SECRET_PATTERNS:
-        value = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "<redacted>", value)
-    return value[:limit]
+def keepalive_redact(text: Any, limit: int = 200, secrets=()) -> str:
+    """Redact before whitespace folding/truncation so partial keys cannot leak."""
+    return " ".join(redact_text(text, secrets).split())[:limit]
 
 
 class KeepAliveProbe:
@@ -3189,9 +3450,9 @@ def keepalive_request_headers(
     return headers
 
 
-def _keepalive_body_hint(response: requests.Response) -> str:
+def _keepalive_body_hint(response: requests.Response, secrets=()) -> str:
     try:
-        return keepalive_redact(getattr(response, "text", "") or "")
+        return keepalive_redact(getattr(response, "text", "") or "", secrets=secrets)
     except Exception:
         return ""
 
@@ -3215,18 +3476,18 @@ def _keepalive_incomplete_reason(payload: dict[str, Any]) -> str:
     return str(details.get("reason") or "").strip().lower()
 
 
-def _validate_keepalive_json(response: requests.Response, path: str) -> tuple[bool, str]:
+def _validate_keepalive_json(response: requests.Response, path: str, secrets=()) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/html" in content_type:
         return False, "upstream returned HTML"
     try:
         payload = response.json()
     except Exception:
-        return False, f"non-JSON body {_keepalive_body_hint(response)}".strip()
+        return False, f"non-JSON body {_keepalive_body_hint(response, secrets)}".strip()
     if not isinstance(payload, dict):
         return False, "unexpected JSON shape"
     if payload.get("error"):
-        return False, f"error in 200 body: {keepalive_redact(payload.get('error'))}"
+        return False, f"error in 200 body: {keepalive_redact(payload.get('error'), secrets=secrets)}"
     marker = _keepalive_meta_markers(payload)
     if marker:
         return False, f"upstream throttled ({marker})"
@@ -3260,11 +3521,11 @@ def _validate_keepalive_json(response: requests.Response, path: str) -> tuple[bo
     return False, "chat choice without content"
 
 
-def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
+def _validate_keepalive_stream(response: requests.Response, secrets=()) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/event-stream" not in content_type:
         # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
-        return _validate_keepalive_json(response, "/responses")
+        return _validate_keepalive_json(response, "/responses", secrets)
     saw_event = False
     saw_completed = False
     saw_output_limited = False
@@ -3302,7 +3563,7 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
         if event_type == "response.failed":
             return False, event_type
         if event_type == "error" or event.get("error"):
-            return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'))}"
+            return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'), secrets=secrets)}"
     if saw_completed or saw_output_limited:
         return True, ""
     if saw_event:
@@ -3310,15 +3571,15 @@ def _validate_keepalive_stream(response: requests.Response) -> tuple[bool, str]:
     return False, "empty SSE stream"
 
 
-def validate_keepalive_response(response: requests.Response, path: str) -> tuple[bool, str]:
+def validate_keepalive_response(response: requests.Response, path: str, secrets=()) -> tuple[bool, str]:
     """把 HTTP 响应判成"真实回复"或失败，对应 atry 的 role-aware reply detection。"""
     status = int(getattr(response, "status_code", 0) or 0)
     if status >= 400:
         # 429 / 5xx 立即判失败，不等超时 —— 对应 atry 把 "Retrying in 11s" 当即判失败。
-        return False, f"HTTP {status} {_keepalive_body_hint(response)}".strip()
+        return False, f"HTTP {status} {_keepalive_body_hint(response, secrets)}".strip()
     if path.endswith("/responses"):
-        return _validate_keepalive_stream(response)
-    return _validate_keepalive_json(response, path)
+        return _validate_keepalive_stream(response, secrets)
+    return _validate_keepalive_json(response, path, secrets)
 
 
 def keepalive_response_failure_kind(response: requests.Response) -> str:
@@ -3375,7 +3636,7 @@ class KeepAliveManager:
                     "state": KEEPALIVE_STATE_COLD,
                     "since": time.time(),
                     "note": "starting",
-                    "endpoint": keepalive_target_path(provider),
+                    "endpoint": redact_url(keepalive_target_path(provider), provider_secrets(provider)),
                     "model": keepalive_model_for(provider),
                     "interval": float(provider.get("keepalive_interval") or DEFAULT_KEEPALIVE_INTERVAL),
                     "retryInterval": float(
@@ -3478,7 +3739,7 @@ class KeepAliveManager:
     def _log(self, fmt: str, *args: Any, always: bool = False) -> None:
         if not always and not self._config.get("verbose"):
             return
-        message = fmt % args if args else fmt
+        message = redact_text(fmt % args if args else fmt, config_secrets(self._config))
         sys.stdout.write("keepalive - - [%s] %s\n" % (time.strftime("%d/%b/%Y %H:%M:%S"), message))
         sys.stdout.flush()
 
@@ -3491,7 +3752,7 @@ class KeepAliveManager:
         attempt: str = "",
         action: str = "",
     ) -> None:
-        detail = keepalive_redact(outcome.detail, 240)
+        detail = keepalive_redact(outcome.detail, 240, provider_secrets((self._config.get("providers") or {}).get(name)))
         self._update(
             name,
             lastPhase=phase,
@@ -3594,7 +3855,7 @@ class KeepAliveManager:
                 stream=streaming,
                 allow_redirects=False,
             )
-            ok, detail = validate_keepalive_response(response, path)
+            ok, detail = validate_keepalive_response(response, path, provider_secrets(provider))
             return KeepAliveProbe(
                 ok,
                 "ok" if ok else keepalive_response_failure_kind(response),
@@ -3616,7 +3877,7 @@ class KeepAliveManager:
             return KeepAliveProbe(
                 False,
                 kind,
-                f"{type(exc).__name__}: {keepalive_redact(exc)}",
+                f"{type(exc).__name__}: {keepalive_redact(exc, secrets=provider_secrets(provider))}",
                 time.monotonic() - started,
                 session_tag=session_tag,
                 logical_session=str((codex_context or {}).get("session_id") or "")[:8],
@@ -3659,7 +3920,7 @@ class KeepAliveManager:
             try:
                 sessions[index] = self._pool.fresh(provider)
             except Exception as exc:
-                details.append(f"{type(exc).__name__}: {keepalive_redact(exc)}")
+                details.append(f"{type(exc).__name__}: {keepalive_redact(exc, secrets=provider_secrets(provider))}")
 
         def attempt(index: int, session: requests.Session) -> None:
             outcome = KeepAliveProbe(False, "protocol", "probe did not run")
@@ -3671,7 +3932,7 @@ class KeepAliveManager:
                 else:
                     outcome = self._probe(provider, session)
             except Exception as exc:
-                outcome = KeepAliveProbe(False, "protocol", f"{type(exc).__name__}: {keepalive_redact(exc)}")
+                outcome = KeepAliveProbe(False, "protocol", f"{type(exc).__name__}: {keepalive_redact(exc, secrets=provider_secrets(provider))}")
             self._log_probe(
                 name,
                 f"acquire_c{concurrency}",
@@ -3983,7 +4244,7 @@ class KeepAliveManager:
                 return
             entry["failCount"] = int(entry.get("failCount") or 0) + 1
             entry["lastErrorAt"] = time.time()
-            entry["lastError"] = keepalive_redact(detail, 400)
+            entry["lastError"] = keepalive_redact(detail, 400, provider_secrets((self._config.get("providers") or {}).get(name)))
             entry["lastErrorKind"] = str(kind or "protocol")
 
 
@@ -4272,7 +4533,7 @@ class RequestStatsStore:
             int(item.get("cache_read_tokens") or 0),
             int(item.get("cache_creation_tokens") or 0),
             item.get("estimated_cost"),
-            str(item.get("error") or "")[:1000],
+            redact_text(item.get("error"), limit=1000),
             1 if item.get("is_streaming") else 0,
         )
         with self._lock, sqlite3.connect(self.path, timeout=5.0) as conn:
@@ -4294,13 +4555,15 @@ class RequestStatsStore:
 def record_stats_safely(server: Any, handler: Any, item: dict[str, Any]) -> None:
     """Telemetry must never turn a completed proxy response into a failure."""
     try:
+        secrets = getattr(handler, "_request_secrets", ())
+        item = dict(item, error=redact_text(item.get("error"), secrets, limit=1000))
         server.stats.record(item)
     except Exception as exc:  # pragma: no cover - depends on filesystem/SQLite state
         try:
             server.log_error_always(
                 handler,
                 "request stats write failed: %s",
-                f"{type(exc).__name__}: {exc}",
+                redact_text(f"{type(exc).__name__}: {exc}", getattr(handler, "_request_secrets", ())),
             )
         except Exception:
             pass
@@ -4333,17 +4596,24 @@ class HeaderProxyServer(ThreadingHTTPServer):
 
     def log_if_verbose(self, handler: BaseHTTPRequestHandler, fmt: str, *args: Any) -> None:
         if self.config.get("verbose"):
-            handler.log_message(fmt, *args)
+            handler.log_message("%s", redact_text(fmt % args, config_secrets(self.config)))
 
     def log_error_always(self, handler: BaseHTTPRequestHandler, fmt: str, *args: Any) -> None:
-        handler.log_message(fmt, *args)
+        handler.log_message("%s", redact_text(fmt % args, config_secrets(self.config)))
+
+    def handle_error(self, request, client_address) -> None:
+        # socketserver's default traceback may contain secret-bearing exceptions.
+        exc_type = sys.exc_info()[0]
+        sys.stderr.write(f"proxy request handler failed: {exc_type.__name__ if exc_type else 'Exception'}\n")
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
     server: HeaderProxyServer
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stdout.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
+        secrets = config_secrets(self.server.config)
+        message = redact_text(fmt % args, secrets)
+        sys.stdout.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), message))
         sys.stdout.flush()
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
@@ -4370,6 +4640,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _write_sse_event(self, event: str, payload: dict[str, Any]) -> None:
+        payload = redact_stream_error(payload, event, getattr(self, "_request_secrets", ()))
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
         self.wfile.write(b"data: ")
         self.wfile.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -4978,7 +5249,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             stream_error = extract_stream_error_object_from_chunk(chunk)
             if stream_error:
                 response_model = str(chunk.get("model") or response_model) if isinstance(chunk, dict) else response_model
-                error = stream_error_to_openai_error(stream_error, "/chat/completions")
+                error = stream_error_to_openai_error(stream_error, "/chat/completions", getattr(self, "_request_secrets", ()))
                 self._write_responses_failed_stream(error, model=response_model)
                 return
             ensure_started(chunk if isinstance(chunk, dict) else None)
@@ -5404,7 +5675,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             stream_error = extract_stream_error_object_from_chunk(chunk)
             if stream_error:
                 response_model = str(chunk.get("model") or response_model)
-                error = stream_error_to_openai_error(stream_error, "/messages")
+                error = stream_error_to_openai_error(stream_error, "/messages", getattr(self, "_request_secrets", ()))
                 self._write_responses_failed_stream(error, model=response_model)
                 return
 
@@ -5489,11 +5760,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
             send_completed()
 
     def _send_text(self, status: int, text: str) -> None:
+        if status >= 400:
+            text = redact_text(text, getattr(self, "_request_secrets", ()))
         self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
 
     def _send_json(self, status: int, payload: Any) -> None:
+        if status >= 400:
+            payload = redact_error_value(payload, getattr(self, "_request_secrets", ()))
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _send_native_error(self, resp: requests.Response) -> None:
+        """Sanitize native HTTP errors, decoding compression only on this path."""
+        secrets = getattr(self, "_request_secrets", ())
+        content_type = str(resp.headers.get("Content-Type") or "text/plain; charset=utf-8")
+        try:
+            raw = read_bounded_error_body(resp)
+            try:
+                payload = json.loads(raw)
+            except (ValueError, UnicodeError):
+                if "text/event-stream" in content_type.lower():
+                    body = b"".join(redact_native_sse_chunks([raw], secrets, http_error=True))
+                else:
+                    text = raw.decode(getattr(resp, "encoding", None) or "utf-8", errors="replace")
+                    body = redact_text(text, secrets).encode("utf-8")
+                content_type = content_type.split(";", 1)[0] + "; charset=utf-8"
+            else:
+                body = json.dumps(redact_error_value(payload, secrets), ensure_ascii=False).encode("utf-8")
+                content_type = content_type.split(";", 1)[0] + "; charset=utf-8"
+        except SecurityInspectionLimitError:
+            body = (SECURITY_BODY_TOO_LARGE + "\n").encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+        except Exception:
+            body = (SECURITY_BODY_UNAVAILABLE + "\n").encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+        self.close_connection = True
+        self.send_response(resp.status_code)
+        for key, value in resp.headers.items():
+            if key.lower() not in HOP_BY_HOP_HEADERS | {"content-type", "content-encoding"}:
+                self.send_header(key, redact_text(value, secrets))
+        self.send_header("Content-Type", redact_text(content_type, secrets))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+            self.wfile.flush()
 
     def _route(self) -> tuple[str | None, dict[str, Any] | None, str]:
         split = urlsplit(self.path)
@@ -5569,11 +5881,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_with_stats(self) -> None:
         """Run one direct Provider request while collecting downstream telemetry."""
+        self._request_secrets = ()
         context = self._direct_stats_context()
         if context is None:
             self._handle()
             return
         provider_name, provider, _proxied_path = context
+        self._request_secrets = provider_secrets(provider)
         started = time.monotonic()
         status_holder: dict[str, Any] = {
             "status": None,
@@ -5713,9 +6027,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if internal_path == "/_keepalive":
             self._handle_keepalive_status()
             return
+        self._request_secrets = ()
         provider_name, provider, proxied_path = self._route()
         if not provider_name or provider is None:
             return
+        self._request_secrets = provider_secrets(provider)
 
         route_path = proxied_path.split("?", 1)[0].rstrip("/") or "/"
         if self.command in {"GET", "HEAD"} and route_path == "/models":
@@ -5917,7 +6233,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 response_model = str((body_json or {}).get("model") or "")
                 error_source = "/messages" if convert_response_from == "messages" else "/chat/completions"
-                error = upstream_error_to_openai_error(resp, error_source)
+                error = upstream_error_to_openai_error(resp, error_source, self._request_secrets)
                 if isinstance(body_json, dict) and body_json.get("stream"):
                     self._send_responses_error_stream(resp.status_code, error, model=response_model)
                 else:
@@ -5969,10 +6285,41 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 else:
                     self.server.session_pool.release(provider_name, provider, session)
 
+        if resp.status_code >= 400:
+            try:
+                self._send_native_error(resp)
+            finally:
+                resp.close()
+                if should_discard_upstream_response(resp):
+                    self.server.session_pool.discard(session)
+                else:
+                    self.server.session_pool.release(provider_name, provider, session)
+            return
+
+        native_sse = "text/event-stream" in str(resp.headers.get("Content-Type") or "").lower()
+        native_encoding = str(resp.headers.get("Content-Encoding") or "").strip().lower()
+        decode_native_sse = native_sse and native_encoding in {"gzip", "x-gzip", "deflate"}
+        media_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        native_json = media_type == "application/json" or (media_type.startswith("application/") and media_type.endswith("+json"))
+        json_chunks = None
+        rewritten_json = False
+        if native_json and self.command != "HEAD":
+            try:
+                json_chunks, rewritten_json = inspect_native_json(resp, self._request_secrets)
+            except Exception as exc:
+                self.server.log_error_always(self, "upstream JSON read error: %s", repr(exc))
+                resp.close()
+                self.server.session_pool.discard(session)
+                self._send_text(502, "upstream JSON read error\n")
+                return
         self.close_connection = True
         self.send_response(resp.status_code)
         for key, value in resp.headers.items():
-            if key.lower() not in HOP_BY_HOP_HEADERS:
+            if key.lower() not in HOP_BY_HOP_HEADERS and not (
+                (decode_native_sse or rewritten_json) and key.lower() in {"content-encoding", "content-md5", "digest", "etag"}
+            ) and not (rewritten_json and key.lower() == "content-length"):
+                if rewritten_json:
+                    value = (media_type + "; charset=utf-8") if key.lower() == "content-type" else redact_text(value, self._request_secrets)
                 self.send_header(key, value)
         self.send_header("Connection", "close")
         self.end_headers()
@@ -5980,11 +6327,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
         discard_session = should_discard_upstream_response(resp)
         chunks_sent = 0
         try:
-            # 原样转发压缩字节。不要用 iter_content()，它会自动解码 gzip/br，
-            # 但响应头里的 Content-Encoding 仍会保留，客户端会二次解压并误报失败。
+            # Only inspected compressed SSE is decoded; its encoding/integrity
+            # headers were removed above. Other successful bytes remain native.
             resp.raw.decode_content = False
             if self.command != "HEAD":
-                for chunk in resp.raw.stream(8192, decode_content=False):
+                chunks = json_chunks if json_chunks is not None else (
+                    decoded_response_chunks(resp) if decode_native_sse
+                    else resp.raw.stream(SECURITY_READ_CHUNK, decode_content=False)
+                )
+                if native_sse and native_encoding in {"", "identity", "gzip", "x-gzip", "deflate"}:
+                    chunks = redact_native_sse_chunks(chunks, self._request_secrets)
+                for chunk in chunks:
                     if chunk:
                         chunks_sent += 1
                         self.wfile.write(chunk)
@@ -6039,6 +6392,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    # Future process-created stats/log files are private; do not chmod old files.
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description="Multi-provider header injection proxy for OpenAI-compatible APIs")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to YAML/JSON config")
     parser.add_argument("--listen", help="Override listen host")
@@ -6059,7 +6414,12 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg_path = Path(args.config).expanduser().resolve()
-    cfg = load_config(cfg_path)
+    try:
+        cfg = load_config(cfg_path)
+    except Exception as exc:
+        # YAML parser exceptions can contain whole source lines, including keys.
+        print(f"Unable to load proxy config: {type(exc).__name__}", file=sys.stderr)
+        return 1
     cfg["config_fingerprint"] = config_fingerprint(cfg)
     filter_config_providers(cfg, keepalive_only=args.keepalive_only, exclude_keepalive=args.exclude_keepalive)
     if args.listen:
@@ -6110,7 +6470,7 @@ def main() -> int:
                 f"concurrency={provider.get('keepalive_concurrency')}"
             )
         print(
-            f"  /{name}/ -> {provider['base_url']} "
+            f"  /{name}/ -> {redact_url(provider['base_url'], provider_secrets(provider))} "
             f"headers={json.dumps(h, ensure_ascii=False)} remove={sorted(provider['remove_headers'])} "
             f"trust_env_proxy={provider.get('trust_env_proxy', False)} pool_maxsize={provider.get('pool_maxsize', DEFAULT_POOL_MAXSIZE)} "
             f"timeout=({provider.get('connect_timeout', DEFAULT_CONNECT_TIMEOUT)}, {provider.get('read_timeout', DEFAULT_READ_TIMEOUT)})"

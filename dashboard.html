@@ -57,6 +57,12 @@
     h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
     .subtle { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .password-dialog { width: min(460px, calc(100% - 28px)); max-height: calc(100% - 28px); padding: 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); }
+    .password-dialog::backdrop { background: rgba(23,32,38,.35); }
+    .password-dialog form { display: grid; gap: 14px; }
+    .password-dialog .actions { justify-content: flex-end; }
+    #loginPasswordMessage { font-size: 13px; line-height: 1.45; }
+    #loginPasswordMessage:empty { display: none; }
     .tab-link { min-height: 36px; display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text); text-decoration: none; font: inherit; }
     .tab-link:hover { border-color: #aab8b3; background: #fbfcfc; }
     .check-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 13px; font-weight: 650; white-space: nowrap; }
@@ -200,12 +206,45 @@
       <div>
         <h1>Ai-api 公益服管理</h1>
         <div class="subtle" id="serverState">读取中</div>
+        <div class="subtle" id="loginPasswordNotice" role="status" hidden></div>
       </div>
       <div class="actions">
+        <button id="changeLoginPasswordBtn" type="button">修改登录密码</button>
+        <button id="loginPasswordReloadBtn" type="button" hidden>重新登录</button>
         <button id="reloadBtn" type="button">刷新</button>
       </div>
     </div>
   </header>
+
+  <dialog id="loginPasswordDialog" class="password-dialog" aria-labelledby="loginPasswordTitle" aria-describedby="loginPasswordTransport">
+    <form id="loginPasswordForm" method="dialog" novalidate>
+      <h2 id="loginPasswordTitle">修改登录密码</h2>
+      <div class="field">
+        <label for="loginPasswordUsername">用户名（固定，不可修改）</label>
+        <input id="loginPasswordUsername" value="admin" autocomplete="username" readonly>
+      </div>
+      <div class="note" id="loginPasswordTransport">HTTP 不加密传输密码，请使用 HTTPS 或 SSH 隧道保护连接。</div>
+      <div class="field">
+        <label for="loginCurrentPassword">当前密码</label>
+        <input id="loginCurrentPassword" type="password" autocomplete="current-password" required autofocus>
+      </div>
+      <div class="field">
+        <label for="loginNewPassword">新密码</label>
+        <input id="loginNewPassword" type="password" autocomplete="new-password" aria-describedby="loginPasswordRules" required>
+        <div class="subtle" id="loginPasswordRules">请自行设置 5–128 个字符的新密码：至少 5 个字符，建议 12 个字符以上；不允许控制字符或全空白。</div>
+      </div>
+      <div class="field">
+        <label for="loginConfirmPassword">确认新密码</label>
+        <input id="loginConfirmPassword" type="password" autocomplete="new-password" required>
+      </div>
+      <div class="subtle">首次设定或忘记密码时，请在服务器上使用交互式 CLI；此处仅支持修改当前登录密码。</div>
+      <div id="loginPasswordMessage" role="status" aria-live="polite"></div>
+      <div class="actions">
+        <button id="cancelLoginPasswordBtn" type="button">取消</button>
+        <button id="submitLoginPasswordBtn" class="primary" type="submit">更新密码</button>
+      </div>
+    </form>
+  </dialog>
 
   <main class="wrap">
     <nav class="tabs">
@@ -261,11 +300,12 @@
             </div>
           <div class="field provider-edit-spaced"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
-          <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="text"></div>
+          <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="password" autocomplete="new-password" placeholder="填写新 Key；已保存的 Key 不回显"><label><input id="clearProviderApiKey" type="checkbox">清除已保存的 Key</label></div>
           <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="messages">/messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label for="headerPreset">User-Agent</label>
             <select id="headerPreset">
+              <option value="keep">保留已保存请求头</option>
               <option value="default">Default</option>
               <option value="codex">Codex</option>
               <option value="claude_code">Claude Code</option>
@@ -574,7 +614,7 @@
       const item = { ...(provider || {}) };
       delete item.__draft;
       if (Array.isArray(item.remove_headers) && item.remove_headers.length === 0) delete item.remove_headers;
-      if (item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers) && !Object.keys(item.headers).length) delete item.headers;
+      if (!item._secret_ref && item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers) && !Object.keys(item.headers).length) delete item.headers;
       if (item.models && typeof item.models === 'object' && !Array.isArray(item.models) && !Object.keys(item.models).length) delete item.models;
       if (item.auth_mode === 'bearer') delete item.auth_mode;
       if (item.pinned !== true) {
@@ -1141,7 +1181,7 @@
         const displayNo = isPinnedProvider(p) ? '置顶' : String(++regularNo);
         const providerBadges = [
           p.enabled === false ? '<span class="status muted">停用</span>' : '',
-          providerApiKey(p) ? '' : '<span class="status warn">无Key</span>',
+          (providerApiKey(p) || p.has_api_key) ? '' : '<span class="status warn">无Key</span>',
           keepaliveBadge(p)
         ].filter(Boolean).join(' ');
         return `
@@ -1177,6 +1217,7 @@
 
     function providerUaLabel(provider) {
       const headers = provider?.headers || {};
+      if (Object.values(headers).includes('<redacted>')) return '已保存';
             const ua = headerValue(headers, 'User-Agent');
       const originator = String(headerValue(headers, 'Originator') || '').toLowerCase();
       const xApp = String(headerValue(headers, 'x-app') || '').toLowerCase();
@@ -1302,6 +1343,7 @@
 
     function detectHeaderPreset(provider) {
       const headers = provider?.headers || {};
+      if (Object.values(headers).includes('<redacted>')) return 'keep';
       const ua = headerValue(headers, 'User-Agent');
       const originator = String(headerValue(headers, 'Originator') || '').toLowerCase();
       const xApp = String(headerValue(headers, 'x-app') || '').toLowerCase();
@@ -1337,6 +1379,7 @@
     }
 
     function presetToHeaders(preset, customUa = '', provider = null) {
+      if (preset === 'keep') return { headers: { ...(provider?.headers || {}) }, remove_headers: [...(provider?.remove_headers || [])] };
       const config = baseHeaderConfig(provider);
       if (preset === 'empty') return { headers: { ...config.headers, 'User-Agent': '' }, remove_headers: config.remove_headers };
       if (preset === 'curl') return { headers: { ...config.headers, 'User-Agent': 'curl/8.0' }, remove_headers: config.remove_headers };
@@ -1361,6 +1404,8 @@
       $('providerName').value = p?.name || '';
       $('providerBaseUrl').value = providerBaseUrl(p);
       $('providerApiKey').value = providerApiKey(p);
+      $('providerApiKey').placeholder = p?.has_api_key ? '已保存，留空保持不变' : '填写新 API Key';
+      $('clearProviderApiKey').checked = false;
       $('providerMode').value = normalizeEndpointMode(p?.api_mode);
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT);
@@ -1414,6 +1459,12 @@
         remove_headers: headerConfig.remove_headers,
         stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT)
       };
+      if ($('clearProviderApiKey').checked) {
+        item.clear_api_key = true;
+        item.api_key = '';
+      } else {
+        delete item.clear_api_key;
+      }
       if (pinned) item.pinned_at = providerPinnedAtFromEditor();
       else delete item.pinned_at;
       if (endpointMode === 'custom_endpoint') item.custom_endpoint = customEndpoint;
@@ -1659,6 +1710,124 @@
       }
     }
 
+    (function setupLoginPasswordDialog() {
+      const dialog = $('loginPasswordDialog');
+      const form = $('loginPasswordForm');
+      const openButton = $('changeLoginPasswordBtn');
+      const submitButton = $('submitLoginPasswordBtn');
+      const message = $('loginPasswordMessage');
+      const notice = $('loginPasswordNotice');
+      const reloadButton = $('loginPasswordReloadBtn');
+      const fields = [$('loginCurrentPassword'), $('loginNewPassword'), $('loginConfirmPassword')];
+      let pending = false;
+      let updated = false;
+
+      function clearForm() {
+        form.reset();
+        message.textContent = '';
+      }
+
+      function closeDialog() {
+        clearForm();
+        dialog.close();
+      }
+
+      function showError(text, field) {
+        message.className = 'danger';
+        message.textContent = text;
+        field?.focus();
+      }
+
+      openButton.addEventListener('click', () => {
+        if (pending || updated) return;
+        clearForm();
+        notice.hidden = true;
+        dialog.showModal();
+        fields[0].focus();
+      });
+      $('cancelLoginPasswordBtn').addEventListener('click', closeDialog);
+      dialog.addEventListener('cancel', (event) => {
+        event.preventDefault();
+        closeDialog();
+      });
+      dialog.addEventListener('close', clearForm);
+      reloadButton.addEventListener('click', () => window.location.reload());
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (pending || updated || !dialog.open) return;
+        const [currentPassword, newPassword, confirmPassword] = fields.map(field => field.value);
+        if (!currentPassword) {
+          showError('请输入当前密码。', fields[0]);
+          return;
+        }
+        // 按 Unicode 字符计数，不裁剪空格，也不按 UTF-16 长度截断输入。
+        const length = Array.from(newPassword).length;
+        if (length < 5 || length > 128) {
+          showError('新密码必须为 5–128 个字符，建议 12 个字符以上。', fields[1]);
+          return;
+        }
+        if (/\p{C}/u.test(newPassword)) {
+          showError('新密码不允许包含控制字符。', fields[1]);
+          return;
+        }
+        if (/^\s+$/u.test(newPassword)) {
+          showError('新密码不能全部为空白字符。', fields[1]);
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          showError('两次输入的新密码不一致。', fields[2]);
+          return;
+        }
+
+        pending = true;
+        openButton.disabled = true;
+        submitButton.disabled = true;
+        form.reset();
+        fields.forEach(field => { field.disabled = true; });
+        message.className = 'subtle';
+        message.textContent = '正在提交，关闭窗口不会撤销已提交的请求。';
+        let failure = '';
+        try {
+          // 不读取/显示响应正文，不持久化密码，不手工构造 Authorization。
+          const response = await fetch('/auth/password', {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            redirect: 'error',
+            body: JSON.stringify({ currentPassword, newPassword, confirmPassword })
+          });
+          if (response.ok) {
+            updated = true;
+            closeDialog();
+            notice.textContent = '密码已更新，请用新密码重新登录。';
+            notice.hidden = false;
+            reloadButton.hidden = false;
+          } else {
+            failure = response.status === 401
+              ? '当前密码不正确或登录已失效，请检查当前密码，必要时刷新页面重新登录。'
+              : '密码修改失败，请检查当前密码、新密码规则及两次输入是否一致后重试。';
+          }
+        } catch {
+          failure = '请求未完成，密码可能已更新；请重新登录确认后再试。';
+        } finally {
+          form.reset();
+          fields.forEach(field => { field.disabled = false; });
+          pending = false;
+          openButton.disabled = updated;
+          submitButton.disabled = false;
+        }
+        if (failure) {
+          if (dialog.open) showError(failure, fields[0]);
+          else {
+            notice.textContent = failure;
+            notice.hidden = false;
+          }
+        }
+      });
+    })();
+
     document.addEventListener('click', async (event) => {
       const target = event.target.closest('button');
       if (!target) return;
@@ -1741,7 +1910,12 @@
         } else if (target.hasAttribute('data-remove-model')) {
           target.closest('[data-model-row]')?.remove();
         } else if (target.id === 'exportConfigBtn') {
-          const res = await fetch('/config/export', { headers: { 'Accept': 'application/x-yaml' } });
+          if (!confirm('导出文件包含全部 API Key 和请求头凭据。请勿上传、分享或提交到 Git。确定导出吗？')) return;
+          const res = await fetch('/config/export', {
+            method: 'POST',
+            headers: { 'Accept': 'application/x-yaml', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ includeSecrets: true })
+          });
           const text = await res.text();
           if (!res.ok) throw new Error(text || res.statusText);
           const blob = new Blob([text], { type: 'application/x-yaml' });

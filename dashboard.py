@@ -31,6 +31,14 @@ except ImportError:  # pragma: no cover - Python versions without zoneinfo
     ZoneInfo = None  # type: ignore[assignment,misc]
 
 import api as api_checks
+from dashboard_security import (
+    PasswordAuth,
+    allowed_browser_origin,
+    private_directories,
+    set_password,
+    write_private_file,
+)
+from secret_utils import provider_secrets, redact_text, redact_url
 from proxy import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_KEEPALIVE_CONCURRENCY,
@@ -86,6 +94,7 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 DEFAULT_LISTEN = "0.0.0.0"
 DEFAULT_PUBLIC_HOST = "192.168.2.10"
 DEFAULT_PORT = 18080
+DASHBOARD_AUTH_FILE = CONFIG_DIR / "dashboard-auth.json"
 DEFAULT_AUTO_COMPACT_PERCENT = 70
 MIN_AUTO_COMPACT_PERCENT = 1
 MAX_AUTO_COMPACT_PERCENT = 95
@@ -273,8 +282,9 @@ def backup_file(path: Path) -> Path | None:
         return None
     now = datetime.now()
     backup = backup_destination(path, now)
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    backup.write_bytes(path.read_bytes())
+    root = CODEX_DIR / "backup" if backup.is_relative_to(CODEX_DIR / "backup") else BACKUP_DIR
+    private_directories(backup.parent, root)
+    write_private_file(backup, path.read_bytes())
     return backup
 
 
@@ -329,8 +339,8 @@ def restore_config_backup(name: str) -> Path:
     target = CONFIG_JSON_FILE if backup_name.startswith("config.json") else CONFIG_YAML_FILE
     with write_lock:
         current_backup = backup_file(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(backup.read_bytes())
+        private_directories(target.parent, CONFIG_DIR)
+        write_private_file(target, backup.read_bytes())
     return current_backup or Path("")
 
 
@@ -664,18 +674,13 @@ def save_provider_list(providers: list[Any], fmt: str = "auto") -> tuple[Path | 
         target = CONFIG_YAML_FILE
     with write_lock:
         backup = backup_file(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=BASE_DIR, delete=False) as f:
-            tmp_name = f.name
-            payload: Any = persisted
-            if isinstance(raw_config, dict):
-                payload = {"providers": persisted}
-            if target.suffix == ".json":
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            else:
-                yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
-        os.replace(tmp_name, target)
+        private_directories(target.parent, CONFIG_DIR)
+        payload: Any = {"providers": persisted} if isinstance(raw_config, dict) else persisted
+        if target.suffix == ".json":
+            encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        else:
+            encoded = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
+        write_private_file(target, encoded.encode("utf-8"))
     return backup, warnings
 
 
@@ -799,11 +804,82 @@ def save_provider_keepalive(
     return backup, warnings, before_providers, after_providers, provider_keepalive_settings(saved_provider)
 
 
+SECRET_PLACEHOLDER = "<redacted>"
+SECRET_CONFIG_FIELDS = re.compile(
+    r"(?i)^(?:api[-_]?key|key|token|access[-_]?token|refresh[-_]?token|"
+    r"authorization|password|passwd|secret|client[-_]?secret|credential|cookie)$"
+)
+
+
+def public_config_fields(value: Any, field: str = "") -> Any:
+    if SECRET_CONFIG_FIELDS.fullmatch(field) and not isinstance(value, (dict, list)):
+        return SECRET_PLACEHOLDER if value not in (None, "") else value
+    if field.lower() in {"headers", "http_headers"}:
+        if isinstance(value, dict):
+            return {key: SECRET_PLACEHOLDER if item not in (None, "") else item for key, item in value.items()}
+        return SECRET_PLACEHOLDER if value else value
+    if isinstance(value, dict):
+        return {key: public_config_fields(item, str(key)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [public_config_fields(item) for item in value]
+    if isinstance(value, str) and field.lower() in {"base_url", "url"}:
+        return redact_url(value)
+    return value
+
+
 def provider_public(provider: dict[str, Any]) -> dict[str, Any]:
-    item = dict(provider)
+    item = public_config_fields(provider)
     key = str(item.get("api_key") or item.get("key") or "")
-    item["api_key_masked"] = mask_secret(key)
-    item["has_api_key"] = bool(key)
+    item.pop("api_key", None)
+    item.pop("key", None)
+    item["api_key_masked"] = "********" if key else ""
+    item["has_api_key"] = bool(provider.get("api_key") or provider.get("key"))
+    item["_secret_ref"] = str(provider.get("name") or "")
+    return item
+
+
+def resolve_provider_secrets(entry: Any, providers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Round-trip hidden fields without sending stored credentials to the UI."""
+    if not isinstance(entry, dict):
+        raise ValueError("provider must be an object")
+    item = dict(entry)
+    reference = item.pop("_secret_ref", None)
+    original = next((p for p in providers if str(p.get("name") or "") == reference), None) if reference else None
+    if reference and original is None:
+        raise ValueError("Provider 已变化，请刷新后重试")
+
+    def restore(value: Any, previous: Any, field: str = "") -> Any:
+        if value == SECRET_PLACEHOLDER:
+            if original is None or previous is None:
+                raise ValueError("脱敏占位符不能作为新凭据保存，请填写实际值")
+            return previous
+        if isinstance(value, dict):
+            old = previous if isinstance(previous, dict) else {}
+            def old_value(key: str) -> Any:
+                if key in {"base_url", "url"}:
+                    return old.get(key) or old.get("url" if key == "base_url" else "base_url")
+                return old.get(key)
+            return {key: restore(child, old_value(key), str(key)) for key, child in value.items()}
+        if isinstance(value, list):
+            old = previous if isinstance(previous, list) else []
+            return [restore(child, old[index] if index < len(old) else None) for index, child in enumerate(value)]
+        if isinstance(value, str) and field in {"base_url", "url"} and SECRET_PLACEHOLDER in value:
+            if original is not None and isinstance(previous, str) and value == redact_url(previous):
+                return previous
+            raise ValueError("修改含凭据的 URL 时必须重新填写完整 URL")
+        return value
+
+    for field in ("api_key_masked", "has_api_key"):
+        item.pop(field, None)
+    clear_key = item.pop("clear_api_key", False)
+    item = restore(item, original or {})
+    if clear_key is True:
+        item.pop("key", None)
+        item["api_key"] = ""
+    elif original and "api_key" not in item and "key" not in item:
+        item["api_key"] = original.get("api_key") or original.get("key") or ""
+    if original and "headers" not in item and "headers" in original:
+        item["headers"] = original["headers"]
     return item
 
 
@@ -1655,6 +1731,14 @@ def save_codex_custom_providers(items: list[dict[str, Any]]) -> Path | None:
 def load_app_custom_providers() -> dict[str, Any]:
     return {
         "codex": {"target": str(CODEX_CONFIG), "items": load_codex_custom_providers()},
+    }
+
+
+def public_app_custom_providers() -> dict[str, Any]:
+    data = load_app_custom_providers()
+    return {
+        target: {**public_config_fields(config), "items": [provider_public(item) for item in config["items"]]}
+        for target, config in data.items()
     }
 
 
@@ -3043,15 +3127,68 @@ class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "AiApiDashboard/0.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stdout.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
+        message = redact_text(fmt % args, getattr(self, "_known_secrets", ()))
+        sys.stdout.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), message))
         sys.stdout.flush()
 
+    def authorize(self, *, mutation: bool = False) -> bool:
+        auth = getattr(self.server, "password_auth", None)
+        try:
+            authenticated = auth.authenticate(self.headers.get("Authorization") or "") if auth else None
+        except (OSError, ValueError):
+            authenticated = None
+        if authenticated is None:
+            self.close_connection = True
+            self.send_json(503, {"error": "管理台认证未配置"})
+            return False
+        if not authenticated:
+            self.close_connection = True
+            body = b'{"error":"Dashboard authentication required"}'
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="ai-api", charset="UTF-8"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if not allowed_browser_origin(self.headers) or (mutation and content_type != "application/json"):
+            self.close_connection = True
+            self.send_json(403, {"error": "拒绝跨站或非 JSON 管理请求"})
+            return False
+        try:
+            self._known_secrets = [secret for p in load_provider_list() for secret in provider_secrets(p)]
+        except Exception:
+            self._known_secrets = []
+        return True
+
+    def error_detail(self, exc: Exception) -> str:
+        # YAML diagnostics can contain entire lines of a broken secret file.
+        if isinstance(exc, yaml.YAMLError):
+            return f"{type(exc).__name__}: YAML 格式错误，请在本机检查配置"
+        return redact_text(f"{type(exc).__name__}: {exc}", getattr(self, "_known_secrets", ()), 2000)
+
     def send_json(self, status: int, payload: Any) -> None:
+        def scrub_errors(value: Any, diagnostic: bool = False) -> Any:
+            if isinstance(value, dict):
+                return {key: scrub_errors(item, diagnostic or str(key).lower() in {"error", "lasterror"})
+                        for key, item in value.items()}
+            if isinstance(value, list):
+                return [scrub_errors(item, diagnostic) for item in value]
+            if diagnostic and isinstance(value, str):
+                return redact_text(value, getattr(self, "_known_secrets", ()))
+            return value
+
+        payload = scrub_errors(payload)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -3062,6 +3199,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -3074,6 +3214,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8") or "{}")
 
     def do_GET(self) -> None:
+        if not self.authorize():
+            return
         split = urlsplit(self.path)
         path = split.path
         accept = self.headers.get("Accept") or ""
@@ -3098,12 +3240,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_text(200, STATS_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/config/export":
-                self.send_text(200, provider_yaml_text(load_provider_list()), "application/x-yaml; charset=utf-8")
+                self.send_text(200, provider_yaml_text([public_config_fields(p) for p in load_provider_list()]), "application/x-yaml; charset=utf-8")
                 return
             if path == "/config":
                 providers = load_provider_list()
                 self.send_json(200, {
-                    "providers": providers,
+                    "providers": [provider_public(p) for p in providers],
                     "publicProviders": [provider_public(p) for p in providers],
                     "configPath": str(active_config_file()),
                     "configFormat": active_config_file().suffix.lstrip("."),
@@ -3137,7 +3279,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(200, app_config_preview(load_provider_list(), proxy_base))
                 return
             if path == "/app-configs/custom-providers":
-                self.send_json(200, load_app_custom_providers())
+                self.send_json(200, public_app_custom_providers())
                 return
             if path == "/aiproxy":
                 self.send_json(200, list_aiproxy_services())
@@ -3159,13 +3301,42 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(404, {"error": "not found"})
         except Exception as exc:
-            self.send_json(500, {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)})
+            self.send_json(500, {"error": self.error_detail(exc)})
 
     def do_POST(self) -> None:
+        if not self.authorize(mutation=True):
+            return
         split = urlsplit(self.path)
         path = split.path
         try:
             payload = self.read_body()
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be an object")
+            if path == "/auth/password":
+                # Never include submitted credentials or parser diagnostics in
+                # the response. The current password is rechecked under the
+                # password-file lock, independent of the Basic login cache.
+                current = payload.get("currentPassword")
+                new = payload.get("newPassword")
+                if not isinstance(current, str) or not isinstance(new, str):
+                    raise ValueError("请填写当前密码和新密码")
+                if new != payload.get("confirmPassword"):
+                    raise ValueError("两次输入的新密码不一致")
+                if not self.server.password_auth.change_password(current, new):
+                    self.send_json(403, {"error": "当前密码不正确"})
+                    return
+                self.send_json(200, {"ok": True, "message": "密码已更新，请使用新密码重新登录"})
+                return
+            submitted = payload.get("providers") if isinstance(payload.get("providers"), list) else []
+            for provider in [payload.get("provider"), *submitted]:
+                if isinstance(provider, dict):
+                    self._known_secrets.extend(provider_secrets(provider))
+            if path == "/config/export":
+                providers = load_provider_list()
+                if payload.get("includeSecrets") is not True:
+                    providers = [public_config_fields(p) for p in providers]
+                self.send_text(200, provider_yaml_text(providers), "application/x-yaml; charset=utf-8")
+                return
             if path == "/config/parse":
                 content = payload.get("content")
                 if not isinstance(content, str):
@@ -3178,6 +3349,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(providers, list):
                     raise ValueError("providers must be an array")
                 before_providers = load_provider_list()
+                providers = [resolve_provider_secrets(p, before_providers) for p in providers]
                 backup, warnings = save_provider_list(providers, str(payload.get("format") or "yaml"))
                 after_providers = load_provider_list()
                 try:
@@ -3316,7 +3488,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 provider = payload.get("provider")
                 if not isinstance(provider, dict):
                     raise ValueError("provider is required")
-                self.send_json(200, fetch_provider_models(provider))
+                self.send_json(200, fetch_provider_models(resolve_provider_secrets(provider, load_provider_list())))
                 return
             if path == "/backups/restore":
                 name = str(payload.get("name") or "").strip()
@@ -3406,10 +3578,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(items, list):
                     raise ValueError("items must be an array")
                 if target == "codex":
+                    originals = load_codex_custom_providers()
+                    items = [resolve_provider_secrets(item, originals) for item in items]
                     backup = save_codex_custom_providers(items)
                 else:
                     raise ValueError("target must be codex")
-                self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "data": load_app_custom_providers()})
+                self.send_json(200, {"ok": True, "backup": str(backup) if backup else "", "data": public_app_custom_providers()})
                 return
             if path == "/aiproxy":
                 item = payload.get("item")
@@ -3425,25 +3599,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(404, {"error": "not found"})
         except Exception as exc:
-            self.send_json(400, {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)})
+            self.send_json(400, {"error": self.error_detail(exc)})
 
 
 def main() -> int:
     import argparse
+    import getpass
+    import warnings
 
     parser = argparse.ArgumentParser(description="Local dashboard for ai-api")
     parser.add_argument("--host", default=DEFAULT_LISTEN)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--public-host", default=DEFAULT_PUBLIC_HOST, help="Host name or IP shown for browser access")
     parser.add_argument("--open", action="store_true", help="open browser")
+    parser.add_argument("--auth-file", default=str(DASHBOARD_AUTH_FILE), help="Private admin password hash file")
+    parser.add_argument("--set-password", action="store_true", help="Interactively set/reset the admin password, then exit")
     args = parser.parse_args()
 
+    os.umask(0o077)
+    auth_path = Path(args.auth_file).expanduser()
+    if args.set_password:
+        try:
+            if not sys.stdin.isatty():
+                raise ValueError("请在服务器的交互终端运行 --set-password，不要通过参数或管道传入密码")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                password = getpass.getpass("为 admin 设置新密码（5–128 个字符，建议至少 12 个，输入不回显）：")
+                confirmation = getpass.getpass("再次输入新密码：")
+            if password != confirmation:
+                raise ValueError("两次输入的密码不一致，未修改密码")
+            set_password(auth_path, password)
+        except (ValueError, OSError, EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+            print("密码未设置：需要交互终端、两次一致的 5–128 字符密码（无控制字符），以及可写的私有密码文件。", file=sys.stderr)
+            return 2
+        print("admin 密码已设置；运行中的新版本管理台会自动生效，无需重启。")
+        return 0
+    try:
+        password_auth = PasswordAuth(auth_path)
+    except (OSError, ValueError):
+        print("管理密码未配置或文件无效。请先运行 python3 dashboard.py --set-password"
+              "（自定义 --auth-file 时须指定相同路径）。", file=sys.stderr)
+        return 2
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+    server.password_auth = password_auth
     listen_url = f"http://{args.host}:{args.port}/"
     access_url = f"http://{args.public_host}:{args.port}/"
     print(f"dashboard listening on {listen_url}")
     print(f"dashboard access URL: {access_url}")
     print(f"config: {active_config_file()}")
+    print(f"dashboard login: admin; private password hash file: {auth_path}")
+    print("HTTP has no transport encryption; use an SSH tunnel or a trusted HTTPS reverse proxy outside a trusted LAN.")
     sys.stdout.flush()
     if args.open:
         threading.Timer(0.4, lambda: webbrowser.open(access_url)).start()
