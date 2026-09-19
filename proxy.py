@@ -25,6 +25,7 @@ import queue
 import random
 import re
 import signal
+import socket
 import sqlite3
 import threading
 import time
@@ -279,6 +280,7 @@ KEEPALIVE_TIMEOUT_RETRY_MULTIPLIER = 2.0
 KEEPALIVE_TIMEOUT_RETRY_MAX = 600.0
 DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT = 30.0
 DEFAULT_KEEPALIVE_IDLE_TIMEOUT = 60.0
+DEFAULT_KEEPALIVE_TOTAL_TIMEOUT = 180.0
 # A warm connection is reacquired conservatively first. If connection-level
 # failures persist, gradually widen the race instead of immediately creating
 # another upstream burst.
@@ -479,6 +481,10 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         _coerce_positive_float(entry.get("keepalive_idle_timeout"))
         or DEFAULT_KEEPALIVE_IDLE_TIMEOUT
     )
+    total_timeout = (
+        _coerce_positive_float(entry.get("keepalive_total_timeout"))
+        or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT
+    )
     retry_jitter = _coerce_nonnegative_float(entry.get("keepalive_retry_jitter"))
     if retry_jitter is None:
         retry_jitter = DEFAULT_KEEPALIVE_RETRY_JITTER
@@ -504,6 +510,7 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "keepalive_timeout": _clamp_float(timeout, 5.0, 600.0),
         "keepalive_first_event_timeout": _clamp_float(first_event_timeout, 5.0, 600.0),
         "keepalive_idle_timeout": _clamp_float(idle_timeout, 5.0, 600.0),
+        "keepalive_total_timeout": _clamp_float(total_timeout, 5.0, 1800.0),
         "keepalive_concurrency": min(max(concurrency, 1), KEEPALIVE_CONCURRENCY_MAX),
         "keepalive_model": str(entry.get("keepalive_model") or "").strip(),
         "keepalive_max_attempts": max(max_attempts, 0),
@@ -3308,6 +3315,156 @@ def keepalive_redact(text: Any, limit: int = 200, secrets=()) -> str:
     return " ".join(redact_text(text, secrets).split())[:limit]
 
 
+class KeepAliveResult(tuple):
+    """Keep the existing (ok, detail) contract while carrying a failure category."""
+
+    def __new__(cls, ok: bool, detail: str = "", kind: str = "protocol"):
+        result = super().__new__(cls, (ok, detail))
+        result.kind = kind
+        return result
+
+
+class KeepAliveTotalTimeout(requests.exceptions.ReadTimeout):
+    pass
+
+
+def _shutdown_keepalive_socket(sock: Any) -> None:
+    if sock is not None:
+        try:
+            # close() alone does not wake another thread blocked in a buffered read.
+            sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
+
+
+def _keepalive_response_socket(response: Any) -> Any:
+    raw = getattr(response, "raw", None)
+    connection = getattr(raw, "_connection", None)
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        return sock
+    # HTTP Connection: close may detach conn.sock before the body has been read.
+    fp = getattr(getattr(raw, "_fp", None), "fp", None)
+    return getattr(getattr(fp, "raw", None), "_sock", None)
+
+
+class KeepAliveDeadline:
+    """Interrupt probe I/O without installing deadlines on business requests.
+
+    A Session is exclusively borrowed by this probe. Temporarily observe its
+    checked-out urllib3 connections, restoring every instance method before the
+    Session returns to the shared pool. OS DNS resolution remains subject to the
+    system resolver; a late connect is rejected before sending the probe.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.at = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._active = True
+        self._expired = False
+        self.cancelled = False
+        self._connections: list[Any] = []
+        self._response: Any = None
+        self._patched: set[tuple[int, str]] = set()
+        self._restore: list[tuple[Any, str, bool, Any]] = []
+        self._timer: threading.Timer | None = None
+
+    @property
+    def expired(self) -> bool:
+        return self._expired or time.monotonic() >= self.at
+
+    def remaining(self) -> float:
+        if self.expired:
+            raise KeepAliveTotalTimeout("keepalive probe total timeout")
+        return max(self.at - time.monotonic(), 0.001)
+
+    def _patch(self, obj: Any, name: str, wrap: Any) -> None:
+        key = (id(obj), name)
+        if key in self._patched or not callable(getattr(obj, name, None)):
+            return
+        self._patched.add(key)
+        self._restore.append((obj, name, name in vars(obj), vars(obj).get(name)))
+        setattr(obj, name, wrap(getattr(obj, name)))
+
+    def start(self, session: requests.Session) -> None:
+        def observe_pool(original):
+            def get_pool(*args, **kwargs):
+                self.remaining()
+                pool = original(*args, **kwargs)
+                self._patch(pool, "_get_conn", observe_connection)
+                return pool
+            return get_pool
+
+        def observe_connection(original):
+            def get_connection(*args, **kwargs):
+                self.remaining()
+                connection = original(*args, **kwargs)
+                with self._lock:
+                    self._connections.append(connection)
+                self._patch(connection, "connect", guard_connect)
+                if self.expired:
+                    _shutdown_keepalive_socket(getattr(connection, "sock", None))
+                    connection.close()
+                    self.remaining()
+                return connection
+            return get_connection
+
+        def guard_connect(original):
+            def connect(*args, **kwargs):
+                self.remaining()
+                result = original(*args, **kwargs)
+                if self.expired:
+                    connection = original.__self__
+                    _shutdown_keepalive_socket(getattr(connection, "sock", None))
+                    connection.close()
+                    self.remaining()
+                return result
+            return connect
+
+        for adapter in session.adapters.values():
+            # Requests <2.32 and >=2.32 use different pool lookup entrypoints.
+            for name in ("get_connection", "get_connection_with_tls_context"):
+                self._patch(adapter, name, observe_pool)
+        self._timer = threading.Timer(max(self.at - time.monotonic(), 0), self._expire)
+        self._timer.name = "keepalive-deadline"
+        self._timer.daemon = True
+        self._timer.start()
+
+    def watch_response(self, response: requests.Response) -> None:
+        with self._lock:
+            self._response = response
+        if self.expired:
+            _shutdown_keepalive_socket(_keepalive_response_socket(response))
+            self.remaining()
+
+    def _expire(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._expired = True
+            connections = list(self._connections)
+            response = self._response
+        for connection in connections:
+            _shutdown_keepalive_socket(getattr(connection, "sock", None))
+        _shutdown_keepalive_socket(_keepalive_response_socket(response))
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self._expire()
+
+    def close(self) -> None:
+        with self._lock:
+            self._active = False
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer.join()
+        for obj, name, existed, value in reversed(self._restore):
+            if existed:
+                setattr(obj, name, value)
+            else:
+                delattr(obj, name)
+
+
 class KeepAliveProbe:
     """单次探活结果。
 
@@ -3535,6 +3692,64 @@ def _keepalive_incomplete_reason(payload: dict[str, Any]) -> str:
     return str(details.get("reason") or "").strip().lower()
 
 
+def keepalive_error_kind(payload: Any, status: int = 0) -> str:
+    """Classify explicit error metadata, never generated model output.
+
+    403/404 alone can mean a gateway/WAF/routing problem. Only explicit error
+    evidence stops retries; 401 is the unambiguous HTTP authentication exception.
+    """
+    parts: list[str] = []
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for key in ("error", "response", "code", "type", "message", "detail"):
+                collect(value.get(key), depth + 1)
+
+    collect(payload)
+    text = " ".join(parts).lower()
+    if status == 401 or re.search(
+        r"invalid[ _-](?:api[ _-]?key|token)|(?:api[ _-]?key|token)[ _-]expired"
+        r"|authentication_error|incorrect api key|无效的?令牌|令牌无效|密钥无效|密钥已过期",
+        text,
+    ):
+        return "auth"
+    if re.search(
+        r"insufficient[ _](?:user[ _])?quota|insufficient[ _](?:account[ _])?balance"
+        r"|insufficient (?:credit|funds|account balance)|credit balance is too low"
+        r"|quota[ _]exceeded|billing[ _]limit|额度不足|配额不足|余额不足",
+        text,
+    ):
+        return "permanent"
+    if re.search(
+        r"rate[ _-]?limit|overloaded|too many requests|get_channel_failed"
+        r"|no available (?:channel|upstream)|model_cooldown|cooling down"
+        r"|server[ _]busy|temporarily unavailable|try again later"
+        r"|无可用|暂无可用|负载已经达到上限|渠道冷却|服务[器]?繁忙|稍后重试",
+        text,
+    ):
+        return "busy"
+    if re.search(
+        r"model_not_found|unsupported_parameter|unknown_parameter|invalid_parameter"
+        r"|missing_required_parameter|permission_error|模型不存在|不支持的参数|参数无效",
+        text,
+    ) or (
+        status in {400, 422}
+        and "invalid_request_error" in text
+    ):
+        return "permanent"
+    if status in {408, 409, 425, 429} or status >= 500:
+        return "busy"
+    return "protocol"
+
+
+def _keepalive_error_result(payload: Any, detail: str, status: int = 0) -> KeepAliveResult:
+    return KeepAliveResult(False, detail, keepalive_error_kind(payload, status))
+
+
 def _validate_keepalive_json(response: requests.Response, path: str, secrets=()) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/html" in content_type:
@@ -3546,7 +3761,13 @@ def _validate_keepalive_json(response: requests.Response, path: str, secrets=())
     if not isinstance(payload, dict):
         return False, "unexpected JSON shape"
     if payload.get("error"):
-        return False, f"error in 200 body: {keepalive_redact(payload.get('error'), secrets=secrets)}"
+        return _keepalive_error_result(
+            payload, f"error in 200 body: {keepalive_redact(payload.get('error'), secrets=secrets)}"
+        )
+    if payload.get("status") == "failed":
+        return _keepalive_error_result(
+            payload, f"response.failed: {keepalive_redact(payload.get('error') or payload.get('message'), secrets=secrets)}"
+        )
     marker = _keepalive_meta_markers(payload)
     if marker:
         return False, f"upstream throttled ({marker})"
@@ -3586,31 +3807,70 @@ def _validate_keepalive_stream(
     *,
     first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
     idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
+    probe_deadline: KeepAliveDeadline | None = None,
 ) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/event-stream" not in content_type:
         # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
         return _validate_keepalive_json(response, "/responses", secrets)
-    lines: queue.Queue[tuple[str, Any]] = queue.Queue()
+    lines: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=64)
+    stopped = threading.Event()
+    reached_eof = threading.Event()
+
+    def enqueue(item: tuple[str, Any]) -> None:
+        while not stopped.is_set():
+            try:
+                lines.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
 
     def read_lines() -> None:
         try:
             for raw in response.iter_lines(decode_unicode=False):
-                lines.put(("line", raw))
-            lines.put(("eof", None))
+                if stopped.is_set():
+                    return
+                enqueue(("line", raw))
+            reached_eof.set()
+            enqueue(("eof", None))
         except Exception as exc:
-            lines.put(("error", exc))
+            enqueue(("error", exc))
 
-    threading.Thread(target=read_lines, name="keepalive-sse-reader", daemon=True).start()
+    reader = threading.Thread(target=read_lines, name="keepalive-sse-reader", daemon=True)
+    reader.start()
+    try:
+        return _consume_keepalive_stream(
+            lines, secrets, first_event_timeout, idle_timeout, probe_deadline
+        )
+    finally:
+        stopped.set()
+        # A normally exhausted reader has already returned its socket to urllib3.
+        # On early failure/timeout, wake any read before closing buffered objects.
+        if reader.is_alive() and not reached_eof.is_set():
+            _shutdown_keepalive_socket(_keepalive_response_socket(response))
+        reader.join(timeout=1.0)
+
+
+def _consume_keepalive_stream(
+    lines: queue.Queue,
+    secrets: Any,
+    first_event_timeout: float,
+    idle_timeout: float,
+    probe_deadline: KeepAliveDeadline | None,
+) -> tuple[bool, str]:
     saw_event = False
     saw_completed = False
     saw_output_limited = False
     deadline = time.monotonic() + max(float(first_event_timeout), 0.1)
     while True:
         wait = max(float(idle_timeout), 0.1) if saw_event else max(deadline - time.monotonic(), 0.1)
+        if probe_deadline is not None:
+            wait = min(wait, probe_deadline.remaining())
         try:
             kind, raw = lines.get(timeout=wait)
         except queue.Empty:
+            if probe_deadline is not None:
+                probe_deadline.remaining()
             return False, "first event timeout" if not saw_event else "stream idle timeout"
         if kind == "eof":
             break
@@ -3647,9 +3907,15 @@ def _validate_keepalive_stream(
                 continue
             return False, event_type
         if event_type == "response.failed":
-            return False, event_type
+            nested = event.get("response")
+            error = event.get("error") or (nested.get("error") if isinstance(nested, dict) else None)
+            return _keepalive_error_result(
+                event, f"{event_type}: {keepalive_redact(error, secrets=secrets)}"
+            )
         if event_type == "error" or event.get("error"):
-            return False, f"stream error: {keepalive_redact(event.get('error') or event.get('message'), secrets=secrets)}"
+            return _keepalive_error_result(
+                event, f"stream error: {keepalive_redact(event.get('error') or event.get('message'), secrets=secrets)}"
+            )
     if saw_completed or saw_output_limited:
         return True, ""
     if saw_event:
@@ -3671,27 +3937,44 @@ def validate_keepalive_response(
     *,
     first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
     idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
+    probe_deadline: KeepAliveDeadline | None = None,
 ) -> tuple[bool, str]:
     """把 HTTP 响应判成"真实回复"或失败，对应 atry 的 role-aware reply detection。"""
     status = int(getattr(response, "status_code", 0) or 0)
     if status >= 400:
         # 429 / 5xx 立即判失败，不等超时 —— 对应 atry 把 "Retrying in 11s" 当即判失败。
-        detail = f"HTTP {status} {_keepalive_body_hint(response, secrets)}".strip()
+        try:
+            body = str(response.text or "")
+        except Exception:
+            body = ""
+        detail = f"HTTP {status} {keepalive_redact(body, secrets=secrets)}".strip()
         retry_after = _retry_after_detail(response)
-        return False, f"{detail} {retry_after}".strip()
+        try:
+            error_payload = json.loads(body)
+        except ValueError:
+            # Do not interpret HTML/WAF pages as credential or model errors.
+            content_type = str(response.headers.get("content-type") or "").lower()
+            error_payload = (
+                None if "html" in content_type or body.lstrip().startswith("<")
+                else {"message": body}
+            )
+        return _keepalive_error_result(
+            error_payload, f"{detail} {retry_after}".strip(), status
+        )
     if path.endswith("/responses"):
         return _validate_keepalive_stream(
             response,
             secrets,
             first_event_timeout=first_event_timeout,
             idle_timeout=idle_timeout,
+            probe_deadline=probe_deadline,
         )
     return _validate_keepalive_json(response, path, secrets)
 
 
 def keepalive_response_failure_kind(response: requests.Response) -> str:
     status = int(getattr(response, "status_code", 0) or 0)
-    if status in {401, 403}:
+    if status == 401:
         return "auth"
     if status in {408, 409, 425, 429} or status >= 500:
         return "busy"
@@ -3720,6 +4003,7 @@ class KeepAliveManager:
         self._states: dict[str, dict[str, Any]] = {}
         self._external_warm: dict[str, threading.Event] = {}
         self._inflight = threading.BoundedSemaphore(KEEPALIVE_GLOBAL_INFLIGHT)
+        self._probe_deadlines: dict[int, KeepAliveDeadline] = {}
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -3751,6 +4035,9 @@ class KeepAliveManager:
                     ),
                     "concurrency": int(provider.get("keepalive_concurrency") or DEFAULT_KEEPALIVE_CONCURRENCY),
                     "timeout": float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT),
+                    "totalTimeout": float(
+                        provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT
+                    ),
                     "reasoningEffort": str(
                         provider.get("keepalive_reasoning_effort")
                         or DEFAULT_KEEPALIVE_REASONING_EFFORT
@@ -3918,11 +4205,13 @@ class KeepAliveManager:
         read_timeout_override: float | None = None,
     ) -> KeepAliveProbe:
         session_tag = keepalive_session_tag(session)
+        if self._stop.is_set() or getattr(session, "_keepalive_cancelled", False):
+            return KeepAliveProbe(False, "skipped", session_tag=session_tag)
         model = keepalive_model_for(provider)
         if not model:
             return KeepAliveProbe(
                 False,
-                "protocol",
+                "permanent",
                 "provider has no model configured",
                 session_tag=session_tag,
             )
@@ -3943,12 +4232,14 @@ class KeepAliveManager:
             codex_context,
         )
         headers = keepalive_request_headers(provider, path, codex_context)
-        streaming = bool(payload.get("stream"))
-
-        if not self._inflight.acquire(timeout=max(60.0, read_timeout)):
+        total_timeout = float(
+            provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT
+        )
+        deadline = KeepAliveDeadline(total_timeout)
+        if not self._inflight.acquire(timeout=total_timeout):
             return KeepAliveProbe(
                 False,
-                "protocol",
+                "total_timeout",
                 "global keepalive slot timeout",
                 session_tag=session_tag,
                 logical_session=str((codex_context or {}).get("session_id") or "")[:8],
@@ -3958,15 +4249,26 @@ class KeepAliveManager:
         started = time.monotonic()
         response = None
         try:
+            if self._stop.is_set() or getattr(session, "_keepalive_cancelled", False):
+                return KeepAliveProbe(False, "skipped", session_tag=session_tag)
+            with self._lock:
+                self._probe_deadlines[id(session)] = deadline
+            deadline.start(session)
+            if self._stop.is_set() or getattr(session, "_keepalive_cancelled", False):
+                deadline.cancel()
+            remaining = deadline.remaining()
             response = session.post(
                 url,
                 headers=headers,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                timeout=(connect_timeout, read_timeout),
-                stream=streaming,
+                timeout=(min(connect_timeout, remaining), min(read_timeout, remaining)),
+                # Defer all body reads, including JSON/errors, until the deadline
+                # has a handle to the response socket. Payload stream is unchanged.
+                stream=True,
                 allow_redirects=False,
             )
-            ok, detail = validate_keepalive_response(
+            deadline.watch_response(response)
+            result = validate_keepalive_response(
                 response,
                 path,
                 provider_secrets(provider),
@@ -3978,13 +4280,16 @@ class KeepAliveManager:
                     provider.get("keepalive_idle_timeout")
                     or DEFAULT_KEEPALIVE_IDLE_TIMEOUT
                 ),
+                probe_deadline=deadline,
             )
+            deadline.remaining()
+            ok, detail = result
             retry_after = parse_retry_after(
                 getattr(response, "headers", {}).get("retry-after")
             )
             return KeepAliveProbe(
                 ok,
-                "ok" if ok else keepalive_response_failure_kind(response),
+                "ok" if ok else getattr(result, "kind", keepalive_response_failure_kind(response)),
                 detail,
                 time.monotonic() - started,
                 session_tag=session_tag,
@@ -3995,7 +4300,13 @@ class KeepAliveManager:
                 retry_after=retry_after,
             )
         except Exception as exc:
-            if _is_read_timeout_error(exc):
+            if deadline.cancelled or getattr(session, "_keepalive_cancelled", False):
+                kind = "skipped"
+                exc = requests.exceptions.RequestException("keepalive probe cancelled")
+            elif deadline.expired or isinstance(exc, KeepAliveTotalTimeout):
+                kind = "total_timeout"
+                exc = KeepAliveTotalTimeout(f"keepalive probe total timeout ({total_timeout:g}s)")
+            elif _is_read_timeout_error(exc):
                 kind = "timeout"
             elif _is_stale_connection_error(exc):
                 kind = "stale"
@@ -4017,7 +4328,12 @@ class KeepAliveManager:
                     response.close()
                 except Exception:
                     pass
-            self._inflight.release()
+            try:
+                deadline.close()
+            finally:
+                with self._lock:
+                    self._probe_deadlines.pop(id(session), None)
+                self._inflight.release()
 
     # ---- 抢通 ---------------------------------------------------------
 
@@ -4039,6 +4355,11 @@ class KeepAliveManager:
             if session is None or index in killed:
                 return
             killed.add(index)
+            session._keepalive_cancelled = True
+            with self._lock:
+                deadline = self._probe_deadlines.get(id(session))
+            if deadline is not None:
+                deadline.cancel()
             self._pool.discard(session)
 
         # 先创建完全部独立 session 再开跑。这样首胜产生时，调用线程已经持有所有
@@ -4076,7 +4397,9 @@ class KeepAliveManager:
         for thread in threads:
             thread.start()
 
-        deadline = time.monotonic() + float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT) + 120.0
+        deadline = time.monotonic() + float(
+            provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT
+        ) + 2.0
         received = 0
         while received < len(threads):
             if self._stop.is_set():
@@ -4107,8 +4430,8 @@ class KeepAliveManager:
             if outcome.ok:
                 decided.set()
                 # 首胜即返回：先关掉所有输家 session，使其在途 socket 尽快退出；不再
-                # join/等待慢输家。线程是 daemon，若底层系统调用不能被 close 立刻打断，
-                # 最迟也会按 keepalive_timeout 自行结束，但不会阻塞热连接投入使用。
+                # join/等待慢输家。取消信号打断其 socket 读取；系统 DNS 解析若迟到，
+                # 也不会再发送探测，不阻塞热连接投入使用。
                 for other_index, other in sessions.items():
                     if other_index != index:
                         kill(other_index, other)
@@ -4116,6 +4439,11 @@ class KeepAliveManager:
                 self._update(name, latencyMs=int(outcome.elapsed * 1000))
                 return True, ""
             kill(index, session)
+            if outcome.kind in {"auth", "permanent"}:
+                decided.set()
+                for other_index, other in sessions.items():
+                    kill(other_index, other)
+                return KeepAliveResult(False, outcome.detail, outcome.kind)
             if outcome.kind != "skipped" and outcome.detail:
                 details.append(outcome.detail)
 
@@ -4180,7 +4508,7 @@ class KeepAliveManager:
             self._pool.discard(session)
             return False, retry.kind, f"{outcome.detail}; timeout_retry={retry.detail}"
 
-        if outcome.kind in {"busy", "auth"}:
+        if outcome.kind in {"busy", "auth", "permanent", "total_timeout"}:
             # HTTP 429/5xx and authentication failures are complete upstream
             # decisions, not stale sockets.  The failed Session is still
             # discarded, but the state machine will not fan out busy retries.
@@ -4259,9 +4587,12 @@ class KeepAliveManager:
                     self._log("%s keepalive ok", name)
                     continue
                 self._note_fail(name, detail, kind)
-                if kind == "auth":
-                    self._update(name, state=KEEPALIVE_STATE_FAILED, note="authentication failed")
-                    self._log("%s keepalive authentication failed: %s", name, detail, always=True)
+                if kind in {"auth", "permanent"}:
+                    self._update(
+                        name, state=KEEPALIVE_STATE_FAILED, nextProbeAt=None,
+                        note="non-retryable error; fix credentials/configuration/quota and restart keepalive",
+                    )
+                    self._log("%s keepalive stopped (%s): %s", name, kind, detail, always=True)
                     return
                 # 保温没有拿到真实回复，就不再维持中间繁忙态：立即用全新 Session
                 # 单并发重抢。成功直接恢复 WARM；失败才按 retry_interval 继续重抢。
@@ -4303,7 +4634,8 @@ class KeepAliveManager:
                 retry_interval,
                 always=True,
             )
-            ok, detail = self._acquire(name, provider, concurrency)
+            result = self._acquire(name, provider, concurrency)
+            ok, detail = result
             if ok:
                 first_acquire = False
                 attempts = 0
@@ -4318,7 +4650,15 @@ class KeepAliveManager:
                     always=True,
                 )
                 continue
-            self._note_fail(name, detail, "acquire")
+            failure_kind = getattr(result, "kind", "acquire")
+            self._note_fail(name, detail, failure_kind)
+            if failure_kind in {"auth", "permanent"}:
+                self._update(
+                    name, state=KEEPALIVE_STATE_FAILED, nextProbeAt=None,
+                    note="non-retryable error; fix credentials/configuration/quota and restart keepalive",
+                )
+                self._log("%s acquire stopped (%s): %s", name, failure_kind, detail, always=True)
+                return
             if state == KEEPALIVE_STATE_LOST:
                 reacquire_transport_failure = keepalive_detail_allows_concurrency_scale(detail)
                 if reacquire_transport_failure:

@@ -55,6 +55,7 @@ from proxy import (
     DEFAULT_KEEPALIVE_TIMEOUT,
     DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
     DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
+    DEFAULT_KEEPALIVE_TOTAL_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     KEEPALIVE_CONCURRENCY_MAX,
     config_fingerprint,
@@ -385,6 +386,7 @@ KEEPALIVE_FIELDS = (
     "keepalive_timeout",
     "keepalive_first_event_timeout",
     "keepalive_idle_timeout",
+    "keepalive_total_timeout",
     "keepalive_concurrency",
     "keepalive_model",
     "keepalive_max_attempts",
@@ -445,6 +447,15 @@ def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
             600,
             DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
         )
+        provider["keepalive_total_timeout"] = normalize_keepalive_number(
+            provider.get("keepalive_total_timeout"),
+            "keepalive_total_timeout",
+            5,
+            1800,
+            DEFAULT_KEEPALIVE_TOTAL_TIMEOUT,
+        )
+        if not 5 <= provider["keepalive_total_timeout"] <= 1800:
+            raise ValueError("keepalive_total_timeout must be between 5 and 1800")
         provider["keepalive_concurrency"] = int(
             normalize_keepalive_number(
                 provider.get("keepalive_concurrency"), "keepalive_concurrency", 1, KEEPALIVE_CONCURRENCY_MAX, DEFAULT_KEEPALIVE_CONCURRENCY
@@ -644,6 +655,8 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
         item.pop("keepalive_first_event_timeout", None)
     if item.get("keepalive_idle_timeout") == DEFAULT_KEEPALIVE_IDLE_TIMEOUT:
         item.pop("keepalive_idle_timeout", None)
+    if item.get("keepalive_total_timeout") == DEFAULT_KEEPALIVE_TOTAL_TIMEOUT:
+        item.pop("keepalive_total_timeout", None)
     if item.get("keepalive_concurrency") == DEFAULT_KEEPALIVE_CONCURRENCY:
         item.pop("keepalive_concurrency", None)
     if not item.get("keepalive_max_attempts"):

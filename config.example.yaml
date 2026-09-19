@@ -34,10 +34,15 @@ providers:
     # keepalive_timeout: 60         # SSE 连续无数据的读取超时秒数，5~600
     # keepalive_first_event_timeout: 30 # 首个 SSE 事件最长等待秒数，5~600
     # keepalive_idle_timeout: 60    # SSE 两个事件之间最长空闲秒数，5~600
+    # keepalive_total_timeout: 180  # 每次探测总期限（含等并发名额/HTTP读写），5~1800；
+                                   # 到期释放连接后正常重试，不限制真实业务回复。
+                                   # 系统 DNS 解析无法由 Python 强制打断；迟到的连接不会发送探测。
     # keepalive_reasoning_effort: medium  # 探测专用推理强度，不继承业务模型的 high/xhigh
     # keepalive_max_output_tokens: 32     # 探测输出上限；命中上限的 incomplete 也算通
     # keepalive_model: ''           # 留空取 models 第一个
-    # keepalive_max_attempts: 0     # 0 = 永不放弃
+    # keepalive_max_attempts: 0     # 0 = 不限制可重试错误的轮数
+    # 明确的凭据失效、余额不足、模型/参数错误会停止抢通；修正后关闭再开启 keepalive。
+    # 限流、临时无通道，以及没有明确永久错误证据的 403/404 仍按原间隔重试。
 
   - name: provider-b
     base_url: https://example-b.invalid/v1
