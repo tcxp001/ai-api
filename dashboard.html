@@ -506,7 +506,7 @@
     const statusPill = (ok, text, kind = '') => `<span class="status ${kind || (ok === true ? 'ok' : ok === false ? 'fail' : 'muted')}">${esc(text)}</span>`;
     const CODEX_STREAM_MAX_RETRIES_DEFAULT = 5;
     const KEEPALIVE_CONCURRENCY_DEFAULT = 10;
-    const KEEPALIVE_RETRY_INTERVAL_DEFAULT = 5;
+    const KEEPALIVE_RETRY_INTERVAL_DEFAULT = 10;
     const KEEPALIVE_INTERVAL_DEFAULT = 60;
     const CODEX_RETRY_MAX = 100;
     const api = async (path, options = {}) => {
