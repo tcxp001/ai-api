@@ -197,3 +197,23 @@ ai-api/
 ## 注意
 
 `config/config.yaml` 包含 API Key，不要提交到 GitHub。
+
+### Telegram 抢通保活控制
+
+在管理台的“抢通保活”卡片中填写 Telegram Bot Token 和 Chat ID，点击“保存 Telegram”即可启用机器人。配置会保存到私有文件 `config/telegram.json`，管理台运行期间会立即生效，不需要重启。
+
+配置文件格式如下（也可以手动创建）：
+
+```json
+{
+  "bot_token": "从 @BotFather 获取的 Bot Token",
+  "chat_id": "你的个人或群组 Chat ID"
+}
+```
+
+可复制根目录的 `telegram.example.json` 作为模板。机器人只接受配置的 `chat_id` 发来的指令：
+
+- `/keepalive_on`：打开所有 Provider 的抢通保活
+- `/keepalive_off`：关闭所有 Provider 的抢通保活
+
+配置文件包含 Bot Token，权限应限制为当前用户可读（建议 `chmod 600 config/telegram.json`）。机器人通过 Telegram long polling 工作，不需要公网回调地址。

@@ -39,6 +39,11 @@ from dashboard_security import (
     write_private_file,
 )
 from secret_utils import provider_secrets, redact_text, redact_url
+try:
+    from telegram_bot import TelegramKeepAliveBot
+except ImportError:  # pragma: no cover - partial deployment
+    TelegramKeepAliveBot = None  # type: ignore[assignment,misc]
+
 from proxy import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_KEEPALIVE_CONCURRENCY,
@@ -46,7 +51,10 @@ from proxy import (
     DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS,
     DEFAULT_KEEPALIVE_REASONING_EFFORT,
     DEFAULT_KEEPALIVE_RETRY_INTERVAL,
+    DEFAULT_KEEPALIVE_RETRY_JITTER,
     DEFAULT_KEEPALIVE_TIMEOUT,
+    DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
+    DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     KEEPALIVE_CONCURRENCY_MAX,
     config_fingerprint,
@@ -95,6 +103,8 @@ DEFAULT_LISTEN = "0.0.0.0"
 DEFAULT_PUBLIC_HOST = "192.168.2.10"
 DEFAULT_PORT = 18080
 DASHBOARD_AUTH_FILE = CONFIG_DIR / "dashboard-auth.json"
+TELEGRAM_CONFIG_FILE = CONFIG_DIR / "telegram.json"
+KEEPALIVE_TARGETS_FILE = CONFIG_DIR / "keepalive-targets.json"
 DEFAULT_AUTO_COMPACT_PERCENT = 70
 MIN_AUTO_COMPACT_PERCENT = 1
 MAX_AUTO_COMPACT_PERCENT = 95
@@ -371,7 +381,10 @@ KEEPALIVE_FIELDS = (
     "keepalive",
     "keepalive_interval",
     "keepalive_retry_interval",
+    "keepalive_retry_jitter",
     "keepalive_timeout",
+    "keepalive_first_event_timeout",
+    "keepalive_idle_timeout",
     "keepalive_concurrency",
     "keepalive_model",
     "keepalive_max_attempts",
@@ -408,8 +421,29 @@ def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
             3600,
             DEFAULT_KEEPALIVE_RETRY_INTERVAL,
         )
+        provider["keepalive_retry_jitter"] = normalize_keepalive_number(
+            provider.get("keepalive_retry_jitter"),
+            "keepalive_retry_jitter",
+            0,
+            1,
+            DEFAULT_KEEPALIVE_RETRY_JITTER,
+        )
         provider["keepalive_timeout"] = normalize_keepalive_number(
             provider.get("keepalive_timeout"), "keepalive_timeout", 5, 600, DEFAULT_KEEPALIVE_TIMEOUT
+        )
+        provider["keepalive_first_event_timeout"] = normalize_keepalive_number(
+            provider.get("keepalive_first_event_timeout"),
+            "keepalive_first_event_timeout",
+            5,
+            600,
+            DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
+        )
+        provider["keepalive_idle_timeout"] = normalize_keepalive_number(
+            provider.get("keepalive_idle_timeout"),
+            "keepalive_idle_timeout",
+            5,
+            600,
+            DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
         )
         provider["keepalive_concurrency"] = int(
             normalize_keepalive_number(
@@ -602,8 +636,14 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
         item.pop("keepalive_interval", None)
     if item.get("keepalive_retry_interval") == DEFAULT_KEEPALIVE_RETRY_INTERVAL:
         item.pop("keepalive_retry_interval", None)
+    if item.get("keepalive_retry_jitter") == DEFAULT_KEEPALIVE_RETRY_JITTER:
+        item.pop("keepalive_retry_jitter", None)
     if item.get("keepalive_timeout") == DEFAULT_KEEPALIVE_TIMEOUT:
         item.pop("keepalive_timeout", None)
+    if item.get("keepalive_first_event_timeout") == DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT:
+        item.pop("keepalive_first_event_timeout", None)
+    if item.get("keepalive_idle_timeout") == DEFAULT_KEEPALIVE_IDLE_TIMEOUT:
+        item.pop("keepalive_idle_timeout", None)
     if item.get("keepalive_concurrency") == DEFAULT_KEEPALIVE_CONCURRENCY:
         item.pop("keepalive_concurrency", None)
     if not item.get("keepalive_max_attempts"):
@@ -716,6 +756,227 @@ def save_provider_pin(provider_name: str, pinned: bool, pinned_at: Any = None) -
         provider.pop("pinned_at", None)
 
     return save_provider_list(providers, "auto")
+
+
+def telegram_target_provider() -> str:
+    raw = read_json(TELEGRAM_CONFIG_FILE, {})
+    return str(raw.get("provider") or "").strip() if isinstance(raw, dict) else ""
+
+
+def load_keepalive_targets() -> set[str]:
+    raw = read_json(KEEPALIVE_TARGETS_FILE, None)
+    if isinstance(raw, list):
+        return {str(name).strip().lower() for name in raw if str(name).strip()}
+    # Migrate existing active keepalive providers into the page-level target list.
+    targets = {
+        str(provider.get("name") or "").strip().lower()
+        for provider in load_provider_list()
+        if api_checks.coerce_bool(provider.get("keepalive"), False)
+        and str(provider.get("name") or "").strip()
+    }
+    bound = telegram_target_provider().lower()
+    if bound:
+        targets.add(bound)
+    return targets
+
+
+def save_keepalive_targets(targets: set[str]) -> None:
+    with write_lock:
+        write_private_file(
+            KEEPALIVE_TARGETS_FILE,
+            (json.dumps(sorted(targets), ensure_ascii=False) + "\n").encode("utf-8"),
+        )
+
+
+def set_provider_keepalive(provider_name: str, enabled: bool) -> dict[str, Any]:
+    """Toggle only the provider bound to Telegram."""
+    name = str(provider_name or "").strip()
+    if not name:
+        return {"ok": False, "error": "尚未配置 Telegram 控制的 Provider", "changed": 0}
+    before = load_provider_list()
+    current = next((p for p in before if str(p.get("name") or "").strip().lower() == name.lower()), None)
+    if current is None:
+        return {"ok": False, "error": f"Provider {name} 不存在", "changed": 0}
+    after = [dict(p) for p in before]
+    target = next(p for p in after if str(p.get("name") or "").strip().lower() == name.lower())
+    if api_checks.coerce_bool(target.get("keepalive"), False) == enabled:
+        return {"ok": True, "changed": 0, "provider": name}
+    target["keepalive"] = bool(enabled)
+    backup, warnings = save_provider_list(after, "auto")
+    saved = load_provider_list()
+    restart = restart_after_config_write(before, saved)
+    return {
+        "ok": bool(restart.get("ok")),
+        "changed": 1,
+        "provider": name,
+        "backup": str(backup) if backup else "",
+        "warnings": warnings,
+        "restart": restart,
+    }
+
+
+def configure_telegram_provider(provider_name: Any) -> dict[str, Any]:
+    name = str(provider_name or "").strip()
+    if not name:
+        raise ValueError("provider name is required")
+    if not any(str(p.get("name") or "").strip().lower() == name.lower() for p in load_provider_list()):
+        raise ValueError(f"provider {name!r} not found")
+    raw = read_json(TELEGRAM_CONFIG_FILE, {})
+    if not isinstance(raw, dict) or not raw.get("bot_token") or not raw.get("chat_id"):
+        raise ValueError("请先配置 Telegram")
+    before = load_provider_list()
+    after = [dict(provider) for provider in before]
+    target = next(
+        provider
+        for provider in after
+        if str(provider.get("name") or "").strip().lower() == name.lower()
+    )
+    target["keepalive"] = True
+    targets = load_keepalive_targets()
+    targets.add(name.lower())
+    save_keepalive_targets(targets)
+    backup, warnings = save_provider_list(after, "auto")
+    saved = load_provider_list()
+    restart = restart_after_config_write(before, saved)
+    raw["provider"] = name
+    with write_lock:
+        write_private_file(TELEGRAM_CONFIG_FILE, (json.dumps(raw, ensure_ascii=False) + "\n").encode("utf-8"))
+    result = load_telegram_settings()
+    result.update({
+        "ok": bool(restart.get("ok")),
+        "backup": str(backup) if backup else "",
+        "warnings": warnings,
+        "restart": restart,
+    })
+    return result
+
+
+def remove_keepalive_provider(provider_name: Any) -> dict[str, Any]:
+    name = str(provider_name or "").strip()
+    if not name:
+        raise ValueError("provider name is required")
+    before = load_provider_list()
+    after = [dict(provider) for provider in before]
+    target = next(
+        (
+            provider
+            for provider in after
+            if str(provider.get("name") or "").strip().lower() == name.lower()
+        ),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"provider {name!r} not found")
+    target["keepalive"] = False
+    targets = load_keepalive_targets()
+    targets.discard(name.lower())
+    save_keepalive_targets(targets)
+    backup, warnings = save_provider_list(after, "auto")
+    saved = load_provider_list()
+    restart = restart_after_config_write(before, saved)
+    raw = read_json(TELEGRAM_CONFIG_FILE, {})
+    unbound = False
+    if isinstance(raw, dict) and str(raw.get("provider") or "").strip().lower() == name.lower():
+        raw.pop("provider", None)
+        with write_lock:
+            write_private_file(TELEGRAM_CONFIG_FILE, (json.dumps(raw, ensure_ascii=False) + "\n").encode("utf-8"))
+        unbound = True
+    return {
+        "ok": bool(restart.get("ok")),
+        "provider": name,
+        "unbound": unbound,
+        "backup": str(backup) if backup else "",
+        "warnings": warnings,
+        "restart": restart,
+    }
+
+
+def toggle_keepalive_provider(provider_name: Any, enabled: Any) -> dict[str, Any]:
+    name = str(provider_name or "").strip()
+    if not name:
+        raise ValueError("provider name is required")
+    targets = load_keepalive_targets()
+    if name.lower() not in targets:
+        raise ValueError(f"provider {name!r} is not configured for keepalive")
+    before = load_provider_list()
+    after = [dict(provider) for provider in before]
+    target = next(
+        (
+            provider for provider in after
+            if str(provider.get("name") or "").strip().lower() == name.lower()
+        ),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"provider {name!r} not found")
+    target["keepalive"] = api_checks.coerce_bool(enabled, False)
+    backup, warnings = save_provider_list(after, "auto")
+    saved = load_provider_list()
+    restart = restart_after_config_write(before, saved)
+    return {
+        "ok": bool(restart.get("ok")),
+        "provider": name,
+        "enabled": bool(target["keepalive"]),
+        "backup": str(backup) if backup else "",
+        "warnings": warnings,
+        "restart": restart,
+    }
+
+
+def load_telegram_settings() -> dict[str, Any]:
+    raw = read_json(TELEGRAM_CONFIG_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    token = str(raw.get("bot_token") or "").strip()
+    chat_id = str(raw.get("chat_id") or "").strip()
+    return {
+        "enabled": bool(token and chat_id),
+        "botToken": token,
+        "chatId": chat_id,
+        "provider": str(raw.get("provider") or "").strip(),
+        "hasBotToken": bool(token),
+    }
+
+
+def save_telegram_settings(token: Any, chat_id: Any) -> dict[str, Any]:
+    token_text = str(token or "").strip()
+    chat_id_text = str(chat_id or "").strip()
+    if not token_text or not chat_id_text:
+        raise ValueError("Bot Token 和 Chat ID 不能为空")
+    previous = read_json(TELEGRAM_CONFIG_FILE, {})
+    provider = str(previous.get("provider") or "").strip() if isinstance(previous, dict) else ""
+    payload = {"bot_token": token_text, "chat_id": chat_id_text}
+    if provider:
+        payload["provider"] = provider
+    with write_lock:
+        write_private_file(
+            TELEGRAM_CONFIG_FILE,
+            (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"),
+        )
+    return load_telegram_settings()
+
+
+def apply_telegram_settings(server: Any, token: str, chat_id: str) -> None:
+    bot = getattr(server, "telegram_bot", None)
+    if bot is not None:
+        bot.set_controller(lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
+        bot.reconfigure(token, chat_id)
+        return
+    if TelegramKeepAliveBot is not None:
+        bot = TelegramKeepAliveBot(token, chat_id, lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
+        bot.start()
+        server.telegram_bot = bot
+
+
+def send_telegram_configured_message(server: Any) -> dict[str, Any]:
+    bot = getattr(server, "telegram_bot", None)
+    if bot is None:
+        return {"ok": False, "error": "Telegram 机器人未启动"}
+    try:
+        bot.send_message("Telegram 配置已保存，机器人连接正常。")
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def provider_keepalive_settings(provider: dict[str, Any]) -> dict[str, Any]:
@@ -3235,7 +3496,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             if path == "/dashboard.html" or (
-                path in {"/config", "/aiproxy"} and wants_html
+                path in {"/config", "/aiproxy", "/keepalive"} and wants_html
             ):
                 self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
@@ -3253,6 +3514,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "configPath": str(active_config_file()),
                     "configFormat": active_config_file().suffix.lstrip("."),
                     "settings": load_app_settings(),
+                    "telegram": load_telegram_settings(),
                 })
                 return
             if path == "/api/stats/config":
@@ -3290,7 +3552,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/keepalive":
                 query = parse_qs(split.query)
                 proxy_base = (query.get("proxyBase") or [""])[0]
-                self.send_json(200, keepalive_status_from_proxy(proxy_base))
+                status = keepalive_status_from_proxy(proxy_base)
+                status["targets"] = sorted(load_keepalive_targets())
+                self.send_json(200, status)
+                return
                 return
             if path == "/proxy-config":
                 cfg = load_proxy_config(active_config_file())
@@ -3464,6 +3729,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "appSync": app_sync,
                     "restart": restart,
                 })
+                return
+            if path == "/config/telegram":
+                token = payload.get("botToken")
+                chat_id = payload.get("chatId")
+                settings = save_telegram_settings(token, chat_id)
+                apply_telegram_settings(self.server, str(token), str(chat_id))
+                notification = send_telegram_configured_message(self.server)
+                self.send_json(200, {
+                    "ok": True,
+                    "telegram": settings,
+                    "notification": notification,
+                })
+                return
+            if path == "/config/keepalive/telegram":
+                result = configure_telegram_provider(payload.get("provider"))
+                bot = getattr(self.server, "telegram_bot", None)
+                if bot is not None:
+                    bot.set_controller(lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
+                self.send_json(200, result)
+                return
+            if path == "/config/keepalive/remove":
+                result = remove_keepalive_provider(payload.get("provider"))
+                self.send_json(200, result)
+                return
+            if path == "/config/keepalive/toggle":
+                result = toggle_keepalive_provider(
+                    payload.get("provider"),
+                    payload.get("enabled"),
+                )
+                self.send_json(200, result)
                 return
             if path == "/checkins":
                 items = payload.get("items")
@@ -3645,6 +3940,15 @@ def main() -> int:
         return 2
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     server.password_auth = password_auth
+    telegram_bot = None
+    if TelegramKeepAliveBot is not None:
+        telegram_bot = TelegramKeepAliveBot.from_file(
+            TELEGRAM_CONFIG_FILE,
+            lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled),
+        )
+        if telegram_bot is not None:
+            telegram_bot.start()
+    server.telegram_bot = telegram_bot
     listen_url = f"http://{args.host}:{args.port}/"
     access_url = f"http://{args.public_host}:{args.port}/"
     print(f"dashboard listening on {listen_url}")
@@ -3660,6 +3964,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nshutting down")
     finally:
+        if getattr(server, "telegram_bot", None) is not None:
+            server.telegram_bot.stop()
         server.server_close()
     return 0
 

@@ -139,11 +139,49 @@
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(460px, 520px); gap: 14px; align-items: start; }
     .editor-stack { display: grid; gap: 14px; align-content: start; min-width: 0; }
     .editor { display: grid; gap: 0; min-width: 0; overflow: hidden; }
-    .keepalive-card { display: grid; gap: 10px; }
+    .keepalive-card { display: grid; gap: 12px; padding: 14px; }
+    .keepalive-card > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    .keepalive-card > div:first-child h2 { font-size: 15px; }
     .keepalive-settings-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
     .keepalive-card.disabled .keepalive-settings-row { opacity: .55; }
     .keepalive-actions { margin-top: 2px; justify-content: flex-start; }
-    .keepalive-actions button { min-width: 72px; }
+    .keepalive-actions button { min-width: 0; min-height: 36px; padding: 0 12px; font-size: inherit; }
+    #providerTelegramBtn.primary { border-color: var(--accent); background: rgba(8,127,123,.1); color: var(--accent-dark); }
+    .keepalive-page { display: grid; gap: 16px; }
+    .keepalive-page > .panel { padding: 20px; }
+    .keepalive-list-panel { padding-top: 16px !important; }
+    .keepalive-list-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .keepalive-list-head h3 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+    .keepalive-list-head .subtle { font-size: 12px; }
+    .keepalive-provider-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .keepalive-provider-card { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+    .keepalive-provider-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .keepalive-provider-card-name { min-width: 0; display: flex; align-items: center; gap: 8px; }
+    .keepalive-provider-card-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+    .keepalive-provider-card-main { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .keepalive-provider-card-stat { padding: 10px; border-radius: 7px; background: #f5f8f6; }
+    .keepalive-provider-card-stat span { display: block; color: var(--muted); font-size: 11px; }
+    .keepalive-provider-card-stat strong { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .keepalive-provider-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .keepalive-provider-card-foot .subtle { font-size: 11px; }
+    .keepalive-provider-card-foot button { min-height: 30px; padding: 0 9px; font-size: 12px; color: var(--danger); border-color: rgba(183,50,61,.25); background: #fff; }
+    .keepalive-provider-card-foot button:hover:not(:disabled) { border-color: var(--danger); background: rgba(183,50,61,.06); }
+    .keepalive-provider-card-actions { display: flex; align-items: center; gap: 7px; }
+    .keepalive-provider-card-actions button { min-height: 30px; padding: 0 9px; font-size: 12px; }
+    .keepalive-provider-card-actions .keepalive-start { border-color: var(--accent); background: var(--accent); color: #fff; }
+    .keepalive-provider-card-actions .keepalive-start:hover:not(:disabled) { border-color: var(--accent-dark); background: var(--accent-dark); }
+    .keepalive-provider-card-actions .keepalive-stop { color: var(--warning); border-color: rgba(154,101,0,.3); background: #fff; }
+    .keepalive-empty { grid-column: 1 / -1; }
+    @media (max-width: 760px) {
+      .keepalive-page > .panel { padding: 15px; }
+      .keepalive-provider-grid { grid-template-columns: 1fr; }
+      .keepalive-provider-card-main { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    }
+    .telegram-settings { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+    @media (max-width: 760px) { .telegram-settings { grid-template-columns: 1fr; align-items: stretch; } }
+    .telegram-dialog { width: min(520px, calc(100vw - 32px)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; color: var(--text); background: #ffffff; opacity: 1; box-shadow: 0 18px 50px rgba(15, 23, 42, .24); }
+    .telegram-dialog::backdrop { background: rgba(15, 23, 42, .58); }
+    .telegram-dialog-form { display: grid; gap: 12px; }
     #modelFetchStatus:empty, #modelRows:empty { display: none; }
     .empty { padding: 24px; border: 1px dashed #b9c5c0; border-radius: 8px; color: var(--muted); text-align: center; background: #fbfcfb; }
     .note { padding: 10px 12px; border: 1px solid #d7c49a; border-radius: 6px; background: #fff8e8; color: #67430b; font-size: 13px; line-height: 1.45; }
@@ -246,11 +284,29 @@
       </div>
     </form>
   </dialog>
+  <dialog id="telegramDialog" class="telegram-dialog" aria-labelledby="telegramDialogTitle">
+    <form id="telegramDialogForm" method="dialog" class="telegram-dialog-form">
+      <h2 id="telegramDialogTitle">Telegram</h2>
+      <div class="field">
+        <label for="telegramBotToken">Bot Token</label>
+        <input id="telegramBotToken" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="telegramChatId">Chat ID</label>
+        <input id="telegramChatId" type="text" autocomplete="off">
+      </div>
+      <div class="actions">
+        <button id="cancelTelegramBtn" type="button">取消</button>
+        <button id="saveTelegramBtn" class="primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
 
   <main class="wrap">
     <nav class="tabs">
       <button class="tab active" data-tab="config" type="button">上游管理</button>
       <button class="tab" data-tab="aiproxy" type="button">本地代理</button>
+      <button class="tab" data-tab="keepalive" type="button">抢通保活</button>
       <a class="tab-link" href="/stats">数据统计</a>
     </nav>
 
@@ -357,7 +413,7 @@
               </div>
             </div>
             <div class="actions keepalive-actions">
-              <button id="saveProviderKeepaliveBtn" type="button">保存</button>
+              <button id="providerKeepaliveConfigBtn" type="button">配置</button>
               <button id="providerKeepaliveBtn" class="primary" type="button" aria-pressed="false">启用</button>
             </div>
           </section>
@@ -393,12 +449,26 @@
 
     </section>
 
+    <section id="keepalive" class="view">
+      <div class="keepalive-page">
+        <section class="panel keepalive-list-panel">
+          <div class="keepalive-list-head">
+            <h3>抢通保活</h3>
+            <div class="actions">
+              <button id="telegramConfigBtn" type="button">Telegram配置</button>
+            </div>
+          </div>
+          <div id="keepalivePageRows" class="keepalive-provider-grid"></div>
+        </section>
+      </div>
+    </section>
+
 
   </main>
 
   <script>
-    const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy' };
-    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy' };
+    const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy', keepalive: '/keepalive' };
+    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy', '/keepalive': 'keepalive' };
     const tabFromLocation = () => PATH_TABS[window.location.pathname] || 'config';
 
     const state = {
@@ -407,6 +477,7 @@
       appSync: {},
       customProviders: { codex: { items: [] } },
       settings: { autoCompactPercent: 70, autoCompactTokenLimit: 200000 },
+      telegram: { enabled: false, botToken: '', chatId: '', hasBotToken: false },
       aiproxy: { items: [] },
       keepalive: { ok: false, providers: {} },
       configPath: 'config.yaml',
@@ -491,6 +562,7 @@
       state.providers = config.providers || [];
       ensurePinnedTimestamps(state.providers);
       state.settings = config.settings || { autoCompactPercent: 70, autoCompactTokenLimit: 200000 };
+      state.telegram = config.telegram || { enabled: false, botToken: '', chatId: '', hasBotToken: false };
       state.configPath = config.configPath || 'config.yaml';
       sortProvidersByEnabled();
       state.aiproxy = aiproxy;
@@ -511,28 +583,124 @@
     }
 
     async function refreshKeepalive() {
-      if (!keepaliveWatched()) return;
       try {
-        state.keepalive = await api('/keepalive');
+        const next = await api('/keepalive');
+        const previousKey = JSON.stringify({
+          ok: state.keepalive?.ok,
+          error: state.keepalive?.error || '',
+          targets: state.keepalive?.targets || [],
+          providers: state.keepalive?.providers || {}
+        });
+        const nextKey = JSON.stringify({
+          ok: next?.ok,
+          error: next?.error || '',
+          targets: next?.targets || [],
+          providers: next?.providers || {}
+        });
+        if (previousKey === nextKey) return;
+        state.keepalive = next;
       } catch (err) {
-        state.keepalive = { ok: false, providers: {}, error: err.message };
+        const next = { ok: false, providers: {}, error: err.message };
+        if (
+          state.keepalive?.ok === next.ok
+          && state.keepalive?.error === next.error
+          && Object.keys(state.keepalive?.providers || {}).length === 0
+        ) return;
+        state.keepalive = next;
       }
-      // 保活状态只影响列表徽标；不要重绘编辑器，避免轮询覆盖用户正在填写的内容。
+      renderKeepalivePage();
       renderProviderRows();
     }
 
     function startKeepalivePolling() {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
       keepaliveTimer = null;
-      // 只有存在勾选了保活的 provider 才轮询，否则 dashboard 空转打 aiproxy。
-      if (!keepaliveWatched()) return;
-      keepaliveTimer = setInterval(refreshKeepalive, 15000);
+      keepaliveTimer = setInterval(refreshKeepalive, 2000);
     }
 
     function render() {
       renderCompactSettings();
+      renderTelegramSettings();
       renderProviders();
       renderAiproxy();
+      renderKeepalivePage();
+    }
+
+    function keepaliveTime(value) {
+      if (!value) return '-';
+      const date = new Date(Number(value) * 1000 || value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    }
+
+    function keepaliveStateLabel(entry) {
+      const state = String(entry?.state || '').toLowerCase();
+      if (state === 'warm') return ['保活', 'ok'];
+      if (state === 'failed') return ['失败', 'fail'];
+      if (state === 'stopped') return ['已停止', 'muted'];
+      if (state === 'lost') return ['已丢失', 'fail'];
+      if (state === 'cold') return ['抢通中', 'warn'];
+      return ['未上报', 'muted'];
+    }
+
+    function renderKeepalivePage() {
+      const rows = $('keepalivePageRows');
+      if (!rows) return;
+      const runtime = state.keepalive || {};
+      const entries = Object.entries(runtime.providers || {});
+      const targetNames = Array.isArray(runtime.targets) ? runtime.targets : [];
+      const configured = new Map(state.providers.filter(p => targetNames.includes(String(p?.name || '').trim().toLowerCase()) || p?.keepalive === true).map(p => [p.name, p]));
+      const names = [...new Set([...configured.keys(), ...entries.map(([name]) => name)])];
+      if (!names.length) {
+        rows.innerHTML = '<div class="empty keepalive-empty">暂无开启抢通保活的 Provider</div>';
+      } else {
+        rows.innerHTML = names.map(name => {
+          const entry = runtime.providers?.[name] || {};
+          const provider = configured.get(name) || {};
+          const isRunning = provider.keepalive === true;
+          const resultText = isRunning ? (entry.lastError ? '失败' : '成功') : '已关闭';
+          return `<article class="keepalive-provider-card">
+            <div class="keepalive-provider-card-head">
+              <div class="keepalive-provider-card-name">
+                <strong>${esc(name)}</strong>
+                ${keepaliveBadge(provider)}
+              </div>
+            </div>
+            <div class="keepalive-provider-card-main">
+              <div class="keepalive-provider-card-stat">
+                <span>模型</span>
+                <strong>${esc(entry.model || provider.keepalive_model || modelNames(provider)[0] || '-')}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>延迟</span>
+                <strong>${entry.latencyMs == null ? '-' : esc(entry.latencyMs + ' ms')}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>成功</span>
+                <strong>${esc(entry.okCount ?? 0)}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>失败</span>
+                <strong>${esc(entry.failCount ?? 0)}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>最近结果</span>
+                <strong>${esc(resultText)}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>最后成功</span>
+                <strong>${esc(entry.lastOkAt ? keepaliveTime(entry.lastOkAt) : '-')}</strong>
+              </div>
+            </div>
+            <div class="keepalive-provider-card-foot">
+              <span></span>
+              <div class="keepalive-provider-card-actions">
+                <button type="button" class="${provider.keepalive === true ? 'keepalive-stop' : 'keepalive-start'}" data-toggle-keepalive="${esc(name)}" data-enabled="${provider.keepalive === true ? 'false' : 'true'}">${provider.keepalive === true ? '关闭' : '启动'}</button>
+                <button type="button" data-remove-keepalive="${esc(name)}">删除</button>
+              </div>
+            </div>
+          </article>`;
+        }).join('');
+      }
     }
 
     function autoCompactPercentValue(value = state.settings?.autoCompactPercent) {
@@ -560,6 +728,36 @@
       const el = $('autoCompactSaveState');
       if (!el) return;
       el.textContent = text;
+    }
+
+    function renderTelegramSettings() {
+      const token = $('telegramBotToken');
+      const chatId = $('telegramChatId');
+      if (token && document.activeElement !== token) token.value = state.telegram?.botToken || '';
+      if (chatId && document.activeElement !== chatId) chatId.value = state.telegram?.chatId || '';
+    }
+
+    async function saveTelegramSettings() {
+      const token = String($('telegramBotToken')?.value || '').trim();
+      const chatId = String($('telegramChatId')?.value || '').trim();
+      if (!token || !chatId) throw new Error('Bot Token 和 Chat ID 不能为空');
+      const button = $('saveTelegramBtn');
+      if (button) button.disabled = true;
+      try {
+        const data = await api('/config/telegram', {
+          method: 'POST',
+          body: JSON.stringify({ botToken: token, chatId })
+        });
+        state.telegram = data.telegram || state.telegram;
+        $('telegramBotToken').value = state.telegram.botToken || token;
+        $('telegramChatId').value = state.telegram.chatId || chatId;
+        const notification = data.notification || {};
+        $('serverState').textContent = notification.ok
+          ? 'Telegram 配置已保存，测试消息已发送'
+          : `Telegram 配置已保存，但测试消息发送失败：${notification.error || '未知错误'}`;
+      } finally {
+        if (button) button.disabled = false;
+      }
     }
 
     function markCompactPercentDirty() {
@@ -685,7 +883,7 @@
       if (!button) return;
       button.dataset.enabled = enabled ? 'true' : 'false';
       button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-      button.textContent = enabled ? '关闭' : '启用';
+      button.textContent = enabled ? '关闭' : '启动';
       button.classList.toggle('primary', !enabled);
       button.classList.toggle('danger', enabled);
       updateKeepaliveOptions();
@@ -696,10 +894,10 @@
       const available = !!provider && !provider.__draft;
       const card = $('providerKeepaliveCard');
       const toggleButton = $('providerKeepaliveBtn');
-      const saveButton = $('saveProviderKeepaliveBtn');
+      const configButton = $('providerKeepaliveConfigBtn');
       if (card) card.classList.toggle('disabled', !available);
       if (toggleButton) toggleButton.disabled = !available;
-      if (saveButton) saveButton.disabled = !available;
+      if (configButton) configButton.disabled = !available;
       for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveRetryInterval', 'providerKeepaliveInterval']) {
         const input = $(id);
         if (input) input.disabled = !available;
@@ -797,7 +995,7 @@
       if (!provider || provider.__draft) throw new Error('请先保存 Provider，再配置 Keepalive');
       const settings = collectKeepaliveSettings();
       const enabled = providerKeepaliveEnabled();
-      const button = $('saveProviderKeepaliveBtn');
+      const button = $('providerKeepaliveConfigBtn');
       if (button) button.disabled = true;
       try {
         $('serverState').textContent = enabled ? '正在保存并应用 Keepalive 参数' : '正在保存 Keepalive 参数';
@@ -810,6 +1008,7 @@
         $('serverState').textContent = enabled
           ? `Keepalive 参数已保存并应用${restartText}`
           : 'Keepalive 参数已保存（当前关闭，未重启）';
+        return data;
       } finally {
         if (button) button.disabled = false;
         updateKeepaliveOptions();
@@ -1426,6 +1625,12 @@
       );
       $('providerKeepaliveInterval').value = Number(p?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT);
       setProviderKeepaliveEnabled(p?.keepalive === true);
+      const configButton = $('providerKeepaliveConfigBtn');
+      if (configButton) {
+        const bound = String(state.telegram?.provider || '').trim().toLowerCase() === String(p?.name || '').trim().toLowerCase();
+        configButton.textContent = bound ? '更新配置' : '配置';
+        configButton.classList.toggle('primary', bound);
+      }
       updateCustomEndpointInput();
       if (p) {
         renderModelRows(p.models || {});
@@ -1889,8 +2094,45 @@
           await loadAll();
         } else if (target.id === 'providerKeepaliveBtn') {
           await toggleProviderKeepalive();
-        } else if (target.id === 'saveProviderKeepaliveBtn') {
+        } else if (target.id === 'providerKeepaliveConfigBtn') {
+          const provider = state.providers[state.selectedProvider];
+          if (!provider || provider.__draft) throw new Error('请先保存 Provider');
           await saveProviderKeepaliveParameters();
+          const data = await api('/config/keepalive/telegram', {
+            method: 'POST',
+            body: JSON.stringify({ provider: provider.name })
+          });
+          state.telegram = data;
+          $('serverState').textContent = `已配置 ${provider.name}`;
+          await loadAll();
+        } else if (target.hasAttribute('data-remove-keepalive')) {
+          const providerName = target.dataset.removeKeepalive || '';
+          if (!providerName || !confirm(`删除 ${providerName} 的抢通保活配置？`)) return;
+          target.disabled = true;
+          try {
+            const data = await api('/config/keepalive/remove', {
+              method: 'POST',
+              body: JSON.stringify({ provider: providerName })
+            });
+            if (!data.ok) throw new Error(data.error || '删除失败');
+            await loadAll();
+          } finally {
+            target.disabled = false;
+          }
+        } else if (target.hasAttribute('data-toggle-keepalive')) {
+          const providerName = target.dataset.toggleKeepalive || '';
+          const enabled = target.dataset.enabled === 'true';
+          target.disabled = true;
+          try {
+            const data = await api('/config/keepalive/toggle', {
+              method: 'POST',
+              body: JSON.stringify({ provider: providerName, enabled })
+            });
+            if (!data.ok) throw new Error(data.error || '操作失败');
+            await loadAll();
+          } finally {
+            target.disabled = false;
+          }
         } else if (target.id === 'providerPinnedBtn') {
           await toggleProviderPinnedImmediately();
         } else if (target.hasAttribute('data-delete-provider')) {
@@ -1952,6 +2194,23 @@
           await loadAiproxyServices();
           setAiproxyLog(data);
         }
+      } catch (err) {
+        $('serverState').textContent = err.message;
+        alert(err.message);
+      }
+    });
+
+    $('telegramConfigBtn')?.addEventListener('click', () => {
+      renderTelegramSettings();
+      $('telegramDialog')?.showModal();
+      $('telegramBotToken')?.focus();
+    });
+    $('cancelTelegramBtn')?.addEventListener('click', () => $('telegramDialog')?.close());
+    $('telegramDialogForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        await saveTelegramSettings();
+        $('telegramDialog')?.close();
       } catch (err) {
         $('serverState').textContent = err.message;
         alert(err.message);

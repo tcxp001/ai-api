@@ -22,6 +22,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import signal
 import sqlite3
@@ -29,7 +30,9 @@ import threading
 import time
 import uuid
 import zlib
+from email.utils import parsedate_to_datetime
 from decimal import Decimal, InvalidOperation
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -270,9 +273,12 @@ KEEPALIVE_CONCURRENCY_MAX = 50
 KEEPALIVE_GLOBAL_INFLIGHT = 16
 # 一整轮抢通失败后固定等待，再开始下一轮；与成功后的保活间隔相互独立。
 DEFAULT_KEEPALIVE_RETRY_INTERVAL = 5.0
+DEFAULT_KEEPALIVE_RETRY_JITTER = 0.0
 KEEPALIVE_PROBE_MAX_OUTPUT_TOKENS = DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
 KEEPALIVE_TIMEOUT_RETRY_MULTIPLIER = 2.0
 KEEPALIVE_TIMEOUT_RETRY_MAX = 600.0
+DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT = 30.0
+DEFAULT_KEEPALIVE_IDLE_TIMEOUT = 60.0
 # A warm connection is reacquired conservatively first. If connection-level
 # failures persist, gradually widen the race instead of immediately creating
 # another upstream burst.
@@ -417,6 +423,42 @@ def _clamp_float(value: float, low: float, high: float) -> float:
     return low if value < low else high if value > high else value
 
 
+def parse_retry_after(value: Any, now: float | None = None) -> float | None:
+    """Parse Retry-After seconds or an HTTP date into a non-negative delay."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    except (TypeError, ValueError):
+        pass
+    try:
+        target = parsedate_to_datetime(text)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        current = time.time() if now is None else float(now)
+        return max(0.0, target.timestamp() - current)
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return None
+
+
+def retry_after_from_detail(detail: str) -> float | None:
+    match = re.search(r"\bretry_after=([0-9]+(?:\.[0-9]+)?)s\b", str(detail or ""))
+    return parse_retry_after(match.group(1)) if match else None
+
+
+def keepalive_retry_delay(base: float, jitter: float = 0.0, rng: Any = None) -> float:
+    """Return a retry delay with optional symmetric fractional jitter."""
+    delay = max(float(base), 0.0)
+    spread = max(float(jitter or 0.0), 0.0)
+    if spread <= 0:
+        return delay
+    random_source = rng or random.random
+    return max(0.0, delay * (1.0 + random_source() * 2.0 * spread - spread))
+
+
 def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Read the ``keepalive*`` provider fields, clamped to sane bounds.
 
@@ -429,6 +471,17 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
     interval = _coerce_positive_float(entry.get("keepalive_interval")) or DEFAULT_KEEPALIVE_INTERVAL
     retry_interval = _coerce_positive_float(entry.get("keepalive_retry_interval")) or DEFAULT_KEEPALIVE_RETRY_INTERVAL
     timeout = _coerce_positive_float(entry.get("keepalive_timeout")) or DEFAULT_KEEPALIVE_TIMEOUT
+    first_event_timeout = (
+        _coerce_positive_float(entry.get("keepalive_first_event_timeout"))
+        or DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT
+    )
+    idle_timeout = (
+        _coerce_positive_float(entry.get("keepalive_idle_timeout"))
+        or DEFAULT_KEEPALIVE_IDLE_TIMEOUT
+    )
+    retry_jitter = _coerce_nonnegative_float(entry.get("keepalive_retry_jitter"))
+    if retry_jitter is None:
+        retry_jitter = DEFAULT_KEEPALIVE_RETRY_JITTER
     concurrency = _coerce_positive_int(entry.get("keepalive_concurrency")) or DEFAULT_KEEPALIVE_CONCURRENCY
     max_output_tokens = (
         _coerce_positive_int(entry.get("keepalive_max_output_tokens"))
@@ -447,7 +500,10 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "keepalive": enabled,
         "keepalive_interval": _clamp_float(interval, 5.0, 3600.0),
         "keepalive_retry_interval": _clamp_float(retry_interval, 1.0, 3600.0),
+        "keepalive_retry_jitter": _clamp_float(retry_jitter, 0.0, 1.0),
         "keepalive_timeout": _clamp_float(timeout, 5.0, 600.0),
+        "keepalive_first_event_timeout": _clamp_float(first_event_timeout, 5.0, 600.0),
+        "keepalive_idle_timeout": _clamp_float(idle_timeout, 5.0, 600.0),
         "keepalive_concurrency": min(max(concurrency, 1), KEEPALIVE_CONCURRENCY_MAX),
         "keepalive_model": str(entry.get("keepalive_model") or "").strip(),
         "keepalive_max_attempts": max(max_attempts, 0),
@@ -3269,6 +3325,7 @@ class KeepAliveProbe:
         "request_id",
         "read_timeout",
         "status_code",
+        "retry_after",
     )
 
     def __init__(
@@ -3283,6 +3340,7 @@ class KeepAliveProbe:
         request_id: str = "",
         read_timeout: float = 0.0,
         status_code: int | None = None,
+        retry_after: float | None = None,
     ) -> None:
         self.ok = ok
         self.kind = kind
@@ -3293,6 +3351,7 @@ class KeepAliveProbe:
         self.request_id = request_id
         self.read_timeout = read_timeout
         self.status_code = status_code
+        self.retry_after = retry_after
 
 
 def keepalive_session_tag(session: requests.Session) -> str:
@@ -3521,15 +3580,42 @@ def _validate_keepalive_json(response: requests.Response, path: str, secrets=())
     return False, "chat choice without content"
 
 
-def _validate_keepalive_stream(response: requests.Response, secrets=()) -> tuple[bool, str]:
+def _validate_keepalive_stream(
+    response: requests.Response,
+    secrets=(),
+    *,
+    first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
+    idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
+) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/event-stream" not in content_type:
         # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
         return _validate_keepalive_json(response, "/responses", secrets)
+    lines: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+    def read_lines() -> None:
+        try:
+            for raw in response.iter_lines(decode_unicode=False):
+                lines.put(("line", raw))
+            lines.put(("eof", None))
+        except Exception as exc:
+            lines.put(("error", exc))
+
+    threading.Thread(target=read_lines, name="keepalive-sse-reader", daemon=True).start()
     saw_event = False
     saw_completed = False
     saw_output_limited = False
-    for raw in response.iter_lines(decode_unicode=False):
+    deadline = time.monotonic() + max(float(first_event_timeout), 0.1)
+    while True:
+        wait = max(float(idle_timeout), 0.1) if saw_event else max(deadline - time.monotonic(), 0.1)
+        try:
+            kind, raw = lines.get(timeout=wait)
+        except queue.Empty:
+            return False, "first event timeout" if not saw_event else "stream idle timeout"
+        if kind == "eof":
+            break
+        if kind == "error":
+            raise raw
         if not raw:
             continue
         line = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
@@ -3571,14 +3657,35 @@ def _validate_keepalive_stream(response: requests.Response, secrets=()) -> tuple
     return False, "empty SSE stream"
 
 
-def validate_keepalive_response(response: requests.Response, path: str, secrets=()) -> tuple[bool, str]:
+def _retry_after_detail(response: requests.Response) -> str:
+    delay = parse_retry_after(getattr(response, "headers", {}).get("retry-after"))
+    if delay is None:
+        return ""
+    return f"retry_after={delay:.3f}s"
+
+
+def validate_keepalive_response(
+    response: requests.Response,
+    path: str,
+    secrets=(),
+    *,
+    first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
+    idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
+) -> tuple[bool, str]:
     """把 HTTP 响应判成"真实回复"或失败，对应 atry 的 role-aware reply detection。"""
     status = int(getattr(response, "status_code", 0) or 0)
     if status >= 400:
         # 429 / 5xx 立即判失败，不等超时 —— 对应 atry 把 "Retrying in 11s" 当即判失败。
-        return False, f"HTTP {status} {_keepalive_body_hint(response, secrets)}".strip()
+        detail = f"HTTP {status} {_keepalive_body_hint(response, secrets)}".strip()
+        retry_after = _retry_after_detail(response)
+        return False, f"{detail} {retry_after}".strip()
     if path.endswith("/responses"):
-        return _validate_keepalive_stream(response, secrets)
+        return _validate_keepalive_stream(
+            response,
+            secrets,
+            first_event_timeout=first_event_timeout,
+            idle_timeout=idle_timeout,
+        )
     return _validate_keepalive_json(response, path, secrets)
 
 
@@ -3855,7 +3962,22 @@ class KeepAliveManager:
                 stream=streaming,
                 allow_redirects=False,
             )
-            ok, detail = validate_keepalive_response(response, path, provider_secrets(provider))
+            ok, detail = validate_keepalive_response(
+                response,
+                path,
+                provider_secrets(provider),
+                first_event_timeout=float(
+                    provider.get("keepalive_first_event_timeout")
+                    or DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT
+                ),
+                idle_timeout=float(
+                    provider.get("keepalive_idle_timeout")
+                    or DEFAULT_KEEPALIVE_IDLE_TIMEOUT
+                ),
+            )
+            retry_after = parse_retry_after(
+                getattr(response, "headers", {}).get("retry-after")
+            )
             return KeepAliveProbe(
                 ok,
                 "ok" if ok else keepalive_response_failure_kind(response),
@@ -3866,6 +3988,7 @@ class KeepAliveManager:
                 request_id=str((codex_context or {}).get("request_id") or "")[:8],
                 read_timeout=read_timeout,
                 status_code=int(getattr(response, "status_code", 0) or 0),
+                retry_after=retry_after,
             )
         except Exception as exc:
             if _is_read_timeout_error(exc):
@@ -4108,6 +4231,7 @@ class KeepAliveManager:
         retry_interval = float(
             provider.get("keepalive_retry_interval") or DEFAULT_KEEPALIVE_RETRY_INTERVAL
         )
+        retry_jitter = float(provider.get("keepalive_retry_jitter") or DEFAULT_KEEPALIVE_RETRY_JITTER)
         cold_concurrency = int(provider.get("keepalive_concurrency") or DEFAULT_KEEPALIVE_CONCURRENCY)
         max_attempts = int(provider.get("keepalive_max_attempts") or 0)
         state = KEEPALIVE_STATE_COLD
@@ -4217,8 +4341,19 @@ class KeepAliveManager:
                 detail,
                 always=True,
             )
-            self._update(name, nextProbeAt=time.time() + retry_interval)
-            if not self._sleep(retry_interval):
+            retry_after = retry_after_from_detail(detail)
+            retry_delay = max(retry_interval, retry_after or 0.0)
+            retry_delay = keepalive_retry_delay(retry_delay, retry_jitter)
+            self._log(
+                "%s retry delay=%.3fs base=%.3fs retry_after=%s jitter=%.3f",
+                name,
+                retry_delay,
+                retry_interval,
+                f"{retry_after:.3f}s" if retry_after is not None else "-",
+                retry_jitter,
+            )
+            self._update(name, nextProbeAt=time.time() + retry_delay)
+            if not self._sleep(retry_delay):
                 break
 
         self._update(name, state=KEEPALIVE_STATE_STOPPED, note="stopped", nextProbeAt=None)
