@@ -961,10 +961,12 @@ def apply_telegram_settings(server: Any, token: str, chat_id: str) -> None:
     if bot is not None:
         bot.set_controller(lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
         bot.reconfigure(token, chat_id)
+        bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
         return
     if TelegramKeepAliveBot is not None:
         bot = TelegramKeepAliveBot(token, chat_id, lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
         bot.start()
+        bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
         server.telegram_bot = bot
 
 
@@ -3948,6 +3950,7 @@ def main() -> int:
         )
         if telegram_bot is not None:
             telegram_bot.start()
+            telegram_bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
     server.telegram_bot = telegram_bot
     listen_url = f"http://{args.host}:{args.port}/"
     access_url = f"http://{args.public_host}:{args.port}/"

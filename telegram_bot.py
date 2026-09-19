@@ -40,6 +40,9 @@ class TelegramKeepAliveBot:
         self._offset = 0
         self._session = requests.Session()
         self._base_url = f"https://api.telegram.org/bot{self.token}"
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._monitored_states: dict[str, str] | None = None
 
     @classmethod
     def from_file(
@@ -77,8 +80,11 @@ class TelegramKeepAliveBot:
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
+        self._monitor_stop.set()
         if self._thread:
             self._thread.join(timeout=timeout)
+        if self._monitor_thread:
+            self._monitor_thread.join(timeout=timeout)
         self._session.close()
 
     def reconfigure(self, token: str, chat_id: str) -> None:
@@ -90,6 +96,9 @@ class TelegramKeepAliveBot:
         self._offset = 0
         self._session = requests.Session()
         self._base_url = f"https://api.telegram.org/bot{self.token}"
+        self._monitor_stop = threading.Event()
+        self._monitor_thread = None
+        self._monitored_states = None
         if self.token and self.chat_id:
             self.start()
 
@@ -114,6 +123,52 @@ class TelegramKeepAliveBot:
     def send_message(self, text: str) -> None:
         """Send one message synchronously to the configured chat."""
         self._send(text)
+
+    def start_keepalive_monitor(self, status_provider: Callable[[], dict[str, Any]], *, interval: float = 2.0) -> None:
+        """Notify on keepalive acquisition and warm-session loss transitions."""
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._monitor_stop.clear()
+        self._monitored_states = None
+
+        def monitor() -> None:
+            delay = max(float(interval), 0.5)
+            while not self._monitor_stop.is_set() and not self._stop.is_set():
+                try:
+                    payload = status_provider()
+                    providers = payload.get("providers") if isinstance(payload, dict) else {}
+                    if not isinstance(providers, dict):
+                        providers = {}
+                    current = {
+                        str(name): str((entry or {}).get("state") or "")
+                        for name, entry in providers.items()
+                        if isinstance(entry, dict)
+                    }
+                    previous = self._monitored_states
+                    if previous is None:
+                        self._monitored_states = current
+                    else:
+                        names = set(previous) | set(current)
+                        for name in sorted(names):
+                            old_state = previous.get(name, "")
+                            new_state = current.get(name, "")
+                            if old_state != "warm" and new_state == "warm":
+                                self._send(f"{name} 抢通成功，已进入保活。")
+                            elif old_state == "warm" and new_state != "warm":
+                                state_text = new_state or "已停止"
+                                self._send(f"{name} 从保活中断开，当前状态：{state_text}。")
+                        self._monitored_states = current
+                except Exception:
+                    if not self._monitor_stop.is_set() and not self._stop.is_set():
+                        LOG.warning("Telegram 保活状态通知检查失败", exc_info=True)
+                self._monitor_stop.wait(delay)
+
+        self._monitor_thread = threading.Thread(
+            target=monitor,
+            name="telegram-keepalive-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
 
     def _handle_action(self, action: str) -> None:
         if action == "keepalive_on":
