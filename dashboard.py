@@ -829,10 +829,13 @@ def public_config_fields(value: Any, field: str = "") -> Any:
 
 def provider_public(provider: dict[str, Any]) -> dict[str, Any]:
     item = public_config_fields(provider)
-    key = str(item.get("api_key") or item.get("key") or "")
+    key = str(provider.get("api_key") or provider.get("key") or "")
     item.pop("api_key", None)
     item.pop("key", None)
-    item["api_key_masked"] = "********" if key else ""
+    item["api_key_masked"] = (
+        f"{key[:4]}{'*' * max(4, len(key) - 8)}{key[-4:]}"
+        if len(key) > 8 else ("*" * len(key) if key else "")
+    )
     item["has_api_key"] = bool(provider.get("api_key") or provider.get("key"))
     item["_secret_ref"] = str(provider.get("name") or "")
     return item

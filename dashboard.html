@@ -91,6 +91,7 @@
     .span-8 { grid-column: span 8; }
     .span-12 { grid-column: span 12; }
     .field { display: grid; gap: 6px; }
+    .key-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
     .provider-edit-spaced { margin-top: 10px; }
     .provider-order-row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 10px; align-items: end; }
     .provider-pin-button { width: 100%; }
@@ -300,7 +301,13 @@
             </div>
           <div class="field provider-edit-spaced"><label for="providerName">Provider</label><input id="providerName"></div>
           <div class="field provider-edit-spaced"><label for="providerBaseUrl">Base URL</label><input id="providerBaseUrl" placeholder="https://example.com/v1"></div>
-          <div class="field provider-edit-spaced"><label for="providerApiKey">API Key</label><input id="providerApiKey" type="password" autocomplete="new-password" placeholder="填写新 Key；已保存的 Key 不回显"><label><input id="clearProviderApiKey" type="checkbox">清除已保存的 Key</label></div>
+          <div class="field provider-edit-spaced">
+            <label for="providerApiKey">API Key</label>
+            <div class="key-input-row">
+              <input id="providerApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="填写新 Key">
+              <button id="clearProviderApiKey" type="button">清除</button>
+            </div>
+          </div>
           <div class="field provider-edit-spaced"><label for="providerMode">Endpoint</label><select id="providerMode"><option value="codex_responses">/responses</option><option value="chat_completions">/chat/completions</option><option value="messages">/messages</option><option value="custom_endpoint">自定义</option></select><input id="providerCustomEndpoint" placeholder="/responses" hidden></div>
           <div class="field provider-edit-spaced">
             <label for="headerPreset">User-Agent</label>
@@ -626,9 +633,10 @@
       if (item.keepalive !== true) {
         delete item.keepalive;
       }
-      ['note', 'api_key', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
+      ['note', 'key', 'reasoning_effort', 'reasoning', 'anthropic_version'].forEach(key => {
         if (item[key] === '') delete item[key];
       });
+      if (item.api_key === '') delete item.api_key;
       return item;
     }
 
@@ -1134,7 +1142,7 @@
     }
 
     function providerApiKey(provider) {
-      return String(provider?.api_key || provider?.key || '').trim();
+      return String(provider?.api_key || provider?.key || provider?.api_key_masked || '').trim();
     }
 
     function modelSummary(provider) {
@@ -1404,8 +1412,10 @@
       $('providerName').value = p?.name || '';
       $('providerBaseUrl').value = providerBaseUrl(p);
       $('providerApiKey').value = providerApiKey(p);
-      $('providerApiKey').placeholder = p?.has_api_key ? '已保存，留空保持不变' : '填写新 API Key';
-      $('clearProviderApiKey').checked = false;
+      $('providerApiKey').dataset.maskedValue = p?.api_key_masked || '';
+      $('providerApiKey').placeholder = p?.has_api_key ? '已保存，保持掩码不变' : '填写新 API Key';
+      $('clearProviderApiKey').dataset.clear = '0';
+      $('clearProviderApiKey').textContent = '清除';
       $('providerMode').value = normalizeEndpointMode(p?.api_mode);
       $('providerCustomEndpoint').value = p?.custom_endpoint || '';
       $('providerStreamMaxRetries').value = providerRetryValue(p, 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT);
@@ -1459,9 +1469,13 @@
         remove_headers: headerConfig.remove_headers,
         stream_max_retries: collectRetryInput('providerStreamMaxRetries', 'stream_max_retries', CODEX_STREAM_MAX_RETRIES_DEFAULT)
       };
-      if ($('clearProviderApiKey').checked) {
+      const keyInput = $('providerApiKey');
+      const clearKeyButton = $('clearProviderApiKey');
+      if (clearKeyButton?.dataset?.clear === '1') {
         item.clear_api_key = true;
         item.api_key = '';
+      } else if (keyInput?.dataset?.maskedValue && keyInput.value.trim() === keyInput.dataset.maskedValue) {
+        item.api_key = SECRET_PLACEHOLDER;
       } else {
         delete item.clear_api_key;
       }
@@ -1946,6 +1960,20 @@
 
     document.addEventListener('input', markProviderEditorDirty);
     document.addEventListener('change', markProviderEditorDirty);
+    $('providerApiKey').addEventListener('input', () => {
+      $('clearProviderApiKey').dataset.clear = '0';
+      markProviderEditorDirty();
+    });
+    $('clearProviderApiKey').addEventListener('click', () => {
+      const button = $('clearProviderApiKey');
+      const input = $('providerApiKey');
+      button.dataset.clear = '1';
+      input.value = '';
+      input.dataset.maskedValue = '';
+      input.placeholder = '保存后将清除 API Key';
+      input.focus();
+      markProviderEditorDirty();
+    });
     $('headerPreset').addEventListener('change', updateCustomUaInput);
     $('providerMode').addEventListener('change', updateCustomEndpointInput);
     $('providerName').addEventListener('input', updateRetryDefaultsForProviderName);
