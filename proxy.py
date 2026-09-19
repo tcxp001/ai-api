@@ -3763,6 +3763,8 @@ class KeepAliveManager:
                     "attempts": 0,
                     "okCount": 0,
                     "failCount": 0,
+                    "lastSuccessFailCount": 0,
+                    "failureStreak": 0,
                     "recycled": 0,
                     "lastOkAt": None,
                     "lastErrorAt": None,
@@ -3828,6 +3830,8 @@ class KeepAliveManager:
             state["note"] = "real client request succeeded"
             state["attempts"] = 0
             state["okCount"] = int(state.get("okCount") or 0) + 1
+            state["lastSuccessFailCount"] = int(state.get("failureStreak") or 0)
+            state["failureStreak"] = 0
             state["lastOkAt"] = time.time()
             state["lastError"] = ""
             state["lastErrorKind"] = ""
@@ -4368,6 +4372,8 @@ class KeepAliveManager:
             entry["state"] = state
             entry["note"] = note
             entry["okCount"] = int(entry.get("okCount") or 0) + 1
+            entry["lastSuccessFailCount"] = int(entry.get("failureStreak") or 0)
+            entry["failureStreak"] = 0
             entry["lastOkAt"] = time.time()
             entry["lastError"] = ""
             entry["lastErrorKind"] = ""
@@ -4378,6 +4384,7 @@ class KeepAliveManager:
             if entry is None:
                 return
             entry["failCount"] = int(entry.get("failCount") or 0) + 1
+            entry["failureStreak"] = int(entry.get("failureStreak") or 0) + 1
             entry["lastErrorAt"] = time.time()
             entry["lastError"] = keepalive_redact(detail, 400, provider_secrets((self._config.get("providers") or {}).get(name)))
             entry["lastErrorKind"] = str(kind or "protocol")
