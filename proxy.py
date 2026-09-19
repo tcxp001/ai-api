@@ -1050,6 +1050,16 @@ def chat_name_for_response_function(context: dict[str, Any] | None, name: str, n
     return name
 
 
+def normalize_function_parameters(schema: Any) -> dict[str, Any]:
+    """Function arguments must have an object root, not a null/scalar schema.
+
+    Preserve constraints and nested types; only normalize the root contract.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    return {**schema, "type": "object"}
+
+
 def responses_function_tool_to_chat_tool(tool: dict[str, Any], chat_name: str) -> dict[str, Any] | None:
     if tool.get("type") != "function":
         return None
@@ -1057,13 +1067,14 @@ def responses_function_tool_to_chat_tool(tool: dict[str, Any], chat_name: str) -
     if isinstance(function, dict):
         chat_function = dict(function)
         chat_function["name"] = chat_name
+        chat_function["parameters"] = normalize_function_parameters(function.get("parameters"))
         if "strict" in tool and "strict" not in chat_function:
             chat_function["strict"] = tool.get("strict")
     else:
         chat_function = {
             "name": chat_name,
             "description": tool.get("description") or "",
-            "parameters": tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {},
+            "parameters": normalize_function_parameters(tool.get("parameters")),
         }
         if "strict" in tool:
             chat_function["strict"] = tool.get("strict")
@@ -1337,8 +1348,110 @@ def responses_tool_output_to_chat_content(item: dict[str, Any]) -> str:
     return canonical_json_string(output)
 
 
+TOOL_MEDIA_TEXT = "[ai-api: media supplied as native content]"
+TOOL_MEDIA_MAX_DEPTH = 32
+TOOL_MEDIA_DATA_URL_MIN_LENGTH = 8192
+
+
+def tool_media_content_part(part: dict[str, Any], *, anthropic: bool) -> dict[str, Any] | None:
+    """Recognize tool media without interpreting arbitrary result metadata."""
+    kind = part.get("type")
+    if kind is not None and not isinstance(kind, str):
+        return None
+    image_url: Any = None
+    if kind in {"input_image", "image_url"}:
+        image_url = part.get("image_url") or part.get("url")
+    elif kind == "image":
+        source = part.get("source")
+        source = source if isinstance(source, dict) else {}
+        data = source.get("data") or part.get("data")
+        mime = (source.get("media_type") or source.get("mime_type")
+                or part.get("mimeType") or part.get("mime_type"))
+        if source and not mime:
+            mime = "image/png"
+        if source.get("type") == "url":
+            image_url = source.get("url")
+        elif isinstance(data, str) and data and isinstance(mime, str) and mime.lower().startswith("image/"):
+            image_url = data if data.startswith("data:image/") else f"data:{mime};base64,{data}"
+    elif kind is None and isinstance(part.get("image_url"), str) and part["image_url"].startswith("data:image/"):
+        image_url = part["image_url"]
+
+    if image_url:
+        image = dict(image_url) if isinstance(image_url, dict) else {"url": image_url}
+        url = image.get("url")
+        if not isinstance(url, str) or not url.strip():
+            return None
+        if anthropic:
+            source = anthropic_image_source_from_responses_image_url(url)
+            return {"type": "image", "source": source} if source else None
+        image = {key: image[key] for key in ("url", "detail") if key in image}
+        if "detail" not in image and part.get("detail") is not None:
+            image["detail"] = part["detail"]
+        return {"type": "image_url", "image_url": image}
+
+    if not anthropic and (
+        kind == "input_file"
+        or (kind == "input_audio" and isinstance(part.get("input_audio"), dict))
+    ):
+        converted = responses_content_to_chat([part])
+        if isinstance(converted, list) and converted and converted[0].get("type") in {"file", "input_audio"}:
+            return converted[0]
+    return None
+
+
+def extract_tool_result_media(value: Any, *, anthropic: bool = False) -> tuple[Any, list[dict[str, Any]]]:
+    """Extract supported blocks through content wrappers; leave plain results alone.
+
+    The returned tree is independent wherever it changes. Unrecognized objects,
+    prose containing data URLs, and small scalar data URLs keep their old form.
+    """
+    media: list[dict[str, Any]] = []
+
+    def visit(node: Any, depth: int) -> Any:
+        if depth > TOOL_MEDIA_MAX_DEPTH:
+            return node
+        before = len(media)
+        if isinstance(node, str):
+            text = node.strip()
+            if len(text) >= TOOL_MEDIA_DATA_URL_MIN_LENGTH and re.fullmatch(
+                r"data:image/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=\r\n]+", text
+            ):
+                block = tool_media_content_part({"type": "input_image", "image_url": text}, anthropic=anthropic)
+                if block:
+                    media.append(block)
+                    return TOOL_MEDIA_TEXT
+            if text.startswith(("{", "[", '"')):
+                try:
+                    parsed = json.loads(text)
+                except (ValueError, RecursionError):
+                    return node
+                cleaned = visit(parsed, depth + 1)
+                if len(media) > before:
+                    return canonical_json_string(cleaned)
+            return node
+        if isinstance(node, list):
+            cleaned = [visit(child, depth + 1) for child in node]
+            return cleaned if len(media) > before else node
+        if isinstance(node, dict):
+            block = tool_media_content_part(node, anthropic=anthropic)
+            if block:
+                media.append(block)
+                return {"type": "text", "text": TOOL_MEDIA_TEXT}
+            # Other keys can contain tool schemas or example documents, not
+            # actual output blocks. Never crawl those as if they were media.
+            if "content" in node:
+                content = visit(node["content"], depth + 1)
+                if len(media) > before:
+                    return {**node, "content": content}
+        return node
+
+    cleaned = visit(value, 0)
+    return cleaned, media
+
+
 def append_responses_input_as_chat_messages(input_value: Any, messages: list[dict[str, Any]], tool_context: dict[str, Any] | None) -> None:
     pending_tool_calls: list[dict[str, Any]] = []
+    pending_tool_media: list[dict[str, Any]] = []
     pending_reasoning: list[str] = []
     last_assistant_index: int | None = None
 
@@ -1355,8 +1468,18 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
         pending_reasoning.clear()
         return text
 
-    def attach_pending_reasoning_to_assistant(message: dict[str, Any]) -> None:
+    def attach_pending_reasoning_to_assistant(message: dict[str, Any], unique: bool = False) -> None:
         reasoning = take_pending_reasoning()
+        if unique:
+            existing = str(message.get("reasoning_content") or "")
+            segments = {part.strip() for part in existing.split("\n\n") if part.strip()}
+            missing = []
+            for part in reasoning.split("\n\n"):
+                part = part.strip()
+                if part and part not in segments:
+                    missing.append(part)
+                    segments.add(part)
+            reasoning = "\n\n".join(missing)
         if reasoning:
             append_reasoning_content(message, reasoning)
 
@@ -1395,9 +1518,23 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
         if not (isinstance(existing, str) and existing.strip()):
             message["reasoning_content"] = "tool call"
 
+    def flush_tool_media() -> None:
+        if pending_tool_media:
+            messages.append({"role": "user", "content": list(pending_tool_media)})
+            pending_tool_media.clear()
+
     def flush_pending_tool_calls() -> None:
         nonlocal last_assistant_index
         if not pending_tool_calls:
+            return
+        flush_tool_media()
+        # Commentary and the following calls are parts of one Responses turn.
+        # Do not introduce an extra text-only Chat assistant turn.
+        if messages and messages[-1].get("role") == "assistant" and not messages[-1].get("tool_calls"):
+            messages[-1]["tool_calls"] = list(pending_tool_calls)
+            attach_pending_reasoning_to_assistant(messages[-1], unique=True)
+            last_assistant_index = len(messages) - 1
+            pending_tool_calls.clear()
             return
         message = {"role": "assistant", "content": None, "tool_calls": list(pending_tool_calls)}
         attach_pending_reasoning_to_assistant(message)
@@ -1406,12 +1543,13 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
         pending_tool_calls.clear()
 
     def append_message(message: dict[str, Any]) -> None:
+        flush_tool_media()
         if message.get("role") == "assistant":
             attach_pending_reasoning_to_assistant(message)
         elif pending_reasoning:
-            # Reasoning items are assistant-side state. A user/system turn starts
-            # a new segment, so do not leak stale reasoning across roles.
-            pending_reasoning.clear()
+            # Only a real turn boundary proves pending reasoning is a tail.
+            # Consume it even if no previous assistant exists.
+            attach_reasoning_to_last_assistant(take_pending_reasoning())
         update_last_assistant_index(message)
         messages.append(message)
 
@@ -1437,15 +1575,18 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
         if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
             flush_pending_tool_calls()
             call_id = str(item.get("call_id") or item.get("id") or "")
-            message = {"role": "tool", "tool_call_id": call_id, "content": responses_tool_output_to_chat_content(item)}
+            output_key = "output" if "output" in item else "content"
+            cleaned, media = extract_tool_result_media(item.get(output_key))
+            output_item = {**item, output_key: cleaned} if media else item
+            if media:
+                pending_tool_media.append({"type": "text", "text": f"[ai-api: media from tool call {call_id}]"})
+                pending_tool_media.extend(media)
+            message = {"role": "tool", "tool_call_id": call_id, "content": responses_tool_output_to_chat_content(output_item)}
             update_last_assistant_index(message)
             messages.append(message)
             return
         if item_type == "reasoning":
-            reasoning = extract_reasoning_summary_text(item)
-            attached_to_previous = not pending_tool_calls and attach_reasoning_to_last_assistant(reasoning)
-            if not attached_to_previous:
-                append_pending_reasoning(reasoning)
+            append_pending_reasoning(extract_reasoning_summary_text(item))
             return
 
         flush_pending_tool_calls()
@@ -1465,6 +1606,8 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
     elif input_value is not None:
         append_item(input_value)
     flush_pending_tool_calls()
+    flush_tool_media()
+    attach_reasoning_to_last_assistant(take_pending_reasoning())
     for message in messages:
         ensure_tool_call_reasoning_content(message)
 
@@ -1617,9 +1760,7 @@ def normalize_anthropic_content(value: Any) -> Any:
 
 
 def normalize_anthropic_input_schema(schema: Any) -> dict[str, Any]:
-    if not isinstance(schema, dict):
-        return {"type": "object", "properties": {}}
-    normalized = dict(schema)
+    normalized = normalize_function_parameters(schema)
     if normalized.get("type") == "object" and not isinstance(normalized.get("properties"), dict):
         normalized["properties"] = {}
     return normalized
@@ -1727,8 +1868,12 @@ def parse_tool_arguments_object_or_wrapped(arguments: Any) -> dict[str, Any]:
     return {"input": arguments}
 
 
-def responses_tool_output_to_anthropic_content(item: dict[str, Any]) -> str:
+def responses_tool_output_to_anthropic_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
     output = item.get("output") if "output" in item else item.get("content")
+    cleaned, media = extract_tool_result_media(output, anthropic=True)
+    if media:
+        text = cleaned if isinstance(cleaned, str) else canonical_json_string(cleaned)
+        return [{"type": "text", "text": text}, *media]
     if output is None:
         return "(empty)"
     if isinstance(output, str):
@@ -2587,6 +2732,18 @@ def chat_legacy_function_call_to_response_item(
     return response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context, reasoning=reasoning)
 
 
+class UpstreamToolCallError(ValueError):
+    """The upstream claimed success but provided no usable tool call."""
+
+    def __init__(self, count: int):
+        super().__init__(f"Upstream returned {count} tool call(s) without a function name; no usable tool call remains")
+        self.error = {
+            "type": "upstream_error",
+            "code": "upstream_tool_call_dropped",
+            "message": str(self),
+        }
+
+
 def chat_payload_to_responses(
     chat_payload: dict[str, Any],
     model: str = "",
@@ -2611,6 +2768,8 @@ def chat_payload_to_responses(
         output.append(message_item)
 
     tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    dropped_calls = 0
+    valid_calls = 0
     if isinstance(tool_calls, list):
         for index, tool_call in enumerate(tool_calls):
             if not isinstance(tool_call, dict):
@@ -2624,6 +2783,9 @@ def chat_payload_to_responses(
             )
             if item is not None:
                 output.append(item)
+                valid_calls += 1
+            else:
+                dropped_calls += 1
     elif isinstance(message, dict) and isinstance(message.get("function_call"), dict):
         item = chat_legacy_function_call_to_response_item(
             message["function_call"],
@@ -2632,6 +2794,12 @@ def chat_payload_to_responses(
         )
         if item is not None:
             output.append(item)
+            valid_calls += 1
+        else:
+            dropped_calls += 1
+
+    if status == "completed" and dropped_calls and not valid_calls:
+        raise UpstreamToolCallError(dropped_calls)
 
     response: dict[str, Any] = {
         "id": response_id,
@@ -4494,6 +4662,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         usage: Any = None
         finish_reason: Any = None
         tool_states: dict[int, dict[str, Any]] = {}
+        next_tool_index = 0
         inline_mode = "detecting"  # detecting | reasoning | text
         inline_buffer = ""
         saw_response_event = False
@@ -4710,7 +4879,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 state = {
                     "index": tool_index,
                     "output_index": None,
-                    "call_id": str(raw_tool_call.get("id") or f"call_{tool_index}"),
+                    "call_id": str(raw_tool_call.get("id") or ""),
                     "chat_name": "",
                     "arguments_parts": [],
                     "streamed_arguments_len": 0,
@@ -4719,10 +4888,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     "done": False,
                 }
                 tool_states[tool_index] = state
-            if raw_tool_call.get("id"):
+            if raw_tool_call.get("id") and not state.get("added"):
                 state["call_id"] = str(raw_tool_call.get("id"))
             function = raw_tool_call.get("function") if isinstance(raw_tool_call.get("function"), dict) else {}
-            if function.get("name"):
+            if function.get("name") and not state.get("added"):
                 state["chat_name"] = str(function.get("name") or "")
             if not state.get("reasoning_content") and current_reasoning_text():
                 state["reasoning_content"] = current_reasoning_text()
@@ -4744,12 +4913,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "delta": piece,
             })
 
-        def ensure_tool_added(state: dict[str, Any]) -> None:
+        def ensure_tool_added(state: dict[str, Any], final: bool = False) -> None:
             if state.get("added"):
                 return
             chat_name = str(state.get("chat_name") or "")
             if not chat_name:
                 return
+            if not state.get("call_id"):
+                if not final:
+                    return
+                state["call_id"] = f"call_{state['index']}"
             finalize_reasoning()
             ensure_started(None)
             output_index = allocate_output_index()
@@ -4774,6 +4947,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             state["stream_item_type"] = item.get("type")
             state["added"] = True
             emit_pending_tool_argument_delta(state)
+
+        def flush_ready_tools() -> None:
+            nonlocal next_tool_index
+            # Hold later calls until earlier identities are complete. Sparse
+            # indexes and missing IDs are handled only when the stream ends.
+            while next_tool_index in tool_states:
+                state = tool_states[next_tool_index]
+                ensure_tool_added(state)
+                if not state.get("added"):
+                    break
+                next_tool_index += 1
 
         for raw_line in resp.iter_lines(decode_unicode=False):
             if not raw_line:
@@ -4825,7 +5009,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         arg_delta = function.get("arguments")
                         if arg_delta is not None:
                             state.setdefault("arguments_parts", []).append(str(arg_delta))
-                        ensure_tool_added(state)
+                        flush_ready_tools()
                         if arg_delta is not None:
                             emit_pending_tool_argument_delta(state)
                 if choice.get("finish_reason") is not None:
@@ -4872,13 +5056,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             })
             final_output_pairs.append((text_output_index, item))
 
-        for _tool_index, state in sorted(tool_states.items(), key=lambda kv: int(kv[1].get("output_index") if kv[1].get("output_index") is not None else kv[0])):
+        dropped_calls = 0
+        valid_calls = 0
+        for _tool_index, state in sorted(tool_states.items()):
             chat_name = str(state.get("chat_name") or "")
             if not chat_name:
+                dropped_calls += 1
                 continue
-            ensure_tool_added(state)
+            ensure_tool_added(state, final=True)
             if state.get("output_index") is None:
                 continue
+            valid_calls += 1
             call_id = str(state.get("call_id") or f"call_{state.get('index', 0)}")
             arguments = canonicalize_tool_arguments("".join(state.get("arguments_parts") or []))
             item_id = str(state.get("item_id") or response_tool_call_item_id_from_chat_name(call_id, chat_name, tool_context))
@@ -4908,6 +5096,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         final_output = [item for _output_index, item in sorted(final_output_pairs, key=lambda pair: pair[0])]
         status = response_status_from_finish_reason(finish_reason)
+        if status == "completed" and dropped_calls and not valid_calls:
+            self._write_responses_failed_stream(UpstreamToolCallError(dropped_calls).error, model=response_model)
+            return
         completed = {
             "id": response_id,
             "object": "response",
@@ -5764,6 +5955,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         else chat_payload_to_responses(payload, model=response_model, tool_context=conversion_tool_context)
                     )
                     self._send_json(resp.status_code, converted)
+                return
+            except UpstreamToolCallError as exc:
+                if isinstance(body_json, dict) and body_json.get("stream"):
+                    self._send_responses_error_stream(502, exc.error, model=response_model)
+                else:
+                    self._send_json(502, {"error": exc.error})
                 return
             finally:
                 resp.close()

@@ -2923,6 +2923,17 @@ def cloudflare_retry_headers(headers: dict[str, str], attempt: int) -> dict[str,
     return retry_headers
 
 
+def redact_model_fetch_detail(value: Any, known_secrets: list[str], limit: int = 160) -> str:
+    text = str(value or "")
+    secrets = sorted({secret for secret in known_secrets if secret}, key=len, reverse=True)
+    if secrets:
+        # One substitution, longest first: overlapping/short credentials must
+        # not leave suffixes behind or rewrite the redaction marker itself.
+        pattern = "|".join(re.escape(secret) for secret in secrets)
+        text = re.sub(pattern, lambda _match: "<redacted>", text)
+    return api_checks.redact_sensitive(" ".join(text.split()), limit)
+
+
 def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     base_url = str(provider.get("base_url") or provider.get("url") or "").strip().rstrip("/")
     api_key = str(provider.get("api_key") or provider.get("key") or "").strip()
@@ -2933,6 +2944,7 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     anthropic_version = str(provider.get("anthropic_version") or "2023-06-01")
     if not base_url or not api_key:
         raise ValueError("Base URL 和 API Key 必填")
+    known_secrets = [api_key] + [str(value) for value in headers.values() if value is not None]
 
     request_headers = api_checks.build_headers(api_key, None, headers, remove_headers, auth_mode=auth_mode, anthropic_version=anthropic_version)
     # /models 是 OpenAI 兼容的目录端点：new-api 等中转认 Authorization: Bearer，
@@ -2963,15 +2975,22 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     elapsed_ms = int((time.time() - started) * 1000)
     if response is None:
         if last_exc is not None:
-            raise ValueError(f"/models {request_exception_detail(last_exc)}")
+            raise ValueError(f"/models {request_exception_detail(last_exc, known_secrets=known_secrets)}") from None
         raise ValueError("/models 599 请求未执行")
     if response.status_code != 200:
         if is_cloudflare_challenge(response):
             raise ValueError(f"/models HTTP {response.status_code}: Cloudflare/WAF 挑战，请重试")
-        detail = api_checks.redact_sensitive(" ".join((response.text or "").split()), 160)
+        detail = redact_model_fetch_detail(response.text, known_secrets)
         raise ValueError(f"/models HTTP {response.status_code}: {detail}")
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        detail = redact_model_fetch_detail(str(exc), known_secrets)
+        raise ValueError(f"/models 返回无效 JSON: {detail}") from None
     raw_models = payload.get("data") if isinstance(payload, dict) else payload
+    remote_catalog = isinstance(payload, dict) and raw_models is None
+    if remote_catalog:
+        raw_models = payload.get("models")
     if not isinstance(raw_models, list):
         raise ValueError("/models 返回格式不是模型列表")
     models = []
@@ -2980,7 +2999,9 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
             model_id = item
             meta = {}
         elif isinstance(item, dict):
-            model_id = str(item.get("id") or item.get("name") or "").strip()
+            model_id = str(
+                (item.get("slug") if remote_catalog else item.get("id") or item.get("name")) or ""
+            ).strip()
             meta = item
         else:
             continue
@@ -2993,7 +3014,7 @@ def fetch_provider_models(provider: dict[str, Any]) -> dict[str, Any]:
     return {"models": sorted(deduped.values(), key=lambda item: item["id"]), "count": len(deduped), "latencyMs": elapsed_ms}
 
 
-def request_exception_detail(exc: Exception, limit: int = 160) -> str:
+def request_exception_detail(exc: Exception, limit: int = 160, known_secrets: list[str] | None = None) -> str:
     if isinstance(exc, requests.exceptions.ConnectTimeout):
         prefix = "408 连接超时"
     elif isinstance(exc, requests.exceptions.ReadTimeout):
@@ -3004,7 +3025,7 @@ def request_exception_detail(exc: Exception, limit: int = 160) -> str:
         prefix = "599 连接失败"
     else:
         prefix = f"599 {type(exc).__name__}"
-    detail = api_checks.redact_sensitive(str(exc), limit).strip()
+    detail = redact_model_fetch_detail(str(exc), known_secrets or [], limit)
     return f"{prefix}：{detail}" if detail else prefix
 
 
