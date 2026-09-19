@@ -833,8 +833,8 @@ def provider_public(provider: dict[str, Any]) -> dict[str, Any]:
     item.pop("api_key", None)
     item.pop("key", None)
     item["api_key_masked"] = (
-        f"{key[:4]}{'*' * max(4, len(key) - 8)}{key[-4:]}"
-        if len(key) > 8 else ("*" * len(key) if key else "")
+        f"{key[:6]}{'*' * max(4, len(key) - 12)}{key[-6:]}"
+        if len(key) > 12 else ("*" * len(key) if key else "")
     )
     item["has_api_key"] = bool(provider.get("api_key") or provider.get("key"))
     item["_secret_ref"] = str(provider.get("name") or "")
