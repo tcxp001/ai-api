@@ -467,6 +467,7 @@
   </main>
 
   <script>
+    const SECRET_PLACEHOLDER = '<redacted>';
     const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy', keepalive: '/keepalive' };
     const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy', '/keepalive': 'keepalive' };
     const tabFromLocation = () => PATH_TABS[window.location.pathname] || 'config';
