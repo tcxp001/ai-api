@@ -380,6 +380,8 @@ def provider_validation_label(index: int, name: str = "") -> str:
 
 KEEPALIVE_FIELDS = (
     "keepalive",
+    "keepalive_backend",
+    "keepalive_codex_path",
     "keepalive_interval",
     "keepalive_retry_interval",
     "keepalive_retry_jitter",
@@ -412,6 +414,11 @@ def normalize_keepalive_number(value: Any, field_name: str, low: float, high: fl
 def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
     """Normalize the keepalive fields in place. Bounds mirror proxy.py."""
     provider["keepalive"] = api_checks.coerce_bool(provider.get("keepalive"), False)
+    backend = str(provider.get("keepalive_backend") or "http").strip().lower()
+    if backend not in {"http", "codex_cli"}:
+        raise ValueError(f"{label} keepalive_backend must be http or codex_cli")
+    provider["keepalive_backend"] = backend
+    provider["keepalive_codex_path"] = str(provider.get("keepalive_codex_path") or "codex").strip()
     try:
         provider["keepalive_interval"] = normalize_keepalive_number(
             provider.get("keepalive_interval"), "keepalive_interval", 5, 3600, DEFAULT_KEEPALIVE_INTERVAL
@@ -643,6 +650,10 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
     # 默认值继续省略，未配置过 Keepalive 的 provider 不会产生额外噪音。
     if not item.get("keepalive"):
         item.pop("keepalive", None)
+    if item.get("keepalive_backend") == "http":
+        item.pop("keepalive_backend", None)
+    if item.get("keepalive_codex_path") == "codex":
+        item.pop("keepalive_codex_path", None)
     if item.get("keepalive_interval") == DEFAULT_KEEPALIVE_INTERVAL:
         item.pop("keepalive_interval", None)
     if item.get("keepalive_retry_interval") == DEFAULT_KEEPALIVE_RETRY_INTERVAL:

@@ -9,6 +9,7 @@
 - `dashboard.py`：Web 管理台后端
 - `dashboard.html`：Web 管理台前端
 - `proxy.py`：AIProxy 转发与协议转换、抢通 + 保温
+- `codex_keepalive.py`：可选的真实交互式 Codex 会话保活（部署时与 proxy.py 一起复制）
 - `api.py`：测活逻辑
 - `prompts.py`：探活提示词轮换（proxy.py 与 api.py 共用）
 - `config.example.yaml`：配置示例
@@ -162,6 +163,37 @@ python3 proxy.py --config config/config.yaml --listen 127.0.0.1 --port 18007 \
 页面展示状态码、响应头/首字/总耗时、输入输出 Token、缓存读写 Token 以及费用估算。
 费用只使用配置中的本地
 模型价格，不配置价格时显示为未定价，不会伪造零费用。
+
+### 真实 Codex 会话保活（显式启用）
+
+在需要此模式的 Provider 上设置 `keepalive: true` 和
+`keepalive_backend: codex_cli`；未设置时继续使用原有 HTTP 探测，不影响其他 Provider。
+可用 `keepalive_codex_path` 指定 Codex 可执行文件（默认 `codex`）。
+该模式仅支持 POSIX、本机交互式 Codex、原生 Responses 和 Bearer 认证，
+不支持 `remove_headers`。不会在找不到 Codex 时悄悄退回 HTTP 探测。
+
+冷启动用独立目录并发启动 Codex，输入 `Hi`，按本次输入后的实际助手文本判定成功，
+保留获胜进程及对话，关闭并清理其他进程。后续在同一对话发送短保活消息；
+失效后关闭旧进程，以单并发重新抢通。沿用 Provider 的并发、重试间隔、保活间隔，
+每次 CLI 检测期限取 `keepalive_timeout` 与 `keepalive_total_timeout` 的较小值。
+尝试/失败计数仍按抢通轮次统计。
+“首字（s）”显示最近成功探测的首段助手文字耗时：HTTP 流从发出请求计时，
+CLI 从提交提示计时，不包含进程启动或回复后的稳定等待；没有文字时显示 `-`。
+“启动时间”在本次保活任务启动时固定，“成功时间”随最近一次成功更新。
+
+推理深度先读 `keepalive_model`（未指定时取第一个模型）的模型配置，再读 Provider
+级 `reasoning_effort`；都未配置时不写入该项，由 Codex 决定默认值。
+不会使用 HTTP 探测的 `keepalive_reasoning_effort` 或 32-token 输出限制。
+隔离配置仅使用目标 Provider 的地址、Key 和请求头，不复制主 Codex 配置、登录、
+历史、hooks 或 MCP；使用独立空工作目录、只读 sandbox 并关闭 shell 工具和网页搜索。
+临时配置可能包含私有请求头，目录为 `0700`、配置为 `0600`，结束时清理；
+Provider Key 通过子进程环境传入，不放入命令行或诊断。
+
+CLI 直接连接目标上游，业务请求继续走原有代理，不合并到保活对话，
+因此 CLI 探测不会计入代理的业务请求统计。跨 Key 的可用性收益依赖上游的账户/模型
+调度策略，不能仅凭一个 CLI 会话成功就保证所有业务请求都成功。
+Codex 本身可能额外发起标题生成等内部请求，一个探测轮次不等于一次 HTTP 请求。
+保存模式后需重启所属代理才能切换，代码更新本身不会替换已运行的进程。
 
 
 ## 测试

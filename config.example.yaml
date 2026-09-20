@@ -21,12 +21,17 @@ providers:
         #   cache_creation_per_million: 0.5
     headers: {}
     enabled: true
-    # 抢通 + 保温（默认关闭，不写这几行就是关）。开启后 proxy.py 启动时并发抢一条
+    # 抢通 + 保温（默认关闭，不写这几行就是关）。默认 HTTP 模式在启动时并发抢一条
     # 可用上游连接，赢家留在连接池里，之后每 keepalive_interval 秒发一句很短的轮换
     # 提示词把它焐热；状态见 GET /_keepalive 或 dashboard 的 provider 列表 badge。
     # 只有 keepalive 在维护页有勾选框，其余是 config-only 高级项。
     # 成本：每个开启的 provider 每天约 86400/keepalive_interval 次短请求，别全开。
     keepalive: false
+    # keepalive_backend: http       # 默认 HTTP；codex_cli 使用独立交互式 Codex 会话
+    # keepalive_codex_path: codex   # codex_cli 模式下的可执行文件名或绝对路径
+    # codex_cli 仅支持原生 Responses + Bearer，不支持 remove_headers；需要本机安装 Codex。
+    # 它继承当前 keepalive_model 的推理深度，再回退到 Provider 级配置；未设置则用 CLI 默认。
+    # keepalive_reasoning_effort / keepalive_max_output_tokens 仅控制 HTTP 模式，不覆盖 CLI 配置。
     # keepalive_interval: 60        # 保活间隔秒数，5~3600
     # keepalive_concurrency: 10     # 冷启动抢通并发，1~50；保温 miss 后重抢固定为 1
     # keepalive_retry_interval: 5   # 整轮抢通失败后等待秒数，1~3600
@@ -37,7 +42,7 @@ providers:
     # keepalive_total_timeout: 180  # 每次探测总期限（含等并发名额/HTTP读写），5~1800；
                                    # 到期释放连接后正常重试，不限制真实业务回复。
                                    # 系统 DNS 解析无法由 Python 强制打断；迟到的连接不会发送探测。
-    # keepalive_reasoning_effort: medium  # 探测专用推理强度，不继承业务模型的 high/xhigh
+    # keepalive_reasoning_effort: medium  # 仅 HTTP 模式的探测专用推理强度
     # keepalive_max_output_tokens: 32     # 探测输出上限；命中上限的 incomplete 也算通
     # keepalive_model: ''           # 留空取 models 第一个
     # keepalive_max_attempts: 0     # 0 = 不限制可重试错误的轮数

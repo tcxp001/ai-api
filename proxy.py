@@ -43,6 +43,7 @@ import requests
 from requests.adapters import HTTPAdapter
 import yaml
 from secret_utils import provider_secrets, redact_text, redact_url
+from codex_keepalive import CodexConfigurationError, CodexSession
 
 try:
     from prompts import next_prompt as next_keepalive_prompt
@@ -470,6 +471,9 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
     used for it.
     """
     enabled = _coerce_bool(entry.get("keepalive"), False)
+    backend = str(entry.get("keepalive_backend") or "http").strip().lower()
+    if backend not in {"http", "codex_cli"}:
+        raise ValueError("keepalive_backend must be http or codex_cli")
     interval = _coerce_positive_float(entry.get("keepalive_interval")) or DEFAULT_KEEPALIVE_INTERVAL
     retry_interval = _coerce_positive_float(entry.get("keepalive_retry_interval")) or DEFAULT_KEEPALIVE_RETRY_INTERVAL
     timeout = _coerce_positive_float(entry.get("keepalive_timeout")) or DEFAULT_KEEPALIVE_TIMEOUT
@@ -504,6 +508,8 @@ def keepalive_options_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         max_attempts = 0
     return {
         "keepalive": enabled,
+        "keepalive_backend": backend,
+        "keepalive_codex_path": str(entry.get("keepalive_codex_path") or "codex").strip(),
         "keepalive_interval": _clamp_float(interval, 5.0, 3600.0),
         "keepalive_retry_interval": _clamp_float(retry_interval, 1.0, 3600.0),
         "keepalive_retry_jitter": _clamp_float(retry_jitter, 0.0, 1.0),
@@ -3483,6 +3489,7 @@ class KeepAliveProbe:
         "read_timeout",
         "status_code",
         "retry_after",
+        "first_token_ms",
     )
 
     def __init__(
@@ -3498,6 +3505,7 @@ class KeepAliveProbe:
         read_timeout: float = 0.0,
         status_code: int | None = None,
         retry_after: float | None = None,
+        first_token_ms: float | None = None,
     ) -> None:
         self.ok = ok
         self.kind = kind
@@ -3509,6 +3517,7 @@ class KeepAliveProbe:
         self.read_timeout = read_timeout
         self.status_code = status_code
         self.retry_after = retry_after
+        self.first_token_ms = first_token_ms
 
 
 def keepalive_session_tag(session: requests.Session) -> str:
@@ -3750,7 +3759,42 @@ def _keepalive_error_result(payload: Any, detail: str, status: int = 0) -> KeepA
     return KeepAliveResult(False, detail, keepalive_error_kind(payload, status))
 
 
-def _validate_keepalive_json(response: requests.Response, path: str, secrets=()) -> tuple[bool, str]:
+def _keepalive_has_visible_text(payload: Any, path: str) -> bool:
+    """Visible reply text only: not a created event, reasoning or tool metadata."""
+    if not isinstance(payload, dict):
+        return False
+
+    def text(content: Any) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        if isinstance(content, list):
+            return any(
+                isinstance(block, dict) and block.get("type") in {"text", "output_text"}
+                and isinstance(block.get("text"), str) and block["text"].strip()
+                for block in content
+            )
+        return False
+
+    if path.endswith("/responses"):
+        output = payload.get("output")
+        return text(payload.get("output_text")) or (
+            isinstance(output, list) and any(
+                isinstance(item, dict) and item.get("type") == "message" and text(item.get("content"))
+                for item in output
+            )
+        )
+    if path.endswith("/messages"):
+        return text(payload.get("content"))
+    choices = payload.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(choice, dict) and any(
+            isinstance(choice.get(key), dict) and text(choice[key].get("content"))
+            for key in ("message", "delta")
+        ) for choice in choices
+    )
+
+
+def _validate_keepalive_json(response: requests.Response, path: str, secrets=(), on_output=None) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/html" in content_type:
         return False, "upstream returned HTML"
@@ -3771,6 +3815,8 @@ def _validate_keepalive_json(response: requests.Response, path: str, secrets=())
     marker = _keepalive_meta_markers(payload)
     if marker:
         return False, f"upstream throttled ({marker})"
+    if on_output is not None and _keepalive_has_visible_text(payload, path):
+        on_output()
     if path.endswith("/responses"):
         if payload.get("status") == "incomplete" and _keepalive_incomplete_reason(payload) == "max_output_tokens":
             return True, ""
@@ -3808,11 +3854,12 @@ def _validate_keepalive_stream(
     first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
     idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
     probe_deadline: KeepAliveDeadline | None = None,
+    on_output=None,
 ) -> tuple[bool, str]:
     content_type = str(response.headers.get("content-type") or "").lower()
     if "text/event-stream" not in content_type:
         # 有些中转即使 stream=True 也回整包 JSON，退回按 JSON 判定而不是直接判失败。
-        return _validate_keepalive_json(response, "/responses", secrets)
+        return _validate_keepalive_json(response, "/responses", secrets, on_output)
     lines: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=64)
     stopped = threading.Event()
     reached_eof = threading.Event()
@@ -3827,7 +3874,7 @@ def _validate_keepalive_stream(
 
     def read_lines() -> None:
         try:
-            for raw in response.iter_lines(decode_unicode=False):
+            for raw in response.iter_lines(chunk_size=1, decode_unicode=False):
                 if stopped.is_set():
                     return
                 enqueue(("line", raw))
@@ -3840,7 +3887,7 @@ def _validate_keepalive_stream(
     reader.start()
     try:
         return _consume_keepalive_stream(
-            lines, secrets, first_event_timeout, idle_timeout, probe_deadline
+            lines, secrets, first_event_timeout, idle_timeout, probe_deadline, on_output
         )
     finally:
         stopped.set()
@@ -3857,6 +3904,7 @@ def _consume_keepalive_stream(
     first_event_timeout: float,
     idle_timeout: float,
     probe_deadline: KeepAliveDeadline | None,
+    on_output=None,
 ) -> tuple[bool, str]:
     saw_event = False
     saw_completed = False
@@ -3893,6 +3941,13 @@ def _consume_keepalive_stream(
         if not isinstance(event, dict):
             continue
         event_type = str(event.get("type") or "")
+        if on_output is not None and (
+            event_type == "response.output_text.delta"
+            and isinstance(event.get("delta"), str) and event["delta"].strip()
+            or event_type in {"response.completed", "response.incomplete"}
+            and _keepalive_has_visible_text(event.get("response"), "/responses")
+        ):
+            on_output()
         if event_type == "response.completed":
             # 不能在看到逻辑完成事件后立即返回。iter_lines() 尚未读到 EOF 时，
             # response.close() 会关闭底层 socket，池里留下的只是 Session 对象，
@@ -3938,6 +3993,7 @@ def validate_keepalive_response(
     first_event_timeout: float = DEFAULT_KEEPALIVE_FIRST_EVENT_TIMEOUT,
     idle_timeout: float = DEFAULT_KEEPALIVE_IDLE_TIMEOUT,
     probe_deadline: KeepAliveDeadline | None = None,
+    on_output=None,
 ) -> tuple[bool, str]:
     """把 HTTP 响应判成"真实回复"或失败，对应 atry 的 role-aware reply detection。"""
     status = int(getattr(response, "status_code", 0) or 0)
@@ -3968,8 +4024,9 @@ def validate_keepalive_response(
             first_event_timeout=first_event_timeout,
             idle_timeout=idle_timeout,
             probe_deadline=probe_deadline,
+            on_output=on_output,
         )
-    return _validate_keepalive_json(response, path, secrets)
+    return _validate_keepalive_json(response, path, secrets, on_output)
 
 
 def keepalive_response_failure_kind(response: requests.Response) -> str:
@@ -3982,7 +4039,7 @@ def keepalive_response_failure_kind(response: requests.Response) -> str:
 
 
 class KeepAliveManager:
-    """抢通 + 保温：把 atry 对 Codex CLI 做的事搬到 HTTP 上游连接上。
+    """抢通 + 保温：默认 HTTP 连接池，也可显式托管真实 Codex 会话。
 
     每个勾选了 ``keepalive`` 的 provider 一个 daemon 线程，状态机是::
 
@@ -3990,8 +4047,8 @@ class KeepAliveManager:
          ↑                       │
          └──固定间隔重抢(并发 1)─ LOST
 
-    保温对象是 ``ProviderSessionPool`` 里那条 per-provider requests.Session ——
-    真实代理流量就是从这个池子 borrow() 的，所以必须跑在 proxy 进程里。
+    HTTP 模式保温 ``ProviderSessionPool`` 中的 requests.Session，业务请求借用同一池子。
+    codex_cli 模式保留获胜的独立 Codex 进程及对话，不把业务请求混入保活对话。
     """
 
     def __init__(self, config: dict[str, Any], session_pool: ProviderSessionPool) -> None:
@@ -4004,6 +4061,12 @@ class KeepAliveManager:
         self._external_warm: dict[str, threading.Event] = {}
         self._inflight = threading.BoundedSemaphore(KEEPALIVE_GLOBAL_INFLIGHT)
         self._probe_deadlines: dict[int, KeepAliveDeadline] = {}
+        self._codex_active: dict[str, set[CodexSession]] = {}
+        self._codex_winners: dict[str, CodexSession] = {}
+
+    @staticmethod
+    def _uses_codex(provider: dict[str, Any]) -> bool:
+        return provider.get("keepalive_backend") == "codex_cli"
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -4022,13 +4085,16 @@ class KeepAliveManager:
         if not PROMPTS_MODULE_AVAILABLE:
             self._log("prompts.py not importable; falling back to a single fixed probe prompt", always=True)
         for index, (name, provider) in enumerate(targets):
+            uses_codex = self._uses_codex(provider)
             with self._lock:
                 self._states[name] = {
                     "state": KEEPALIVE_STATE_COLD,
                     "since": time.time(),
+                    "startedAt": time.time(),
                     "note": "starting",
                     "endpoint": redact_url(keepalive_target_path(provider), provider_secrets(provider)),
                     "model": keepalive_model_for(provider),
+                    "backend": "codex_cli" if uses_codex else "http",
                     "interval": float(provider.get("keepalive_interval") or DEFAULT_KEEPALIVE_INTERVAL),
                     "retryInterval": float(
                         provider.get("keepalive_retry_interval") or DEFAULT_KEEPALIVE_RETRY_INTERVAL
@@ -4038,11 +4104,13 @@ class KeepAliveManager:
                     "totalTimeout": float(
                         provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT
                     ),
-                    "reasoningEffort": str(
+                    "reasoningEffort": configured_reasoning_effort(
+                        provider, {"model": keepalive_model_for(provider)}
+                    ) if uses_codex else str(
                         provider.get("keepalive_reasoning_effort")
                         or DEFAULT_KEEPALIVE_REASONING_EFFORT
                     ),
-                    "maxOutputTokens": int(
+                    "maxOutputTokens": None if uses_codex else int(
                         provider.get("keepalive_max_output_tokens")
                         or DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS
                     ),
@@ -4066,11 +4134,14 @@ class KeepAliveManager:
                     "reacquireAttempt": 0,
                     "reacquireConcurrency": 0,
                     "latencyMs": None,
+                    "firstTokenMs": None,
                     "nextProbeAt": None,
                 }
+                if uses_codex:
+                    self._states[name].update(codexPid=None, codexSession="", codexAlive=False)
                 self._external_warm[name] = threading.Event()
             thread = threading.Thread(
-                target=self._run_provider,
+                target=self._run_codex_provider if uses_codex else self._run_provider,
                 args=(name, provider, index * 0.25),
                 name=f"keepalive-{name}",
                 daemon=True,
@@ -4082,6 +4153,12 @@ class KeepAliveManager:
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
+        with self._lock:
+            codex_sessions = [session for group in self._codex_active.values() for session in group]
+        for session in codex_sessions:
+            session.cancel()
+        for session in codex_sessions:
+            session.stop()
         for thread in self._threads:
             thread.join(timeout=timeout)
         self._threads.clear()
@@ -4089,6 +4166,11 @@ class KeepAliveManager:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             states = {name: dict(state) for name, state in self._states.items()}
+            for name, state in states.items():
+                if state.get("backend") == "codex_cli":
+                    session = self._codex_winners.get(name)
+                    state["codexAlive"] = bool(session and session.alive)
+                    state["codexPid"] = session.pid if session and session.alive else None
         return {
             "now": time.time(),
             "globalInflightLimit": KEEPALIVE_GLOBAL_INFLIGHT,
@@ -4104,6 +4186,10 @@ class KeepAliveManager:
         accepted a genuine request and the pooled Session can be reused.
         """
         if int(status_code or 0) >= 400:
+            return
+        if self._uses_codex((self._config.get("providers") or {}).get(name, {})):
+            # A business request can prove account/model availability, but
+            # cannot provide an owned CLI process/conversation to keep warm.
             return
         with self._lock:
             state = self._states.get(name)
@@ -4247,6 +4333,13 @@ class KeepAliveManager:
                 read_timeout=read_timeout,
             )
         started = time.monotonic()
+        first_token_ms = None
+
+        def on_output() -> None:
+            nonlocal first_token_ms
+            if first_token_ms is None:
+                first_token_ms = (time.monotonic() - started) * 1000
+
         response = None
         try:
             if self._stop.is_set() or getattr(session, "_keepalive_cancelled", False):
@@ -4281,6 +4374,7 @@ class KeepAliveManager:
                     or DEFAULT_KEEPALIVE_IDLE_TIMEOUT
                 ),
                 probe_deadline=deadline,
+                on_output=on_output,
             )
             deadline.remaining()
             ok, detail = result
@@ -4298,6 +4392,7 @@ class KeepAliveManager:
                 read_timeout=read_timeout,
                 status_code=int(getattr(response, "status_code", 0) or 0),
                 retry_after=retry_after,
+                first_token_ms=first_token_ms,
             )
         except Exception as exc:
             if deadline.cancelled or getattr(session, "_keepalive_cancelled", False):
@@ -4321,6 +4416,7 @@ class KeepAliveManager:
                 logical_session=str((codex_context or {}).get("session_id") or "")[:8],
                 request_id=str((codex_context or {}).get("request_id") or "")[:8],
                 read_timeout=read_timeout,
+                first_token_ms=first_token_ms,
             )
         finally:
             if response is not None:
@@ -4337,12 +4433,183 @@ class KeepAliveManager:
 
     # ---- 抢通 ---------------------------------------------------------
 
+    def _probe_codex(self, provider: dict[str, Any], session: CodexSession, *, warm: bool = False) -> KeepAliveProbe:
+        started = time.monotonic()
+        timeout = min(
+            float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT),
+            float(provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT),
+        )
+        acquired = False
+        try:
+            while not self._stop.is_set() and not session.cancelled.is_set():
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    return KeepAliveProbe(False, "total_timeout", "global keepalive slot timeout")
+                if self._inflight.acquire(timeout=min(remaining, 0.1)):
+                    acquired = True
+                    break
+            if not acquired or self._stop.is_set() or session.cancelled.is_set():
+                return KeepAliveProbe(False, "skipped", "Codex probe cancelled")
+            remaining = max(timeout - (time.monotonic() - started), 0.001)
+            ok, kind, detail = session.prompt(
+                next_keepalive_prompt() if warm else "Hi", remaining, short=warm,
+            )
+            if kind in {"error", "busy"}:
+                classified = keepalive_error_kind({"message": detail})
+                if classified in {"auth", "permanent"}:
+                    kind = classified
+                elif classified == "busy":
+                    kind = "busy"
+                elif kind == "error":
+                    kind = "protocol"
+            return KeepAliveProbe(
+                ok, kind, detail, time.monotonic() - started,
+                session_tag=str(session.pid or ""),
+                logical_session=session.tag,
+                read_timeout=timeout,
+                first_token_ms=session.first_token_ms,
+            )
+        except CodexConfigurationError as exc:
+            return KeepAliveProbe(False, "permanent", str(exc), time.monotonic() - started)
+        except Exception as exc:
+            # Never expose an exception repr containing environment/config data.
+            return KeepAliveProbe(
+                False, "protocol", f"Codex probe error: {type(exc).__name__}",
+                time.monotonic() - started,
+            )
+        finally:
+            if acquired:
+                self._inflight.release()
+
+    def _acquire_codex(self, name: str, provider: dict[str, Any], concurrency: int) -> tuple[bool, str]:
+        model = keepalive_model_for(provider)
+        effort = configured_reasoning_effort(provider, {"model": model})
+        sessions = [CodexSession(provider, model, effort) for _ in range(max(concurrency, 1))]
+        with self._lock:
+            self._codex_active.setdefault(name, set()).update(sessions)
+        results: queue.Queue = queue.Queue()
+        threads: list[threading.Thread] = []
+        winner = None
+        details: list[str] = []
+        failure_kind = "acquire"
+        deadline = time.monotonic() + min(
+            float(provider.get("keepalive_timeout") or DEFAULT_KEEPALIVE_TIMEOUT),
+            float(provider.get("keepalive_total_timeout") or DEFAULT_KEEPALIVE_TOTAL_TIMEOUT),
+        ) + 2.0
+
+        def attempt(index: int, session: CodexSession) -> None:
+            outcome = self._probe_codex(provider, session)
+            try:
+                self._log_probe(name, f"codex_acquire_c{concurrency}", outcome, attempt=str(index + 1))
+            finally:
+                results.put((session, outcome))
+
+        try:
+            for index, session in enumerate(sessions):
+                thread = threading.Thread(
+                    target=attempt, args=(index, session),
+                    name=f"codex-keepalive-{name}-{index}", daemon=True,
+                )
+                threads.append(thread)
+                thread.start()
+            received = 0
+            while received < len(sessions) and not self._stop.is_set():
+                try:
+                    session, outcome = results.get(timeout=0.1)
+                except queue.Empty:
+                    if time.monotonic() >= deadline:
+                        details.append("Codex probe thread did not report before deadline")
+                        break
+                    continue
+                received += 1
+                if outcome.ok and session.alive:
+                    winner = session
+                    break
+                session.cancel()
+                if outcome.ok:
+                    details.append("Codex process exited after reply")
+                if outcome.kind != "skipped" and outcome.detail:
+                    details.append(outcome.detail)
+                if outcome.kind in {"auth", "permanent"}:
+                    failure_kind = outcome.kind
+                    break
+            if self._stop.is_set():
+                winner = None
+        finally:
+            for session in sessions:
+                if session is not winner:
+                    session.cancel()
+            for thread in threads:
+                thread.join(timeout=2.0)
+            for session in sessions:
+                if session is not winner:
+                    session.stop()
+            with self._lock:
+                active = self._codex_active.setdefault(name, set())
+                active.difference_update(session for session in sessions if session is not winner)
+        if winner is not None and winner.alive and not self._stop.is_set():
+            with self._lock:
+                self._codex_winners[name] = winner
+            self._update(
+                name, codexPid=winner.pid, codexSession=winner.tag, codexAlive=True,
+                latencyMs=int(outcome.elapsed * 1000),
+                firstTokenMs=outcome.first_token_ms,
+            )
+            return True, ""
+        if winner is not None:
+            winner.stop()
+            with self._lock:
+                self._codex_active.get(name, set()).discard(winner)
+        return KeepAliveResult(
+            False, "; ".join(dict.fromkeys(details))[:400] or "Codex acquisition stopped",
+            failure_kind,
+        )
+
+    def _keepalive_codex_once(self, name: str, provider: dict[str, Any]) -> tuple[bool, str, str]:
+        with self._lock:
+            session = self._codex_winners.get(name)
+        if session is None:
+            return False, "stale", "no retained Codex session"
+        outcome = self._probe_codex(provider, session, warm=True)
+        self._log_probe(
+            name, "codex_warm", outcome, attempt="1",
+            action="keep_process" if outcome.ok else "stop_process",
+        )
+        if outcome.ok and session.alive:
+            self._update(name, latencyMs=int(outcome.elapsed * 1000), firstTokenMs=outcome.first_token_ms)
+            return True, "ok", ""
+        session.stop()
+        with self._lock:
+            self._codex_winners.pop(name, None)
+            self._codex_active.get(name, set()).discard(session)
+        self._update(name, codexPid=None, codexSession="", codexAlive=False)
+        return False, "stale" if outcome.ok else outcome.kind, outcome.detail or "Codex process exited"
+
+    def _run_codex_provider(self, name: str, provider: dict[str, Any], startup_delay: float = 0.0) -> None:
+        try:
+            self._run_provider(name, provider, startup_delay)
+        except Exception as exc:
+            detail = f"Codex keepalive worker error: {type(exc).__name__}"
+            self._note_fail(name, detail)
+            self._update(name, state=KEEPALIVE_STATE_FAILED, note=detail, nextProbeAt=None)
+        finally:
+            with self._lock:
+                sessions = list(self._codex_active.pop(name, set()))
+                self._codex_winners.pop(name, None)
+            for session in sessions:
+                session.cancel()
+            for session in sessions:
+                session.stop()
+            self._update(name, codexPid=None, codexSession="", codexAlive=False)
+
     def _acquire(self, name: str, provider: dict[str, Any], concurrency: int) -> tuple[bool, str]:
         """并发若干独立 session 赛跑，第一个拿到真实回复的胜出，其余全部关掉。
 
         胜者 session release() 进池子 —— 之后真实流量 borrow() 到的就是这条热连接。
         对应 atry 用隔离 CODEX_HOME 并发拉起 N 个会话、赢家留下输家全杀。
         """
+        if self._uses_codex(provider):
+            return self._acquire_codex(name, provider, concurrency)
         results: queue.Queue[tuple[int, requests.Session | None, KeepAliveProbe]] = queue.Queue()
         sessions: dict[int, requests.Session] = {}
         decided = threading.Event()
@@ -4436,7 +4703,7 @@ class KeepAliveManager:
                     if other_index != index:
                         kill(other_index, other)
                 self._pool.release(name, provider, session)
-                self._update(name, latencyMs=int(outcome.elapsed * 1000))
+                self._update(name, latencyMs=int(outcome.elapsed * 1000), firstTokenMs=outcome.first_token_ms)
                 return True, ""
             kill(index, session)
             if outcome.kind in {"auth", "permanent"}:
@@ -4463,12 +4730,14 @@ class KeepAliveManager:
         保温间隔，每次保温都会撞到一条已经死掉的池化连接：那是正常现象，换条连接
         重试成功就不该计失败，否则 provider 会被反复误判 LOST 并触发重抢。
         """
+        if self._uses_codex(provider):
+            return self._keepalive_codex_once(name, provider)
         session = self._pool.borrow(name, provider)
         outcome = self._probe(provider, session)
         self._log_probe(name, "warm", outcome, attempt="1", action="keep_session" if outcome.ok else "classify")
         if outcome.ok:
             self._pool.release(name, provider, session)
-            self._update(name, latencyMs=int(outcome.elapsed * 1000))
+            self._update(name, latencyMs=int(outcome.elapsed * 1000), firstTokenMs=outcome.first_token_ms)
             return True, "ok", ""
 
         if outcome.kind == "timeout":
@@ -4503,7 +4772,7 @@ class KeepAliveManager:
             )
             if retry.ok:
                 self._pool.release(name, provider, session)
-                self._update(name, latencyMs=int(retry.elapsed * 1000))
+                self._update(name, latencyMs=int(retry.elapsed * 1000), firstTokenMs=retry.first_token_ms)
                 return True, "ok", ""
             self._pool.discard(session)
             return False, retry.kind, f"{outcome.detail}; timeout_retry={retry.detail}"
@@ -4534,6 +4803,7 @@ class KeepAliveManager:
                     if state is not None:
                         state["recycled"] = int(state.get("recycled") or 0) + 1
                         state["latencyMs"] = int(retry.elapsed * 1000)
+                        state["firstTokenMs"] = retry.first_token_ms
                 self._log("%s recycled a stale pooled connection (%s)", name, outcome.detail)
                 return True, "ok", ""
             self._pool.discard(session)
@@ -4551,7 +4821,7 @@ class KeepAliveManager:
         )
         if retry.ok:
             self._pool.release(name, provider, session)
-            self._update(name, latencyMs=int(retry.elapsed * 1000))
+            self._update(name, latencyMs=int(retry.elapsed * 1000), firstTokenMs=retry.first_token_ms)
             return True, "ok", ""
         self._pool.discard(session)
         return False, retry.kind, f"{outcome.detail}; retry={retry.detail}"
@@ -4609,7 +4879,10 @@ class KeepAliveManager:
             attempts += 1
             if state == KEEPALIVE_STATE_COLD and first_acquire:
                 concurrency = cold_concurrency
-            elif state == KEEPALIVE_STATE_LOST and reacquire_transport_failure:
+            elif (
+                state == KEEPALIVE_STATE_LOST and reacquire_transport_failure
+                and not self._uses_codex(provider)
+            ):
                 concurrency = keepalive_reacquire_concurrency(reacquire_scale_step)
             else:
                 # Upstream HTTP 429/5xx capacity decisions stay single-flight.
@@ -6886,7 +7159,7 @@ def main() -> int:
     scope.add_argument(
         "--keepalive-only",
         action="store_true",
-        help="Serve only providers with keepalive enabled; their real client traffic shares the warmed pool",
+        help="Serve only providers with keepalive enabled (HTTP pools or managed Codex sessions)",
     )
     scope.add_argument(
         "--exclude-keepalive",
@@ -6970,8 +7243,8 @@ def main() -> int:
         print("provider scope: exclude-keepalive")
     sys.stdout.flush()
 
-    # 保温必须跑在 proxy 进程里：真实流量从 ProviderSessionPool.borrow() 取连接,
-    # 在别的进程里热的是别人的 TCP/TLS 连接，对这里的请求没有任何作用。
+    # HTTP 保活复用本进程的连接池；显式选择 codex_cli 的 Provider 则由本进程
+    # 管理独立 Codex 对话，业务流量仍走原代理路径，不共享保活对话内容。
     server.keepalive = KeepAliveManager(cfg, server.session_pool)
     server.keepalive.start()
 

@@ -657,8 +657,6 @@
         rows.innerHTML = names.map(name => {
           const entry = runtime.providers?.[name] || {};
           const provider = configured.get(name) || {};
-          const isRunning = provider.keepalive === true;
-          const resultText = isRunning ? (entry.lastError ? '失败' : '成功') : '已关闭';
           return `<article class="keepalive-provider-card">
             <div class="keepalive-provider-card-head">
               <div class="keepalive-provider-card-name">
@@ -672,8 +670,8 @@
                 <strong>${esc(entry.model || provider.keepalive_model || modelNames(provider)[0] || '-')}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
-                <span>延迟</span>
-                <strong>${entry.latencyMs == null ? '-' : esc(entry.latencyMs + ' ms')}</strong>
+                <span>首字（s）</span>
+                <strong>${entry.firstTokenMs == null ? '-' : esc((Number(entry.firstTokenMs) / 1000).toFixed(2))}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
                 <span>成功</span>
@@ -684,11 +682,11 @@
                 <strong>${esc(entry.failCount ?? 0)}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
-                <span>最近结果</span>
-                <strong>${esc(resultText)}</strong>
+                <span>启动时间</span>
+                <strong>${esc(entry.startedAt ? keepaliveTime(entry.startedAt) : '-')}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
-                <span>最后成功时间</span>
+                <span>成功时间</span>
                 <strong>${esc(entry.lastOkAt ? keepaliveTime(entry.lastOkAt) : '-')}</strong>
               </div>
               <div class="keepalive-provider-card-stat">

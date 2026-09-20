@@ -33,7 +33,8 @@ AGENTS.md
 docs/
 
 # Local-only tests
-tests/
+tests/*
+!tests/test_codex_keepalive.py
 
 # Local manual backups
 *.bak-*

@@ -44,7 +44,7 @@ class FakeResponse:
     def json(self):
         return json.loads(self.text)
 
-    def iter_lines(self, decode_unicode=False):
+    def iter_lines(self, decode_unicode=False, chunk_size=512):
         for line in self._lines:
             yield line if isinstance(line, bytes) else str(line).encode("utf-8")
 
