@@ -84,6 +84,21 @@
     .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
     .stat { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
     .stat strong { display: block; margin-top: 6px; font-size: 26px; line-height: 1.1; }
+    .stats-summary-panel { display: grid; gap: 12px; }
+    .stats-summary-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .stats-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .stats-card { padding: 13px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+    .stats-card strong { display: block; margin-top: 6px; font-size: 24px; }
+    .stats-date-scope { display: flex; justify-content: flex-end; }
+    .stats-filters { display: flex; gap: 9px; align-items: end; flex-wrap: wrap; }
+    .stats-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .stats-table { width: 100%; min-width: 1100px; border-collapse: collapse; table-layout: fixed; }
+    .stats-table th, .stats-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: center; font-size: 13px; vertical-align: middle; }
+    .stats-table th { background: var(--surface-2); white-space: nowrap; }
+    .stats-table td { overflow-wrap: anywhere; }
+    .stats-table td:not(:first-child) { white-space: nowrap; overflow-wrap: normal; }
+    .stats-table td.ok { background: rgba(35, 115, 66, .10); color: var(--success); }
+    .stats-table td.bad { background: rgba(183, 50, 61, .10); color: var(--danger); }
     .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; align-items: start; }
     .span-3 { grid-column: span 3; }
     .span-4 { grid-column: span 4; }
@@ -230,6 +245,7 @@
     @media (max-width: 980px) {
       .topbar, .panel-head { align-items: stretch; flex-direction: column; }
       .stats { grid-template-columns: 1fr; }
+      .stats-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .span-3, .span-4, .span-6, .span-8, .span-12 { grid-column: 1 / -1; }
       .actions button { flex: 1 1 auto; }
       .mini-row { grid-template-columns: minmax(0, 1fr) 106px 96px 30px; }
@@ -255,32 +271,42 @@
     </div>
   </header>
 
-  <dialog id="loginPasswordDialog" class="password-dialog" aria-labelledby="loginPasswordTitle" aria-describedby="loginPasswordTransport">
+  <dialog id="loginPasswordDialog" class="password-dialog" aria-labelledby="loginPasswordTitle">
     <form id="loginPasswordForm" method="dialog" novalidate>
       <h2 id="loginPasswordTitle">修改登录密码</h2>
-      <div class="field">
-        <label for="loginPasswordUsername">用户名（固定，不可修改）</label>
-        <input id="loginPasswordUsername" value="admin" autocomplete="username" readonly>
-      </div>
-      <div class="note" id="loginPasswordTransport">HTTP 不加密传输密码，请使用 HTTPS 或 SSH 隧道保护连接。</div>
       <div class="field">
         <label for="loginCurrentPassword">当前密码</label>
         <input id="loginCurrentPassword" type="password" autocomplete="current-password" required autofocus>
       </div>
       <div class="field">
         <label for="loginNewPassword">新密码</label>
-        <input id="loginNewPassword" type="password" autocomplete="new-password" aria-describedby="loginPasswordRules" required>
-        <div class="subtle" id="loginPasswordRules">请自行设置 5–128 个字符的新密码：至少 5 个字符，建议 12 个字符以上；不允许控制字符或全空白。</div>
+        <input id="loginNewPassword" type="password" autocomplete="new-password" required>
       </div>
       <div class="field">
         <label for="loginConfirmPassword">确认新密码</label>
         <input id="loginConfirmPassword" type="password" autocomplete="new-password" required>
       </div>
-      <div class="subtle">首次设定或忘记密码时，请在服务器上使用交互式 CLI；此处仅支持修改当前登录密码。</div>
       <div id="loginPasswordMessage" role="status" aria-live="polite"></div>
       <div class="actions">
         <button id="cancelLoginPasswordBtn" type="button">取消</button>
         <button id="submitLoginPasswordBtn" class="primary" type="submit">更新密码</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="authDialog" class="password-dialog" aria-labelledby="authTitle">
+    <form id="authForm" method="dialog" novalidate>
+      <h2 id="authTitle"></h2>
+      <div class="field">
+        <label id="authPasswordLabel" for="authPassword">密码</label>
+        <input id="authPassword" type="password" autocomplete="current-password" required autofocus>
+      </div>
+      <div class="field" id="authConfirmField" hidden>
+        <label for="authConfirmPassword">确认密码</label>
+        <input id="authConfirmPassword" type="password" autocomplete="new-password">
+      </div>
+      <div id="authMessage" role="status" aria-live="polite"></div>
+      <div class="actions">
+        <button id="authSubmitButton" class="primary" type="submit"></button>
       </div>
     </form>
   </dialog>
@@ -307,7 +333,7 @@
       <button class="tab active" data-tab="config" type="button">上游管理</button>
       <button class="tab" data-tab="aiproxy" type="button">本地代理</button>
       <button class="tab" data-tab="keepalive" type="button">抢通保活</button>
-      <a class="tab-link" href="/stats">数据统计</a>
+      <button class="tab" data-tab="stats" type="button">数据统计</button>
     </nav>
 
     <section id="config" class="view active">
@@ -462,14 +488,39 @@
         </section>
       </div>
     </section>
+    <section id="stats" class="view">
+      <section class="panel stats-summary-panel">
+        <div class="stats-summary-head"><h2>数据看板</h2><div class="stats-date-scope"><input id="statsDate" type="date"></div></div>
+        <div class="stats-cards">
+          <div class="stats-card"><span class="subtle">成功请求数/合计请求数</span><strong id="requests">/</strong></div>
+          <div class="stats-card"><span class="subtle">成功率</span><strong id="successRate">/</strong></div>
+          <div class="stats-card"><span class="subtle">平均首字 / 总耗时（s）</span><strong id="latency">/</strong></div>
+          <div class="stats-card"><span class="subtle">输入 / 输出 Token</span><strong id="tokens">/</strong></div>
+          <div class="stats-card"><span class="subtle">缓存读取 Token</span><strong id="cacheRead">/</strong></div>
+          <div class="stats-card"><span class="subtle">缓存读取率</span><strong id="cacheReadRate">/</strong></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="stats-table-wrap"><table class="stats-table"><thead><tr><th>上游</th><th>请求数</th><th>成功率</th><th>响应头（s）</th><th>首字（s）</th><th>总耗时（s）</th><th>输入 Token</th><th>输出 Token</th><th>缓存读取</th><th>缓存读取率</th></tr></thead><tbody id="groupRows"></tbody></table></div>
+      </section>
+      <section class="panel">
+        <div class="stats-filters">
+          <div class="field"><label>上游</label><select id="providerFilter"><option value="">全部上游</option></select></div>
+          <div class="field"><label>模型</label><input id="modelFilter" placeholder="精确模型名"></div>
+          <div class="field"><label>数量</label><select id="limit"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select></div>
+          <button class="primary" id="apply" type="button">刷新</button><span class="subtle" id="message"></span>
+        </div>
+        <div class="stats-table-wrap" style="margin-top:12px"><table class="stats-table"><thead><tr><th>时间</th><th>上游</th><th>模型</th><th>状态</th><th>响应头（s）</th><th>首字（s）</th><th>总耗时（s）</th><th>输入</th><th>输出</th><th>缓存读取</th><th>错误</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+      </section>
+    </section>
 
 
   </main>
 
   <script>
     const SECRET_PLACEHOLDER = '<redacted>';
-    const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy', keepalive: '/keepalive' };
-    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy', '/keepalive': 'keepalive' };
+    const TAB_PATHS = { config: '/config', aiproxy: '/aiproxy', keepalive: '/keepalive', stats: '/stats' };
+    const PATH_TABS = { '/': 'config', '/dashboard.html': 'config', '/config': 'config', '/aiproxy': 'aiproxy', '/keepalive': 'keepalive', '/stats': 'stats' };
     const tabFromLocation = () => PATH_TABS[window.location.pathname] || 'config';
 
     const state = {
@@ -571,6 +622,7 @@
       if (state.selectedProvider >= state.providers.length) state.selectedProvider = -1;
       render();
       startKeepalivePolling();
+      if (state.tab === 'stats') await loadStats();
       const serviceSummary = state.aiproxy.summary ? `，AIProxy${Number(state.aiproxy.summary.healthy || 0) > 0 ? '健康' : '异常'}` : '';
       const saveMessage = state.lastSaveMessage;
       state.lastSaveMessage = '';
@@ -581,6 +633,64 @@
 
     function keepaliveWatched() {
       return state.providers.some(p => p && p.keepalive === true);
+    }
+
+    const statsShanghaiToday = () => {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+      }).formatToParts(new Date()).map(item => [item.type, item.value]));
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const statsSelectedDate = () => $('statsDate')?.value || statsShanghaiToday();
+    const statsPath = path => `${path}?${new URLSearchParams({ date: statsSelectedDate() })}`;
+    const statsNumber = value => Number(value || 0).toLocaleString();
+    const statsSeconds = value => value == null ? '—' : (Number(value) / 1000).toFixed(1);
+    const statsDateTime = value => {
+      const text = String(value ?? '');
+      return text.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/, '$1 $2') || text;
+    };
+
+    async function loadStatsSummary() {
+      const summary = await api(statsPath('/api/stats/summary'));
+      if (!Number(summary.requests || 0)) {
+        for (const id of ['requests', 'successRate', 'latency', 'tokens', 'cacheRead', 'cacheReadRate']) $(id).textContent = '/';
+        return;
+      }
+      $('requests').textContent = `${statsNumber(summary.successes)}/${statsNumber(summary.requests)}`;
+      $('successRate').textContent = `${summary.successRate || 0}%`;
+      $('tokens').textContent = `${statsNumber(summary.inputTokens)} / ${statsNumber(summary.outputTokens)}`;
+      $('cacheRead').textContent = statsNumber(summary.cacheReadTokens);
+      $('cacheReadRate').textContent = `${Number(summary.cacheReadRate || 0).toFixed(2)}%`;
+      $('latency').textContent = `${statsSeconds(summary.averageFirstTokenMs)} / ${statsSeconds(summary.averageDurationMs)}`;
+    }
+
+    async function loadStatsProviders() {
+      const data = await api(statsPath('/api/stats/providers'));
+      $('groupRows').innerHTML = (data.items || []).map(item =>
+        `<tr><td><strong>${esc(item.name || '—')}</strong></td><td>${statsNumber(item.requests)}</td><td>${item.successRate || 0}%</td><td>${statsSeconds(item.averageHeadersMs)}</td><td>${statsSeconds(item.averageFirstTokenMs)}</td><td>${statsSeconds(item.averageDurationMs)}</td><td>${statsNumber(item.inputTokens)}</td><td>${statsNumber(item.outputTokens)}</td><td>${statsNumber(item.cacheReadTokens)}</td><td>${Number(item.cacheReadRate || 0).toFixed(2)}%</td></tr>`
+        ).join('') || '<tr><td colspan="10" class="subtle">暂无统计数据。</td></tr>';
+    }
+
+    async function loadStatsConfig() {
+      const data = await api(statsPath('/api/stats/config'));
+      $('providerFilter').innerHTML = '<option value="">全部上游</option>' +
+        (data.providers || []).map(item => `<option value="${esc(item.value || item.name)}">${esc(item.name)}</option>`).join('');
+    }
+
+    async function loadStatsRequests() {
+      const query = new URLSearchParams({ limit: $('limit').value, date: statsSelectedDate() });
+      if ($('providerFilter').value) query.set('provider', $('providerFilter').value);
+      if ($('modelFilter').value.trim()) query.set('model', $('modelFilter').value.trim());
+      const data = await api(`/api/stats/requests?${query}`);
+      $('requestRows').innerHTML = (data.items || []).map(item =>
+        `<tr><td>${esc(statsDateTime(item.createdAt))}</td><td>${esc(item.provider)}</td><td>${esc(item.model || '—')}</td><td class="${item.ok ? 'ok' : 'bad'}">${item.ok ? '成功' : `失败 ${item.statusCode || ''}`}</td><td>${statsSeconds(item.headersMs)}</td><td>${statsSeconds(item.firstTokenMs)}</td><td>${statsSeconds(item.durationMs)}</td><td>${statsNumber(item.inputTokens)}</td><td>${statsNumber(item.outputTokens)}</td><td>${statsNumber(item.cacheReadTokens)}</td><td title="${esc(item.error)}">${esc(item.error || '—')}</td></tr>`
+      ).join('') || '<tr><td colspan="11" class="subtle">暂无请求数据。</td></tr>';
+      $('message').textContent = `${statsSelectedDate()} · 已读取 ${(data.items || []).length} 条`;
+    }
+
+    async function loadStats() {
+      if (!$('statsDate')) return;
+      await Promise.all([loadStatsConfig(), loadStatsSummary(), loadStatsProviders(), loadStatsRequests()]);
     }
 
     async function refreshKeepalive() {
@@ -674,12 +784,16 @@
                 <strong>${entry.firstTokenMs == null ? '-' : esc((Number(entry.firstTokenMs) / 1000).toFixed(2))}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
-                <span>成功</span>
+                <span>成功总数</span>
                 <strong>${esc(entry.okCount ?? 0)}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
-                <span>失败</span>
+                <span>失败总数</span>
                 <strong>${esc(entry.failCount ?? 0)}</strong>
+              </div>
+              <div class="keepalive-provider-card-stat">
+                <span>成功前失败数</span>
+                <strong>${esc(entry.lastSuccessFailCount ?? 0)}</strong>
               </div>
               <div class="keepalive-provider-card-stat">
                 <span>启动时间</span>
@@ -688,10 +802,6 @@
               <div class="keepalive-provider-card-stat">
                 <span>成功时间</span>
                 <strong>${esc(entry.lastOkAt ? keepaliveTime(entry.lastOkAt) : '-')}</strong>
-              </div>
-              <div class="keepalive-provider-card-stat">
-                <span>成功前失败次数</span>
-                <strong>${esc(entry.lastSuccessFailCount ?? 0)}</strong>
               </div>
             </div>
             <div class="keepalive-provider-card-foot">
@@ -1934,6 +2044,81 @@
       }
     }
 
+    const dashboardAuthReady = (async function setupAuthDialog() {
+      const dialog = $('authDialog');
+      const form = $('authForm');
+      const title = $('authTitle');
+      const password = $('authPassword');
+      const confirmField = $('authConfirmField');
+      const confirmPassword = $('authConfirmPassword');
+      const message = $('authMessage');
+      const submit = $('authSubmitButton');
+      let setup = false;
+
+      function show(mode) {
+        setup = mode === 'setup';
+        title.textContent = setup ? '设置密码' : '登录';
+        password.autocomplete = setup ? 'new-password' : 'current-password';
+        confirmField.hidden = !setup;
+        confirmPassword.required = setup;
+        confirmPassword.value = '';
+        message.className = '';
+        message.textContent = '';
+        submit.textContent = setup ? '保存密码' : '登录';
+        dialog.showModal();
+        password.focus();
+      }
+
+      const status = await fetch('/auth/status', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+      }).then(response => response.json());
+      if (status.authenticated) return true;
+      show(status.setupRequired ? 'setup' : 'login');
+      return new Promise(resolve => {
+        form.addEventListener('submit', async event => {
+          event.preventDefault();
+          if (submit.disabled) return;
+          const value = password.value;
+          if (setup && value !== confirmPassword.value) {
+            message.className = 'danger';
+            message.textContent = '两次输入的密码不一致。';
+            confirmPassword.focus();
+            return;
+          }
+          submit.disabled = true;
+          message.className = 'subtle';
+          message.textContent = '';
+          try {
+            const response = await fetch(setup ? '/auth/setup' : '/auth/login', {
+              method: 'POST',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+              redirect: 'error',
+              body: JSON.stringify(setup
+                ? { password: value, confirmPassword: confirmPassword.value }
+                : { password: value }),
+            });
+            if (!response.ok) {
+              const result = await response.json().catch(() => ({}));
+              throw new Error(result.error || (setup ? '密码设置失败' : '密码不正确'));
+            }
+            dialog.close();
+            resolve(true);
+            window.location.reload();
+          } catch (error) {
+            message.className = 'danger';
+            message.textContent = error.message;
+            password.focus();
+          } finally {
+            submit.disabled = false;
+          }
+        }, { once: true });
+      });
+    })();
+
     (function setupLoginPasswordDialog() {
       const dialog = $('loginPasswordDialog');
       const form = $('loginPasswordForm');
@@ -1983,20 +2168,6 @@
         const [currentPassword, newPassword, confirmPassword] = fields.map(field => field.value);
         if (!currentPassword) {
           showError('请输入当前密码。', fields[0]);
-          return;
-        }
-        // 按 Unicode 字符计数，不裁剪空格，也不按 UTF-16 长度截断输入。
-        const length = Array.from(newPassword).length;
-        if (length < 5 || length > 128) {
-          showError('新密码必须为 5–128 个字符，建议 12 个字符以上。', fields[1]);
-          return;
-        }
-        if (/\p{C}/u.test(newPassword)) {
-          showError('新密码不允许包含控制字符。', fields[1]);
-          return;
-        }
-        if (/^\s+$/u.test(newPassword)) {
-          showError('新密码不能全部为空白字符。', fields[1]);
           return;
         }
         if (newPassword !== confirmPassword) {
@@ -2244,6 +2415,11 @@
     $('providerStreamMaxRetries').addEventListener('input', () => { $('providerStreamMaxRetries').dataset.autoDefault = '0'; });
     $('autoCompactPercent').addEventListener('input', markCompactPercentDirty);
     $('autoCompactTokenLimit').addEventListener('input', markCompactPercentDirty);
+    $('apply').addEventListener('click', () => loadStats().catch(err => { $('message').textContent = `读取失败：${err.message}`; }));
+    $('statsDate').addEventListener('change', () => loadStats().catch(err => { $('message').textContent = `读取失败：${err.message}`; }));
+    $('limit').addEventListener('change', () => loadStatsRequests().catch(err => { $('message').textContent = `读取失败：${err.message}`; }));
+    $('providerFilter').addEventListener('change', () => loadStatsRequests().catch(err => { $('message').textContent = `读取失败：${err.message}`; }));
+    $('modelFilter').addEventListener('change', () => loadStatsRequests().catch(err => { $('message').textContent = `读取失败：${err.message}`; }));
 
     $('importConfigFile').addEventListener('change', async (event) => {
       const file = event.target.files[0];
@@ -2273,7 +2449,8 @@
     });
 
     setActiveTab(state.tab);
-    loadAll().catch(err => {
+    if ($('statsDate')) $('statsDate').value = statsShanghaiToday();
+    dashboardAuthReady.then(() => loadAll()).catch(err => {
       $('serverState').textContent = err.message;
     });
   </script>

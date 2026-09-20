@@ -12,7 +12,6 @@ import secrets
 import stat
 import tempfile
 import threading
-import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,10 +21,8 @@ PASSWORD_ITERATIONS = 600_000
 
 
 def validate_password(password: str) -> None:
-    if (not isinstance(password, str) or not 5 <= len(password) <= 128
-            or any(unicodedata.category(ch).startswith("C") for ch in password)
-            or not password.strip()):
-        raise ValueError("密码须为 5–128 个字符，不能包含控制字符或全部为空白；建议使用至少 12 个字符")
+    if not isinstance(password, str):
+        raise ValueError("密码必须是字符串")
 
 
 def _basic_credentials(value: str) -> tuple[str, str] | None:
@@ -102,7 +99,7 @@ def set_password(path: Path, password: str) -> None:
 
 
 def _matches_password(password: str, record: dict) -> bool:
-    if not isinstance(password, str) or len(password) > 128:
+    if not isinstance(password, str):
         return False
     try:
         digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
@@ -123,18 +120,21 @@ class PasswordAuth:
         self._cached_credentials = None
 
     def authenticate(self, value: str) -> bool:
+        credentials = _basic_credentials(value)
+        return credentials is not None and self.verify_password(credentials[1])
+
+    def verify_password(self, password: str) -> bool:
         with self._lock:
             record = _read_password_record(self.path)
-            credentials = _basic_credentials(value)
-            if credentials is None:
+            if not isinstance(password, str):
                 return False
-            digest = hashlib.sha256(f"{credentials[0]}:{credentials[1]}".encode("utf-8")).digest()
+            digest = hashlib.sha256(f"admin:{password}".encode("utf-8")).digest()
             # Cache only one successful login in memory, bound to the on-disk
             # salted verifier. Wrong passwords never populate the cache.
             if (record == self._cached_record and self._cached_credentials is not None
                     and hmac.compare_digest(digest, self._cached_credentials)):
                 return True
-            if not _matches_password(credentials[1], record):
+            if not _matches_password(password, record):
                 return False
             self._cached_record = record
             self._cached_credentials = digest

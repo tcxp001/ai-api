@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import signal
 import sqlite3
@@ -73,7 +74,6 @@ LOG_DIR = BASE_DIR / "log"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 CHECKINS_FILE = DATA_DIR / "checkins.json"
 DASHBOARD_HTML = BASE_DIR / "dashboard.html"
-STATS_HTML = BASE_DIR / "stats.html"
 STATS_DB = DATA_DIR / "request_stats.sqlite3"
 CODEX_CONFIG = Path("/root/.codex/config.toml")
 CODEX_DIR = Path("/root/.codex")
@@ -2770,6 +2770,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
             "inputTokens": 0,
             "outputTokens": 0,
             "cacheReadTokens": 0,
+            "cacheReadRate": 0,
             "cacheCreationTokens": 0,
             "averageFirstTokenMs": None,
             "averageDurationMs": None,
@@ -2784,6 +2785,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(CASE WHEN ok != 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
                 AVG(first_token_ms) AS average_first_token_ms,
                 AVG(duration_ms) AS average_duration_ms,
@@ -2795,6 +2797,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
         ).fetchone()
         requests_count = int(row["requests"] or 0)
         successes = int(row["successes"] or 0)
+        cache_read_successes = int(row["cache_read_successes"] or 0)
         return {
             "requests": requests_count,
             "successes": successes,
@@ -2802,6 +2805,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
             "inputTokens": int(row["input_tokens"] or 0),
             "outputTokens": int(row["output_tokens"] or 0),
             "cacheReadTokens": int(row["cache_read_tokens"] or 0),
+            "cacheReadRate": round(cache_read_successes * 100 / successes, 2) if successes else 0,
             "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
             "averageFirstTokenMs": row["average_first_token_ms"],
             "averageDurationMs": row["average_duration_ms"],
@@ -2836,6 +2840,7 @@ def stats_grouped(
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(CASE WHEN ok != 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
                 AVG(headers_ms) AS average_headers_ms,
                 AVG(first_token_ms) AS average_first_token_ms,
@@ -2852,6 +2857,7 @@ def stats_grouped(
         for row in rows:
             requests_count = int(row["requests"] or 0)
             successes = int(row["successes"] or 0)
+            cache_read_successes = int(row["cache_read_successes"] or 0)
             result.append(
                 {
                     "name": str(row["name"] or ""),
@@ -2861,6 +2867,7 @@ def stats_grouped(
                     "inputTokens": int(row["input_tokens"] or 0),
                     "outputTokens": int(row["output_tokens"] or 0),
                     "cacheReadTokens": int(row["cache_read_tokens"] or 0),
+                    "cacheReadRate": round(cache_read_successes * 100 / successes, 2) if successes else 0,
                     "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
                     "averageHeadersMs": row["average_headers_ms"],
                     "averageFirstTokenMs": row["average_first_token_ms"],
@@ -3407,7 +3414,6 @@ DASHBOARD_PAGE_PATHS = {
     "/",
     "/dashboard.html",
     "/stats",
-    "/stats.html",
     "/config",
     "/aiproxy",
 }
@@ -3421,7 +3427,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         sys.stdout.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), message))
         sys.stdout.flush()
 
+    def _session_authenticated(self) -> bool:
+        token = self.headers.get("Cookie", "")
+        for item in token.split(";"):
+            name, separator, value = item.strip().partition("=")
+            if separator and name == "ai_api_session" and value:
+                sessions = getattr(self.server, "dashboard_sessions", set())
+                return value in sessions
+        return False
+
+    def _public_auth_mutation_allowed(self, *, login: bool = False) -> bool:
+        if not login and getattr(self.server, "password_auth", None) is not None:
+            self.send_json(401, {"error": "请先登录"})
+            return False
+        content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if not allowed_browser_origin(self.headers) or content_type != "application/json":
+            self.close_connection = True
+            self.send_json(403, {"error": "拒绝跨站或非 JSON 管理请求"})
+            return False
+        return True
+
+    def _set_session_cookie(self) -> None:
+        token = secrets.token_urlsafe(32)
+        self.server.dashboard_sessions.add(token)
+        self._session_cookie = f"ai_api_session={token}; Path=/; HttpOnly; SameSite=Strict"
+
     def authorize(self, *, mutation: bool = False) -> bool:
+        if self._session_authenticated():
+            return True
         auth = getattr(self.server, "password_auth", None)
         try:
             authenticated = auth.authenticate(self.headers.get("Authorization") or "") if auth else None
@@ -3429,13 +3462,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             authenticated = None
         if authenticated is None:
             self.close_connection = True
-            self.send_json(503, {"error": "管理台认证未配置"})
+            self.send_json(401, {"error": "请先设置密码"})
             return False
         if not authenticated:
             self.close_connection = True
             body = b'{"error":"Dashboard authentication required"}'
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="ai-api", charset="UTF-8"')
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -3479,6 +3511,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        if getattr(self, "_session_cookie", ""):
+            self.send_header("Set-Cookie", self._session_cookie)
+            self._session_cookie = ""
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -3504,13 +3539,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8") or "{}")
 
     def do_GET(self) -> None:
-        if not self.authorize():
-            return
         split = urlsplit(self.path)
         path = split.path
         accept = self.headers.get("Accept") or ""
         wants_html = "text/html" in accept.lower()
         try:
+            if path == "/auth/status":
+                authenticated = self._session_authenticated()
+                auth = getattr(self.server, "password_auth", None)
+                if not authenticated and auth is not None:
+                    try:
+                        authenticated = auth.authenticate(self.headers.get("Authorization") or "")
+                    except (OSError, ValueError):
+                        authenticated = False
+                self.send_json(200, {
+                    "setupRequired": auth is None,
+                    "authenticated": authenticated,
+                })
+                return
+            if path in {"/", "/dashboard.html", "/stats", "/config", "/aiproxy", "/keepalive"} and (
+                path in {"/", "/dashboard.html"} or wants_html
+            ):
+                if path == "/":
+                    self.send_response(302)
+                    self.send_header("Location", "/config")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+                return
+            if not self.authorize():
+                return
             # Keep the legacy browser entry points working: a normal browser
             # navigation to /config or /aiproxy should open the dashboard,
             # while the frontend's fetch('/config') request (Accept: */*) must
@@ -3526,8 +3585,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ):
                 self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
-            if path == "/stats.html" or (path == "/stats" and wants_html):
-                self.send_text(200, STATS_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            if path == "/dashboard.html" or (path == "/stats" and wants_html):
+                self.send_text(200, DASHBOARD_HTML.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/config/export":
                 self.send_text(200, provider_yaml_text([public_config_fields(p) for p in load_provider_list()]), "application/x-yaml; charset=utf-8")
@@ -3598,10 +3657,42 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": self.error_detail(exc)})
 
     def do_POST(self) -> None:
+        path = urlsplit(self.path).path
+        if path in {"/auth/setup", "/auth/login"}:
+            if not self._public_auth_mutation_allowed(login=path == "/auth/login"):
+                return
+            try:
+                payload = self.read_body()
+                if not isinstance(payload, dict):
+                    raise ValueError("request body must be an object")
+                password = payload.get("password")
+                if not isinstance(password, str):
+                    raise ValueError("密码必须是字符串")
+                if path == "/auth/setup":
+                    if getattr(self.server, "password_auth", None) is not None:
+                        self.send_json(409, {"error": "密码已经设置"})
+                        return
+                    if password != payload.get("confirmPassword"):
+                        raise ValueError("两次输入的密码不一致")
+                    set_password(self.server.auth_path, password)
+                    self.server.password_auth = PasswordAuth(self.server.auth_path)
+                    self._set_session_cookie()
+                    self.send_json(200, {"ok": True})
+                    return
+                if getattr(self.server, "password_auth", None) is None:
+                    self.send_json(409, {"error": "请先设置密码"})
+                    return
+                if not self.server.password_auth.verify_password(password):
+                    self.send_json(401, {"error": "密码不正确"})
+                    return
+                self._set_session_cookie()
+                self.send_json(200, {"ok": True})
+                return
+            except Exception as exc:
+                self.send_json(400, {"error": self.error_detail(exc)})
+            return
         if not self.authorize(mutation=True):
             return
-        split = urlsplit(self.path)
-        path = split.path
         try:
             payload = self.read_body()
             if not isinstance(payload, dict):
@@ -3948,24 +4039,28 @@ def main() -> int:
                 raise ValueError("请在服务器的交互终端运行 --set-password，不要通过参数或管道传入密码")
             with warnings.catch_warnings():
                 warnings.simplefilter("error", getpass.GetPassWarning)
-                password = getpass.getpass("为 admin 设置新密码（5–128 个字符，建议至少 12 个，输入不回显）：")
+                password = getpass.getpass("设置新密码（输入不回显）：")
                 confirmation = getpass.getpass("再次输入新密码：")
             if password != confirmation:
                 raise ValueError("两次输入的密码不一致，未修改密码")
             set_password(auth_path, password)
         except (ValueError, OSError, EOFError, KeyboardInterrupt, getpass.GetPassWarning):
-            print("密码未设置：需要交互终端、两次一致的 5–128 字符密码（无控制字符），以及可写的私有密码文件。", file=sys.stderr)
+            print("密码未设置：需要交互终端、两次输入一致，以及可写的私有密码文件。", file=sys.stderr)
             return 2
         print("admin 密码已设置；运行中的新版本管理台会自动生效，无需重启。")
         return 0
     try:
         password_auth = PasswordAuth(auth_path)
+    except FileNotFoundError:
+        password_auth = None
+        print("管理密码尚未设置，首次访问管理台时将引导设置。")
     except (OSError, ValueError):
-        print("管理密码未配置或文件无效。请先运行 python3 dashboard.py --set-password"
-              "（自定义 --auth-file 时须指定相同路径）。", file=sys.stderr)
+        print("管理密码文件无效，请在服务器上重新设置管理密码。", file=sys.stderr)
         return 2
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     server.password_auth = password_auth
+    server.auth_path = auth_path
+    server.dashboard_sessions = set()
     telegram_bot = None
     if TelegramKeepAliveBot is not None:
         telegram_bot = TelegramKeepAliveBot.from_file(
@@ -3981,7 +4076,7 @@ def main() -> int:
     print(f"dashboard listening on {listen_url}")
     print(f"dashboard access URL: {access_url}")
     print(f"config: {active_config_file()}")
-    print(f"dashboard login: admin; private password hash file: {auth_path}")
+    print(f"private password hash file: {auth_path}")
     print("HTTP has no transport encryption; use an SSH tunnel or a trusted HTTPS reverse proxy outside a trusted LAN.")
     sys.stdout.flush()
     if args.open:
