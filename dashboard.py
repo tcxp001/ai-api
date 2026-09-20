@@ -2785,7 +2785,8 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(CASE WHEN ok != 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
+                COALESCE(SUM(CASE WHEN ok != 0 AND input_tokens > 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
+                COALESCE(SUM(CASE WHEN ok != 0 AND input_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_rate_successes,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
                 AVG(first_token_ms) AS average_first_token_ms,
                 AVG(duration_ms) AS average_duration_ms,
@@ -2798,6 +2799,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
         requests_count = int(row["requests"] or 0)
         successes = int(row["successes"] or 0)
         cache_read_successes = int(row["cache_read_successes"] or 0)
+        cache_rate_successes = int(row["cache_rate_successes"] or 0)
         return {
             "requests": requests_count,
             "successes": successes,
@@ -2805,7 +2807,7 @@ def stats_summary(query: dict[str, list[str]] | None = None) -> dict[str, Any]:
             "inputTokens": int(row["input_tokens"] or 0),
             "outputTokens": int(row["output_tokens"] or 0),
             "cacheReadTokens": int(row["cache_read_tokens"] or 0),
-            "cacheReadRate": round(cache_read_successes * 100 / successes, 2) if successes else 0,
+            "cacheReadRate": round(cache_read_successes * 100 / cache_rate_successes, 2) if cache_rate_successes else 0,
             "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
             "averageFirstTokenMs": row["average_first_token_ms"],
             "averageDurationMs": row["average_duration_ms"],
@@ -2840,7 +2842,8 @@ def stats_grouped(
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(CASE WHEN ok != 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
+                COALESCE(SUM(CASE WHEN ok != 0 AND input_tokens > 0 AND cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_read_successes,
+                COALESCE(SUM(CASE WHEN ok != 0 AND input_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_rate_successes,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
                 AVG(headers_ms) AS average_headers_ms,
                 AVG(first_token_ms) AS average_first_token_ms,
@@ -2858,6 +2861,7 @@ def stats_grouped(
             requests_count = int(row["requests"] or 0)
             successes = int(row["successes"] or 0)
             cache_read_successes = int(row["cache_read_successes"] or 0)
+            cache_rate_successes = int(row["cache_rate_successes"] or 0)
             result.append(
                 {
                     "name": str(row["name"] or ""),
@@ -2867,7 +2871,7 @@ def stats_grouped(
                     "inputTokens": int(row["input_tokens"] or 0),
                     "outputTokens": int(row["output_tokens"] or 0),
                     "cacheReadTokens": int(row["cache_read_tokens"] or 0),
-                    "cacheReadRate": round(cache_read_successes * 100 / successes, 2) if successes else 0,
+                    "cacheReadRate": round(cache_read_successes * 100 / cache_rate_successes, 2) if cache_rate_successes else 0,
                     "cacheCreationTokens": int(row["cache_creation_tokens"] or 0),
                     "averageHeadersMs": row["average_headers_ms"],
                     "averageFirstTokenMs": row["average_first_token_ms"],
