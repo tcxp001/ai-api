@@ -162,7 +162,10 @@
     .keepalive-card { display: grid; gap: 12px; padding: 14px; }
     .keepalive-card > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
     .keepalive-card > div:first-child h2 { font-size: 15px; }
-    .keepalive-settings-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
+    .keepalive-settings-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: end; }
+    .keepalive-range-field { grid-column: span 2; }
+    .inline-range { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px; align-items: center; }
+    .inline-range input { width: 100%; min-width: 0; }
     .keepalive-card.disabled .keepalive-settings-row { opacity: .55; }
     .keepalive-actions { margin-top: 2px; justify-content: flex-start; }
     .keepalive-actions button { min-width: 0; min-height: 36px; padding: 0 12px; font-size: inherit; }
@@ -256,6 +259,7 @@
       .mini-row { grid-template-columns: minmax(0, 1fr) 106px 96px 30px; }
       .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
       .keepalive-settings-row { grid-template-columns: 1fr; align-items: stretch; }
+      .keepalive-range-field { grid-column: auto; }
       .provider-order-row { grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); }
     }
   </style>
@@ -438,9 +442,13 @@
                 <label for="providerKeepaliveRetryInterval">抢通间隔（秒）</label>
                 <input id="providerKeepaliveRetryInterval" type="number" min="1" max="3600" step="1" value="5">
               </div>
-              <div class="field">
-                <label for="providerKeepaliveInterval">保活间隔（秒）</label>
-                <input id="providerKeepaliveInterval" type="number" min="5" max="3600" step="1" value="60">
+              <div class="field keepalive-range-field">
+                <label>保活间隔（秒）</label>
+                <div class="inline-range">
+                  <input id="providerKeepaliveIntervalMin" type="number" min="5" max="3600" step="1" value="90">
+                  <span>-</span>
+                  <input id="providerKeepaliveIntervalMax" type="number" min="5" max="3600" step="1" value="120">
+                </div>
               </div>
             </div>
             <div class="actions keepalive-actions">
@@ -563,7 +571,8 @@
     const CODEX_STREAM_MAX_RETRIES_DEFAULT = 5;
     const KEEPALIVE_CONCURRENCY_DEFAULT = 10;
     const KEEPALIVE_RETRY_INTERVAL_DEFAULT = 10;
-    const KEEPALIVE_INTERVAL_DEFAULT = 60;
+    const KEEPALIVE_INTERVAL_MIN_DEFAULT = 90;
+    const KEEPALIVE_INTERVAL_MAX_DEFAULT = 120;
     const CODEX_RETRY_MAX = 100;
     const api = async (path, options = {}) => {
       const res = await fetch(path, {
@@ -1016,14 +1025,14 @@
       if (card) card.classList.toggle('disabled', !available);
       if (toggleButton) toggleButton.disabled = !available;
       if (configButton) configButton.disabled = !available;
-      for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveRetryInterval', 'providerKeepaliveInterval']) {
+      for (const id of ['providerKeepaliveConcurrency', 'providerKeepaliveRetryInterval', 'providerKeepaliveIntervalMin', 'providerKeepaliveIntervalMax']) {
         const input = $(id);
         if (input) input.disabled = !available;
       }
     }
 
     function collectKeepaliveSettings() {
-      return {
+      const settings = {
         concurrency: collectIntegerInput(
           'providerKeepaliveConcurrency',
           '并发数',
@@ -1038,21 +1047,33 @@
           3600,
           KEEPALIVE_RETRY_INTERVAL_DEFAULT
         ),
-        interval: collectIntegerInput(
-          'providerKeepaliveInterval',
-          '保活间隔',
+        intervalMin: collectIntegerInput(
+          'providerKeepaliveIntervalMin',
+          '保活间隔下限',
           5,
           3600,
-          KEEPALIVE_INTERVAL_DEFAULT
+          KEEPALIVE_INTERVAL_MIN_DEFAULT
+        ),
+        intervalMax: collectIntegerInput(
+          'providerKeepaliveIntervalMax',
+          '保活间隔上限',
+          5,
+          3600,
+          KEEPALIVE_INTERVAL_MAX_DEFAULT
         )
       };
+      if (settings.intervalMin > settings.intervalMax) {
+        throw new Error('保活间隔下限不能大于上限');
+      }
+      return settings;
     }
 
     function keepaliveSettingsForProvider(provider) {
       return {
         concurrency: Number(provider?.keepalive_concurrency || KEEPALIVE_CONCURRENCY_DEFAULT),
         retryInterval: Number(provider?.keepalive_retry_interval || KEEPALIVE_RETRY_INTERVAL_DEFAULT),
-        interval: Number(provider?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT)
+        intervalMin: Number(provider?.keepalive_interval_min || provider?.keepalive_interval || KEEPALIVE_INTERVAL_MIN_DEFAULT),
+        intervalMax: Number(provider?.keepalive_interval_max || provider?.keepalive_interval || KEEPALIVE_INTERVAL_MAX_DEFAULT)
       };
     }
 
@@ -1060,7 +1081,8 @@
       const saved = keepaliveSettingsForProvider(provider);
       return saved.concurrency !== settings.concurrency
         || saved.retryInterval !== settings.retryInterval
-        || saved.interval !== settings.interval;
+        || saved.intervalMin !== settings.intervalMin
+        || saved.intervalMax !== settings.intervalMax;
     }
 
     function applyKeepaliveResult(provider, data, updateInputs = true) {
@@ -1068,12 +1090,15 @@
       provider.keepalive = saved.enabled === true;
       provider.keepalive_concurrency = Number(saved.concurrency || KEEPALIVE_CONCURRENCY_DEFAULT);
       provider.keepalive_retry_interval = Number(saved.retryInterval || KEEPALIVE_RETRY_INTERVAL_DEFAULT);
-      provider.keepalive_interval = Number(saved.interval || KEEPALIVE_INTERVAL_DEFAULT);
+      provider.keepalive_interval_min = Number(saved.intervalMin || KEEPALIVE_INTERVAL_MIN_DEFAULT);
+      provider.keepalive_interval_max = Number(saved.intervalMax || KEEPALIVE_INTERVAL_MAX_DEFAULT);
+      provider.keepalive_interval = provider.keepalive_interval_min;
       setProviderKeepaliveEnabled(provider.keepalive);
       if (updateInputs) {
         $('providerKeepaliveConcurrency').value = provider.keepalive_concurrency;
         $('providerKeepaliveRetryInterval').value = provider.keepalive_retry_interval;
-        $('providerKeepaliveInterval').value = provider.keepalive_interval;
+        $('providerKeepaliveIntervalMin').value = provider.keepalive_interval_min;
+        $('providerKeepaliveIntervalMax').value = provider.keepalive_interval_max;
       }
       renderProviderRows();
       startKeepalivePolling();
@@ -1743,7 +1768,8 @@
       $('providerKeepaliveRetryInterval').value = Number(
         p?.keepalive_retry_interval || KEEPALIVE_RETRY_INTERVAL_DEFAULT
       );
-      $('providerKeepaliveInterval').value = Number(p?.keepalive_interval || KEEPALIVE_INTERVAL_DEFAULT);
+      $('providerKeepaliveIntervalMin').value = Number(p?.keepalive_interval_min || p?.keepalive_interval || KEEPALIVE_INTERVAL_MIN_DEFAULT);
+      $('providerKeepaliveIntervalMax').value = Number(p?.keepalive_interval_max || p?.keepalive_interval || KEEPALIVE_INTERVAL_MAX_DEFAULT);
       setProviderKeepaliveEnabled(p?.keepalive === true);
       const configButton = $('providerKeepaliveConfigBtn');
       if (configButton) {

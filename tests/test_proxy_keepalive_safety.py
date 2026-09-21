@@ -24,6 +24,7 @@ def build_config(base_url, **overrides):
         "models": {"gpt-5.6-sol": {}},
         "api_key": "sk-unit-test-key-0001",
         "keepalive": True,
+        "keepalive_backend": "http",
         "keepalive_interval": 5,
         "keepalive_timeout": 5,
         "keepalive_concurrency": 3,
@@ -214,6 +215,13 @@ class ProbeDeadlineUpstream:
 
 
 class KeepAlivePermanentFailureTest(unittest.TestCase):
+    def test_test_manager_does_not_publish_to_runtime_event_queue(self):
+        cfg = build_config("http://127.0.0.1:1")
+        manager = proxy.KeepAliveManager(cfg, proxy.ProviderSessionPool())
+        with mock.patch.object(proxy, "publish_keepalive_event") as publish:
+            manager._emit_event("a", "start", "开始抢通")
+        publish.assert_not_called()
+
     def test_error_classification_does_not_stop_transient_failures(self):
         cases = [
             (401, {}, "auth"),

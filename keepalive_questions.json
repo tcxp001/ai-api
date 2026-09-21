@@ -1,0 +1,1205 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "Q001",
+      "category": "运算推理",
+      "question": "7+5×2等于多少？",
+      "answer": "17"
+    },
+    {
+      "id": "Q002",
+      "category": "运算推理",
+      "question": "(18-6)÷3等于多少？",
+      "answer": "4"
+    },
+    {
+      "id": "Q003",
+      "category": "运算推理",
+      "question": "24÷4+3等于多少？",
+      "answer": "9"
+    },
+    {
+      "id": "Q004",
+      "category": "运算推理",
+      "question": "5×(9-4)等于多少？",
+      "answer": "25"
+    },
+    {
+      "id": "Q005",
+      "category": "运算推理",
+      "question": "36÷(3×4)等于多少？",
+      "answer": "3"
+    },
+    {
+      "id": "Q006",
+      "category": "运算推理",
+      "question": "12的平方比10的平方大多少？",
+      "answer": "44"
+    },
+    {
+      "id": "Q007",
+      "category": "运算推理",
+      "question": "6×7减去8等于多少？",
+      "answer": "34"
+    },
+    {
+      "id": "Q008",
+      "category": "运算推理",
+      "question": "8和14的平均数是多少？",
+      "answer": "11"
+    },
+    {
+      "id": "Q009",
+      "category": "运算推理",
+      "question": "15除以4，余数是多少？",
+      "answer": "3"
+    },
+    {
+      "id": "Q010",
+      "category": "运算推理",
+      "question": "最小两位奇数加最大个位偶数，结果？",
+      "answer": "19"
+    },
+    {
+      "id": "Q011",
+      "category": "运算推理",
+      "question": "23向上取到最近的5的倍数，是多少？",
+      "answer": "25"
+    },
+    {
+      "id": "Q012",
+      "category": "运算推理",
+      "question": "47向下取到最近的10的倍数，是多少？",
+      "answer": "40"
+    },
+    {
+      "id": "Q013",
+      "category": "运算推理",
+      "question": "一个数加7等于19，这个数乘2是多少？",
+      "answer": "24"
+    },
+    {
+      "id": "Q014",
+      "category": "运算推理",
+      "question": "比30小的最大3的倍数是多少？",
+      "answer": "27"
+    },
+    {
+      "id": "Q015",
+      "category": "运算推理",
+      "question": "4个9的和再减6，结果？",
+      "answer": "30"
+    },
+    {
+      "id": "Q016",
+      "category": "运算推理",
+      "question": "120÷5÷4等于多少？",
+      "answer": "6"
+    },
+    {
+      "id": "Q017",
+      "category": "运算推理",
+      "question": "3的平方加4的平方，结果？",
+      "answer": "25"
+    },
+    {
+      "id": "Q018",
+      "category": "运算推理",
+      "question": "2、5、7各用一次，组成最大三位数？",
+      "answer": "752"
+    },
+    {
+      "id": "Q019",
+      "category": "运算推理",
+      "question": "0、3、8各用一次，组成最小三位数？",
+      "answer": "308"
+    },
+    {
+      "id": "Q020",
+      "category": "运算推理",
+      "question": "负3加8再减2，结果？",
+      "answer": "3"
+    },
+    {
+      "id": "Q021",
+      "category": "比例与百分比",
+      "question": "20的3/4是多少？",
+      "answer": "15"
+    },
+    {
+      "id": "Q022",
+      "category": "比例与百分比",
+      "question": "一个数的2/3是18，这个数是多少？",
+      "answer": "27"
+    },
+    {
+      "id": "Q023",
+      "category": "比例与百分比",
+      "question": "80元打七五折，售价多少元？",
+      "answer": "60"
+    },
+    {
+      "id": "Q024",
+      "category": "比例与百分比",
+      "question": "50元先涨20%再降20%，现价多少元？",
+      "answer": "48"
+    },
+    {
+      "id": "Q025",
+      "category": "比例与百分比",
+      "question": "30人中40%是女生，男生几人？",
+      "answer": "18"
+    },
+    {
+      "id": "Q026",
+      "category": "比例与百分比",
+      "question": "把36按1:2分，大份是多少？",
+      "answer": "24"
+    },
+    {
+      "id": "Q027",
+      "category": "比例与百分比",
+      "question": "两数比2:3，较小为10，较大多少？",
+      "answer": "15"
+    },
+    {
+      "id": "Q028",
+      "category": "比例与百分比",
+      "question": "8是某数的25%，该数是多少？",
+      "answer": "32"
+    },
+    {
+      "id": "Q029",
+      "category": "比例与百分比",
+      "question": "100增加10%后再增加10%，结果？",
+      "answer": "121"
+    },
+    {
+      "id": "Q030",
+      "category": "比例与百分比",
+      "question": "1/2与1/3之和是多少？",
+      "answer": "5/6"
+    },
+    {
+      "id": "Q031",
+      "category": "比例与百分比",
+      "question": "3/4减1/8是多少？",
+      "answer": "5/8"
+    },
+    {
+      "id": "Q032",
+      "category": "比例与百分比",
+      "question": "2/3的倒数是多少？",
+      "answer": "3/2"
+    },
+    {
+      "id": "Q033",
+      "category": "比例与百分比",
+      "question": "1/4、0.3、20%中最大的是哪个？",
+      "answer": "0.3"
+    },
+    {
+      "id": "Q034",
+      "category": "比例与百分比",
+      "question": "10个零件坏2个，合格率多少？",
+      "answer": "80%"
+    },
+    {
+      "id": "Q035",
+      "category": "比例与百分比",
+      "question": "成本40元售价50元，按成本算利润率？",
+      "answer": "25%"
+    },
+    {
+      "id": "Q036",
+      "category": "比例与百分比",
+      "question": "原价120元减去25%，剩多少元？",
+      "answer": "90"
+    },
+    {
+      "id": "Q037",
+      "category": "比例与百分比",
+      "question": "总量由40增到50，增加百分之几？",
+      "answer": "25%"
+    },
+    {
+      "id": "Q038",
+      "category": "比例与百分比",
+      "question": "100克20%盐水加100克水，浓度多少？",
+      "answer": "10%"
+    },
+    {
+      "id": "Q039",
+      "category": "比例与百分比",
+      "question": "60千米路程已走2/5，还剩几千米？",
+      "answer": "36"
+    },
+    {
+      "id": "Q040",
+      "category": "比例与百分比",
+      "question": "甲占总数1/3，乙占1/6，共占多少？",
+      "answer": "1/2"
+    },
+    {
+      "id": "Q041",
+      "category": "数列规律",
+      "question": "等差数列4、9、14的下一项？",
+      "answer": "19"
+    },
+    {
+      "id": "Q042",
+      "category": "数列规律",
+      "question": "等差数列18、15、12的下一项？",
+      "answer": "9"
+    },
+    {
+      "id": "Q043",
+      "category": "数列规律",
+      "question": "等比数列3、6、12的下一项？",
+      "answer": "24"
+    },
+    {
+      "id": "Q044",
+      "category": "数列规律",
+      "question": "等比数列81、27、9的下一项？",
+      "answer": "3"
+    },
+    {
+      "id": "Q045",
+      "category": "数列规律",
+      "question": "正整数平方数列1、4、9、16，下一项？",
+      "answer": "25"
+    },
+    {
+      "id": "Q046",
+      "category": "数列规律",
+      "question": "正整数立方数列1、8、27，下一项？",
+      "answer": "64"
+    },
+    {
+      "id": "Q047",
+      "category": "数列规律",
+      "question": "后项为前两项之和：1、2、3、5，下一项？",
+      "answer": "8"
+    },
+    {
+      "id": "Q048",
+      "category": "数列规律",
+      "question": "后项为前两项之和：2、3、5、8，下一项？",
+      "answer": "13"
+    },
+    {
+      "id": "Q049",
+      "category": "数列规律",
+      "question": "每次乘2加1：1、3、7、15，下一项？",
+      "answer": "31"
+    },
+    {
+      "id": "Q050",
+      "category": "数列规律",
+      "question": "每次乘3减1：1、2、5、14，下一项？",
+      "answer": "41"
+    },
+    {
+      "id": "Q051",
+      "category": "数列规律",
+      "question": "依次加2、4、6…：1、3、7、13，下一项？",
+      "answer": "21"
+    },
+    {
+      "id": "Q052",
+      "category": "数列规律",
+      "question": "依次加1、2、3…：2、3、5、8，下一项？",
+      "answer": "12"
+    },
+    {
+      "id": "Q053",
+      "category": "数列规律",
+      "question": "交替加3减1：2、5、4、7，下一项？",
+      "answer": "6"
+    },
+    {
+      "id": "Q054",
+      "category": "数列规律",
+      "question": "交替乘2加1：2、4、5、10，下一项？",
+      "answer": "11"
+    },
+    {
+      "id": "Q055",
+      "category": "数列规律",
+      "question": "从3起依次列奇数，第6项是多少？",
+      "answer": "13"
+    },
+    {
+      "id": "Q056",
+      "category": "数列规律",
+      "question": "从2起依次列正偶数，第8项是多少？",
+      "answer": "16"
+    },
+    {
+      "id": "Q057",
+      "category": "数列规律",
+      "question": "等差数列首项5、公差4，第5项？",
+      "answer": "21"
+    },
+    {
+      "id": "Q058",
+      "category": "数列规律",
+      "question": "等比数列首项2、公比3，第4项？",
+      "answer": "54"
+    },
+    {
+      "id": "Q059",
+      "category": "数列规律",
+      "question": "数列第n项是n(n+1)，第4项是多少？",
+      "answer": "20"
+    },
+    {
+      "id": "Q060",
+      "category": "数列规律",
+      "question": "每项是前项2倍：5、10、20，前4项之和？",
+      "answer": "75"
+    },
+    {
+      "id": "Q061",
+      "category": "条件与排序",
+      "question": "甲比乙高，乙比丙高，谁最高？",
+      "answer": "甲"
+    },
+    {
+      "id": "Q062",
+      "category": "条件与排序",
+      "question": "A在B左边，B在C左边，谁在中间？",
+      "answer": "B"
+    },
+    {
+      "id": "Q063",
+      "category": "条件与排序",
+      "question": "甲乙丙排名，甲非第一也非第三，甲第几？",
+      "answer": "第二"
+    },
+    {
+      "id": "Q064",
+      "category": "条件与排序",
+      "question": "盒子只可能红或蓝；不是红盒，就是哪色？",
+      "answer": "蓝色"
+    },
+    {
+      "id": "Q065",
+      "category": "条件与排序",
+      "question": "所有A都是B；小甲是A，能确定他是B吗？",
+      "answer": "能"
+    },
+    {
+      "id": "Q066",
+      "category": "条件与排序",
+      "question": "所有A都是B；小甲是B，必然是A吗？",
+      "answer": "不必然"
+    },
+    {
+      "id": "Q067",
+      "category": "条件与排序",
+      "question": "若下雨则地湿。地不湿，能确定没下雨吗？",
+      "answer": "能"
+    },
+    {
+      "id": "Q068",
+      "category": "条件与排序",
+      "question": "若下雨则地湿。地湿，能确定下雨了吗？",
+      "answer": "不能"
+    },
+    {
+      "id": "Q069",
+      "category": "条件与排序",
+      "question": "甲乙恰有一人来；甲没来，谁来了？",
+      "answer": "乙"
+    },
+    {
+      "id": "Q070",
+      "category": "条件与排序",
+      "question": "A和B不能同时为真；A为真，B真假？",
+      "answer": "假"
+    },
+    {
+      "id": "Q071",
+      "category": "条件与排序",
+      "question": "甲乙两灯至少一盏亮；甲灭，乙怎样？",
+      "answer": "亮"
+    },
+    {
+      "id": "Q072",
+      "category": "条件与排序",
+      "question": "今天周三，10天后周几？",
+      "answer": "周六"
+    },
+    {
+      "id": "Q073",
+      "category": "条件与排序",
+      "question": "甲先于乙，丙晚于乙，谁最晚？",
+      "answer": "丙"
+    },
+    {
+      "id": "Q074",
+      "category": "条件与排序",
+      "question": "两个相反命题恰一真，能据此确定哪句真吗？",
+      "answer": "不能"
+    },
+    {
+      "id": "Q075",
+      "category": "条件与排序",
+      "question": "球在左盒与球不在左盒，这两句能同时假吗？",
+      "answer": "不能"
+    },
+    {
+      "id": "Q076",
+      "category": "条件与排序",
+      "question": "通过需A且B；A满足、B不满足，能通过吗？",
+      "answer": "不能"
+    },
+    {
+      "id": "Q077",
+      "category": "条件与排序",
+      "question": "条件是A或B；两者都假，条件成立吗？",
+      "answer": "不成立"
+    },
+    {
+      "id": "Q078",
+      "category": "条件与排序",
+      "question": "队列是C、B、A、D；紧接A之后是谁？",
+      "answer": "D"
+    },
+    {
+      "id": "Q079",
+      "category": "条件与排序",
+      "question": "甲乙丙依次轮流，甲先，第8次轮到谁？",
+      "answer": "乙"
+    },
+    {
+      "id": "Q080",
+      "category": "条件与排序",
+      "question": "黑白交替且第1格黑，第12格哪色？",
+      "answer": "白"
+    },
+    {
+      "id": "Q081",
+      "category": "时间与单位",
+      "question": "8:45再过50分钟是几点？",
+      "answer": "9:35"
+    },
+    {
+      "id": "Q082",
+      "category": "时间与单位",
+      "question": "23:40再过35分钟是几点？",
+      "answer": "次日0:15"
+    },
+    {
+      "id": "Q083",
+      "category": "时间与单位",
+      "question": "周二过9天是周几？",
+      "answer": "周四"
+    },
+    {
+      "id": "Q084",
+      "category": "时间与单位",
+      "question": "每15分钟一班，9:00之后第3班几点？",
+      "answer": "9:45"
+    },
+    {
+      "id": "Q085",
+      "category": "时间与单位",
+      "question": "2小时15分减去50分，剩多少分钟？",
+      "answer": "85"
+    },
+    {
+      "id": "Q086",
+      "category": "时间与单位",
+      "question": "90秒重复4次，共几分钟？",
+      "answer": "6"
+    },
+    {
+      "id": "Q087",
+      "category": "时间与单位",
+      "question": "3米减45厘米，剩多少厘米？",
+      "answer": "255"
+    },
+    {
+      "id": "Q088",
+      "category": "时间与单位",
+      "question": "2.5千克均分5份，每份多少克？",
+      "answer": "500"
+    },
+    {
+      "id": "Q089",
+      "category": "时间与单位",
+      "question": "1升水喝掉250毫升，剩多少毫升？",
+      "answer": "750"
+    },
+    {
+      "id": "Q090",
+      "category": "时间与单位",
+      "question": "750米加1.25千米，共几千米？",
+      "answer": "2"
+    },
+    {
+      "id": "Q091",
+      "category": "时间与单位",
+      "question": "时针从3点走到接下来的6点，共几小时？",
+      "answer": "3"
+    },
+    {
+      "id": "Q092",
+      "category": "时间与单位",
+      "question": "周五的3天后是周几？",
+      "answer": "周一"
+    },
+    {
+      "id": "Q093",
+      "category": "时间与单位",
+      "question": "4段各半小时，共多少分钟？",
+      "answer": "120"
+    },
+    {
+      "id": "Q094",
+      "category": "时间与单位",
+      "question": "5分钟计时器连续运行7次，共多少秒？",
+      "answer": "2100"
+    },
+    {
+      "id": "Q095",
+      "category": "时间与单位",
+      "question": "每秒走2米，3分钟走多少米？",
+      "answer": "360"
+    },
+    {
+      "id": "Q096",
+      "category": "时间与单位",
+      "question": "车速60千米/时，25分钟走几千米？",
+      "answer": "25"
+    },
+    {
+      "id": "Q097",
+      "category": "时间与单位",
+      "question": "3个任务各12分钟，连续做完共几小时？",
+      "answer": "0.6"
+    },
+    {
+      "id": "Q098",
+      "category": "时间与单位",
+      "question": "60厘米绳剪成15厘米段，需剪几次？",
+      "answer": "3"
+    },
+    {
+      "id": "Q099",
+      "category": "时间与单位",
+      "question": "10:10起做20分、休10分、再做15分，几点结束？",
+      "answer": "10:55"
+    },
+    {
+      "id": "Q100",
+      "category": "时间与单位",
+      "question": "一天的3/8是多少小时？",
+      "answer": "9"
+    },
+    {
+      "id": "Q101",
+      "category": "计数与概率",
+      "question": "1到20中有几个3的倍数？",
+      "answer": "6"
+    },
+    {
+      "id": "Q102",
+      "category": "计数与概率",
+      "question": "1到30中既是2又是3倍数的数有几个？",
+      "answer": "5"
+    },
+    {
+      "id": "Q103",
+      "category": "计数与概率",
+      "question": "1到10中是偶数或5的倍数，有几个数？",
+      "answer": "6"
+    },
+    {
+      "id": "Q104",
+      "category": "计数与概率",
+      "question": "3件上衣配2条裤子，共几种搭配？",
+      "answer": "6"
+    },
+    {
+      "id": "Q105",
+      "category": "计数与概率",
+      "question": "4人两两握手且每对一次，共几次？",
+      "answer": "6"
+    },
+    {
+      "id": "Q106",
+      "category": "计数与概率",
+      "question": "5人两两合影且每对一张，共几张？",
+      "answer": "10"
+    },
+    {
+      "id": "Q107",
+      "category": "计数与概率",
+      "question": "从A、B、C选2个，不计顺序，共几种？",
+      "answer": "3"
+    },
+    {
+      "id": "Q108",
+      "category": "计数与概率",
+      "question": "A、B、C三个不同字母全排列，有几种？",
+      "answer": "6"
+    },
+    {
+      "id": "Q109",
+      "category": "计数与概率",
+      "question": "两枚公平硬币同抛，恰一正面的概率？",
+      "answer": "1/2"
+    },
+    {
+      "id": "Q110",
+      "category": "计数与概率",
+      "question": "公平骰子掷一次，点数大于4的概率？",
+      "answer": "1/3"
+    },
+    {
+      "id": "Q111",
+      "category": "计数与概率",
+      "question": "袋中3红2蓝，随机取一球，红球概率？",
+      "answer": "3/5"
+    },
+    {
+      "id": "Q112",
+      "category": "计数与概率",
+      "question": "袋中2红2蓝，不放回取两球，全红概率？",
+      "answer": "1/6"
+    },
+    {
+      "id": "Q113",
+      "category": "计数与概率",
+      "question": "用0、1、2组成不重复的两位数，有几个？",
+      "answer": "4"
+    },
+    {
+      "id": "Q114",
+      "category": "计数与概率",
+      "question": "4位密码每位只用0或1，可重复，共几种？",
+      "answer": "16"
+    },
+    {
+      "id": "Q115",
+      "category": "计数与概率",
+      "question": "5本不同书先选1本再选另1本，按顺序几种？",
+      "answer": "20"
+    },
+    {
+      "id": "Q116",
+      "category": "计数与概率",
+      "question": "一排6棵树，相邻间隔5米，两端相距几米？",
+      "answer": "25"
+    },
+    {
+      "id": "Q117",
+      "category": "计数与概率",
+      "question": "4色涂A和B，二者必须不同，共几种？",
+      "answer": "12"
+    },
+    {
+      "id": "Q118",
+      "category": "计数与概率",
+      "question": "1到50中末位是7的数有几个？",
+      "answer": "5"
+    },
+    {
+      "id": "Q119",
+      "category": "计数与概率",
+      "question": "从1到8均匀选一数，为质数的概率？",
+      "answer": "1/2"
+    },
+    {
+      "id": "Q120",
+      "category": "计数与概率",
+      "question": "公平硬币抛3次，全部同面的概率？",
+      "answer": "1/4"
+    },
+    {
+      "id": "Q121",
+      "category": "文本与集合",
+      "question": "ABABA中A出现几次？",
+      "answer": "3"
+    },
+    {
+      "id": "Q122",
+      "category": "文本与集合",
+      "question": "ABABA中AB不重叠出现几次？",
+      "answer": "2"
+    },
+    {
+      "id": "Q123",
+      "category": "文本与集合",
+      "question": "ABCDE反转后，第2个字母是什么？",
+      "answer": "D"
+    },
+    {
+      "id": "Q124",
+      "category": "文本与集合",
+      "question": "ABCDE删除第2和第4个字母，剩什么？",
+      "answer": "ACE"
+    },
+    {
+      "id": "Q125",
+      "category": "文本与集合",
+      "question": "C、A、B按字母升序排列，结果？",
+      "answer": "A、B、C"
+    },
+    {
+      "id": "Q126",
+      "category": "文本与集合",
+      "question": "集合{1,2,3}与{2,3,4}的交集？",
+      "answer": "{2,3}"
+    },
+    {
+      "id": "Q127",
+      "category": "文本与集合",
+      "question": "集合{1,2,3}与{3,4}的并集有几个元素？",
+      "answer": "4"
+    },
+    {
+      "id": "Q128",
+      "category": "文本与集合",
+      "question": "从{1,2,3,4}删去偶数，剩什么？",
+      "answer": "{1,3}"
+    },
+    {
+      "id": "Q129",
+      "category": "文本与集合",
+      "question": "[2,2,3,4,4]去重后有几个数？",
+      "answer": "3"
+    },
+    {
+      "id": "Q130",
+      "category": "文本与集合",
+      "question": "[1,2,3,4]保留大于2的数再求和，结果？",
+      "answer": "7"
+    },
+    {
+      "id": "Q131",
+      "category": "文本与集合",
+      "question": "A={a,b,c}，B={b}，A去掉B剩什么？",
+      "answer": "{a,c}"
+    },
+    {
+      "id": "Q132",
+      "category": "文本与集合",
+      "question": "字符串12021反转后是否不变？",
+      "answer": "是"
+    },
+    {
+      "id": "Q133",
+      "category": "文本与集合",
+      "question": "字符串1231反转后是否不变？",
+      "answer": "否"
+    },
+    {
+      "id": "Q134",
+      "category": "文本与集合",
+      "question": "red blue red按空格分词，不同词有几个？",
+      "answer": "2"
+    },
+    {
+      "id": "Q135",
+      "category": "文本与集合",
+      "question": "ab重复3次，字符串长度是多少？",
+      "answer": "6"
+    },
+    {
+      "id": "Q136",
+      "category": "文本与集合",
+      "question": "banana删掉所有a，剩什么？",
+      "answer": "bnn"
+    },
+    {
+      "id": "Q137",
+      "category": "文本与集合",
+      "question": "logic转成大写，第3个字母是什么？",
+      "answer": "G"
+    },
+    {
+      "id": "Q138",
+      "category": "文本与集合",
+      "question": "集合{2,4,6}中大于3的数有几个？",
+      "answer": "2"
+    },
+    {
+      "id": "Q139",
+      "category": "文本与集合",
+      "question": "[甲,乙,甲,丙]只保留首次出现，结果？",
+      "answer": "甲、乙、丙"
+    },
+    {
+      "id": "Q140",
+      "category": "文本与集合",
+      "question": "2468隔一位取一位，从第1位起，得到什么？",
+      "answer": "26"
+    },
+    {
+      "id": "Q141",
+      "category": "算法与布尔",
+      "question": "x=3，先加2再乘4，x是多少？",
+      "answer": "20"
+    },
+    {
+      "id": "Q142",
+      "category": "算法与布尔",
+      "question": "x=10，每次减3，做3次后x是多少？",
+      "answer": "1"
+    },
+    {
+      "id": "Q143",
+      "category": "算法与布尔",
+      "question": "s=0，依次加1、2、3、4，s是多少？",
+      "answer": "10"
+    },
+    {
+      "id": "Q144",
+      "category": "算法与布尔",
+      "question": "x=1，每次翻倍，做4次后x是多少？",
+      "answer": "16"
+    },
+    {
+      "id": "Q145",
+      "category": "算法与布尔",
+      "question": "[3,1,4,2]升序排列，第3个数是多少？",
+      "answer": "3"
+    },
+    {
+      "id": "Q146",
+      "category": "算法与布尔",
+      "question": "[8,3,5]先取最小值再加4，结果？",
+      "answer": "7"
+    },
+    {
+      "id": "Q147",
+      "category": "算法与布尔",
+      "question": "若x>5输出A，否则B；x=5时输出什么？",
+      "answer": "B"
+    },
+    {
+      "id": "Q148",
+      "category": "算法与布尔",
+      "question": "x偶数则除2，否则3x+1；x=3时输出多少？",
+      "answer": "10"
+    },
+    {
+      "id": "Q149",
+      "category": "算法与布尔",
+      "question": "栈依次压入A、B、C，再弹出两次，栈顶是谁？",
+      "answer": "A"
+    },
+    {
+      "id": "Q150",
+      "category": "算法与布尔",
+      "question": "队列依次入A、B、C，出队一次后队首是谁？",
+      "answer": "B"
+    },
+    {
+      "id": "Q151",
+      "category": "算法与布尔",
+      "question": "二分查找整数区间1到9，首次中点是多少？",
+      "answer": "5"
+    },
+    {
+      "id": "Q152",
+      "category": "算法与布尔",
+      "question": "遍历1到5，只累加奇数，结果？",
+      "answer": "9"
+    },
+    {
+      "id": "Q153",
+      "category": "算法与布尔",
+      "question": "[2,4,6]每项加1后，总和是多少？",
+      "answer": "15"
+    },
+    {
+      "id": "Q154",
+      "category": "算法与布尔",
+      "question": "[1,2,3,4]删去首尾，剩余数字之积？",
+      "answer": "6"
+    },
+    {
+      "id": "Q155",
+      "category": "算法与布尔",
+      "question": "x=2,y=5，交换后x+y是多少？",
+      "answer": "7"
+    },
+    {
+      "id": "Q156",
+      "category": "算法与布尔",
+      "question": "x=2,y=5，交换后x-y是多少？",
+      "answer": "3"
+    },
+    {
+      "id": "Q157",
+      "category": "算法与布尔",
+      "question": "初始计数0，遇A加1，处理BAAB后计数多少？",
+      "answer": "2"
+    },
+    {
+      "id": "Q158",
+      "category": "算法与布尔",
+      "question": "循环3次，每次输出XY，共输出几个字符？",
+      "answer": "6"
+    },
+    {
+      "id": "Q159",
+      "category": "算法与布尔",
+      "question": "true AND NOT false的值是什么？",
+      "answer": "true"
+    },
+    {
+      "id": "Q160",
+      "category": "算法与布尔",
+      "question": "(false OR true) AND false的值是什么？",
+      "answer": "false"
+    },
+    {
+      "id": "Q161",
+      "category": "几何与度量",
+      "question": "长方形长8宽3，周长是多少？",
+      "answer": "22"
+    },
+    {
+      "id": "Q162",
+      "category": "几何与度量",
+      "question": "长方形长8宽3，面积是多少？",
+      "answer": "24"
+    },
+    {
+      "id": "Q163",
+      "category": "几何与度量",
+      "question": "正方形边长变为2倍，面积变为几倍？",
+      "answer": "4"
+    },
+    {
+      "id": "Q164",
+      "category": "几何与度量",
+      "question": "边长6的正方形切成边长2的小正方形，共几个？",
+      "answer": "9"
+    },
+    {
+      "id": "Q165",
+      "category": "几何与度量",
+      "question": "三角形底8高5，面积是多少？",
+      "answer": "20"
+    },
+    {
+      "id": "Q166",
+      "category": "几何与度量",
+      "question": "圆半径变为3倍，面积变为几倍？",
+      "answer": "9"
+    },
+    {
+      "id": "Q167",
+      "category": "几何与度量",
+      "question": "圆半径变为2倍，周长变为几倍？",
+      "answer": "2"
+    },
+    {
+      "id": "Q168",
+      "category": "几何与度量",
+      "question": "长方体长2宽3高4，体积是多少？",
+      "answer": "24"
+    },
+    {
+      "id": "Q169",
+      "category": "几何与度量",
+      "question": "正方体棱长2，表面积是多少？",
+      "answer": "24"
+    },
+    {
+      "id": "Q170",
+      "category": "几何与度量",
+      "question": "边长4正方形与长6宽2长方形，谁面积大？",
+      "answer": "正方形"
+    },
+    {
+      "id": "Q171",
+      "category": "几何与度量",
+      "question": "矩形宽3不变、长增加2，面积增加多少？",
+      "answer": "6"
+    },
+    {
+      "id": "Q172",
+      "category": "几何与度量",
+      "question": "三角形两角40°和65°，第三角是多少度？",
+      "answer": "75"
+    },
+    {
+      "id": "Q173",
+      "category": "几何与度量",
+      "question": "直角分成两角，一角35°，另一角是多少度？",
+      "answer": "55"
+    },
+    {
+      "id": "Q174",
+      "category": "几何与度量",
+      "question": "平角减去70°，还剩多少度？",
+      "answer": "110"
+    },
+    {
+      "id": "Q175",
+      "category": "几何与度量",
+      "question": "等腰三角形顶角40°，每个底角是多少度？",
+      "answer": "70"
+    },
+    {
+      "id": "Q176",
+      "category": "几何与度量",
+      "question": "10厘米线段取中点，两半各几厘米？",
+      "answer": "5"
+    },
+    {
+      "id": "Q177",
+      "category": "几何与度量",
+      "question": "4个边长3小正方形拼成大正方形，边长多少？",
+      "answer": "6"
+    },
+    {
+      "id": "Q178",
+      "category": "几何与度量",
+      "question": "长12宽8地板铺边长4方砖，需几块？",
+      "answer": "6"
+    },
+    {
+      "id": "Q179",
+      "category": "几何与度量",
+      "question": "周长20的正方形，面积是多少？",
+      "answer": "25"
+    },
+    {
+      "id": "Q180",
+      "category": "几何与度量",
+      "question": "面积24、宽4的长方形，周长是多少？",
+      "answer": "20"
+    },
+    {
+      "id": "Q181",
+      "category": "生活推算",
+      "question": "书共40页，已读15页，每天5页，还需几天？",
+      "answer": "5"
+    },
+    {
+      "id": "Q182",
+      "category": "生活推算",
+      "question": "24人每车坐5人，至少需要几辆车？",
+      "answer": "5"
+    },
+    {
+      "id": "Q183",
+      "category": "生活推算",
+      "question": "13件物品每箱装4件，至少需要几箱？",
+      "answer": "4"
+    },
+    {
+      "id": "Q184",
+      "category": "生活推算",
+      "question": "18升水每次取4升，取4次后剩多少升？",
+      "answer": "2"
+    },
+    {
+      "id": "Q185",
+      "category": "生活推算",
+      "question": "甲每天做6件，乙每天4件，两人2天共做几件？",
+      "answer": "20"
+    },
+    {
+      "id": "Q186",
+      "category": "生活推算",
+      "question": "3台同速机器2小时做12件，1台1小时做几件？",
+      "answer": "2"
+    },
+    {
+      "id": "Q187",
+      "category": "生活推算",
+      "question": "两人单独完成各需6小时和3小时，合作需几小时？",
+      "answer": "2"
+    },
+    {
+      "id": "Q188",
+      "category": "生活推算",
+      "question": "每分进水5升、出水2升，10分钟净增多少升？",
+      "answer": "30"
+    },
+    {
+      "id": "Q189",
+      "category": "生活推算",
+      "question": "相距100米，相向速度每秒3米和2米，几秒相遇？",
+      "answer": "20"
+    },
+    {
+      "id": "Q190",
+      "category": "生活推算",
+      "question": "快者落后20米，同向速度每秒6米和4米，几秒追上？",
+      "answer": "10"
+    },
+    {
+      "id": "Q191",
+      "category": "生活推算",
+      "question": "队伍共12人，小甲前面4人，后面有几人？",
+      "answer": "7"
+    },
+    {
+      "id": "Q192",
+      "category": "生活推算",
+      "question": "每层楼梯12级，从1楼到4楼要走几级？",
+      "answer": "36"
+    },
+    {
+      "id": "Q193",
+      "category": "生活推算",
+      "question": "木头锯成5段，每次只锯一处，需要几次？",
+      "answer": "4"
+    },
+    {
+      "id": "Q194",
+      "category": "生活推算",
+      "question": "9点起每20分钟提醒，1小时内含两端共几次？",
+      "answer": "4"
+    },
+    {
+      "id": "Q195",
+      "category": "生活推算",
+      "question": "借出7元后剩13元，原有多少元？",
+      "answer": "20"
+    },
+    {
+      "id": "Q196",
+      "category": "生活推算",
+      "question": "购物花18元又退款5元，净支出多少元？",
+      "answer": "13"
+    },
+    {
+      "id": "Q197",
+      "category": "生活推算",
+      "question": "3个连续整数之和24，最大数是多少？",
+      "answer": "9"
+    },
+    {
+      "id": "Q198",
+      "category": "生活推算",
+      "question": "两数和18、差4，较大数是多少？",
+      "answer": "11"
+    },
+    {
+      "id": "Q199",
+      "category": "生活推算",
+      "question": "父子年龄和40，父亲大24岁，儿子几岁？",
+      "answer": "8"
+    },
+    {
+      "id": "Q200",
+      "category": "生活推算",
+      "question": "鸡兔共5只、共14只脚，兔有几只？",
+      "answer": "2"
+    }
+  ]
+}

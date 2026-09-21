@@ -21,18 +21,20 @@ providers:
         #   cache_creation_per_million: 0.5
     headers: {}
     enabled: true
-    # 抢通 + 保温（默认关闭，不写这几行就是关）。默认 HTTP 模式在启动时并发抢一条
-    # 可用上游连接，赢家留在连接池里，之后每 keepalive_interval 秒发一句很短的轮换
-    # 提示词把它焐热；状态见 GET /_keepalive 或 dashboard 的 provider 列表 badge。
+    # 抢通 + 保温（默认关闭，不写这几行就是关）。默认真实 Codex CLI 模式在启动时
+    # 并发抢通，赢家保留独立会话；明确 keepalive_backend: http 才使用 HTTP 模式。
+    # HTTP 模式赢家留在连接池里，之后按随机间隔发送一道逻辑题；状态见 GET /_keepalive
+    # 或 dashboard 的 provider 列表 badge。
     # 只有 keepalive 在维护页有勾选框，其余是 config-only 高级项。
-    # 成本：每个开启的 provider 每天约 86400/keepalive_interval 次短请求，别全开。
+    # 成本：每个开启的 provider 每天约 86400/间隔秒数 次请求，别全开。
     keepalive: false
-    # keepalive_backend: http       # 默认 HTTP；codex_cli 使用独立交互式 Codex 会话
+    # keepalive_backend: codex_cli  # 默认真实 Codex CLI；明确填 http 才使用 HTTP 模式
     # keepalive_codex_path: codex   # codex_cli 模式下的可执行文件名或绝对路径
     # codex_cli 仅支持原生 Responses + Bearer，不支持 remove_headers；需要本机安装 Codex。
     # 它继承当前 keepalive_model 的推理深度，再回退到 Provider 级配置；未设置则用 CLI 默认。
     # keepalive_reasoning_effort / keepalive_max_output_tokens 仅控制 HTTP 模式，不覆盖 CLI 配置。
-    # keepalive_interval: 60        # 保活间隔秒数，5~3600
+    # keepalive_interval_min: 90    # 保活随机间隔下限（秒），5~3600
+    # keepalive_interval_max: 120   # 保活随机间隔上限（秒），5~3600
     # keepalive_concurrency: 10     # 冷启动抢通并发，1~50；保温 miss 后重抢固定为 1
     # keepalive_retry_interval: 5   # 整轮抢通失败后等待秒数，1~3600
     # keepalive_retry_jitter: 0     # 重试抖动比例，0~1；默认 0，不改变固定间隔行为

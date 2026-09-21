@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 import codex_keepalive as cli
 import dashboard
 import proxy
+import prompts
 
 
 def config(**overrides):
@@ -102,7 +103,7 @@ class ConfigurationTest(unittest.TestCase):
         }
         with mock.patch.object(dashboard, "codex_stream_retry_default", return_value=5):
             saved = dashboard.compact_provider(dashboard.validate_provider(raw, 1))
-            self.assertEqual(saved["keepalive_backend"], "codex_cli")
+            self.assertNotIn("keepalive_backend", saved)
             self.assertEqual(saved["keepalive_codex_path"], "/opt/codex/bin/codex")
             self.assertEqual(saved["models"]["model-a"]["reasoning_effort"], "high")
             raw.pop("keepalive_backend")
@@ -153,6 +154,13 @@ class ReplyDetectionTest(unittest.TestCase):
         self.assertEqual(cli.retry_signal(cli.lines_after_prompt(text, "还在线吗？短答")), "")
         self.assertTrue(cli.retry_signal(cli.lines_after_prompt("› Hi\nReconnecting... 3s", "Hi")))
 
+    def test_logic_question_short_answers_are_real_assistant_replies(self):
+        for answer in ("17", "5/6", "B", "true", "0.3", "80%", "ACE", "bnn", "A、B、C", "false", "答案是17。"):
+            with self.subTest(answer=answer):
+                question = "测试题？"
+                lines = cli.lines_after_prompt(f"› {question}\n• {answer}", question)
+                self.assertTrue(cli.assistant_reply(lines, question, short=True))
+
     def test_loading_model_and_input_echo(self):
         self.assertFalse(cli.terminal_ready("model: loading\n› Ask anything"))
         self.assertTrue(cli.terminal_ready("model: test\n› Ask anything"))
@@ -164,6 +172,19 @@ class ReplyDetectionTest(unittest.TestCase):
             "在吗？短回",
         ))
         self.assertFalse(cli.prompt_visible("• Hi", "Hi"))
+
+
+class KeepaliveQuestionBankTest(unittest.TestCase):
+    def test_bank_has_exactly_200_unique_questions_and_never_returns_answers(self):
+        payload = json.loads(prompts.KEEPALIVE_QUESTIONS_PATH.read_text(encoding="utf-8"))
+        questions = prompts.load_keepalive_questions()
+        answers = {str(item["answer"]) for item in payload["items"]}
+        self.assertEqual(len(questions), 200)
+        self.assertEqual(len(set(questions)), 200)
+        deck = prompts.PromptDeck(questions, rng=__import__("random").Random(7))
+        draws = [deck.next() for _ in range(200)]
+        self.assertEqual(set(draws), set(questions))
+        self.assertTrue(all(question not in answers for question in questions))
 
 
 class KeepaliveMetricsTest(unittest.TestCase):

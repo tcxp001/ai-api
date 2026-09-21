@@ -157,12 +157,13 @@ python3 proxy.py --config config/config.yaml --listen 127.0.0.1 --port 18007 \
 ### 真实 Codex 会话保活（显式启用）
 
 在需要此模式的 Provider 上设置 `keepalive: true` 和
-`keepalive_backend: codex_cli`；未设置时继续使用原有 HTTP 探测，不影响其他 Provider。
+`keepalive_backend: codex_cli`；未设置时默认使用真实 Codex CLI。
+需要 HTTP 模式时必须明确填写 `keepalive_backend: http`，不影响其他 Provider。
 可用 `keepalive_codex_path` 指定 Codex 可执行文件（默认 `codex`）。
 该模式仅支持 POSIX、本机交互式 Codex、原生 Responses 和 Bearer 认证，
 不支持 `remove_headers`。不会在找不到 Codex 时悄悄退回 HTTP 探测。
 
-冷启动用独立目录并发启动 Codex，输入 `Hi`，按本次输入后的实际助手文本判定成功，
+冷启动用独立目录并发启动 Codex，输入保活题库中的一道题，按本次输入后的实际助手文本判定成功，
 保留获胜进程及对话，关闭并清理其他进程。后续在同一对话发送短保活消息；
 失效后关闭旧进程，以单并发重新抢通。沿用 Provider 的并发、重试间隔、保活间隔，
 每次 CLI 检测期限取 `keepalive_timeout` 与 `keepalive_total_timeout` 的较小值。

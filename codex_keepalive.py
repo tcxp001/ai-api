@@ -230,15 +230,13 @@ def assistant_reply(lines: list[tuple[str, str]], prompt: str, short: bool) -> b
         letters = sum(char.isalpha() for char in line)
         if letters >= 8 and (any(char in line for char in ".?!。！？") or len(line) >= 20):
             return True
-        if short and len(line) <= 40:
+        if short and len(line) <= 80:
             normalized = lower.strip(" \t\r\n.,!?;:。！？，；：'\"")
             if normalized in {"ok", "yes", "yep", "yeah", "here", "online", "ready"}:
                 return True
-            if any(
-                "\u3400" <= char <= "\u9fff" or "\u3040" <= char <= "\u30ff"
-                or "\uac00" <= char <= "\ud7af"
-                for char in line
-            ):
+            # 题库答案可能是数字、分数、百分比、字母、布尔值或短中文。
+            # 角色与当前输入之后的边界已由调用方限定，这里只排除 UI/重试文本。
+            if normalized and any(char.isalnum() for char in normalized):
                 return True
     return False
 

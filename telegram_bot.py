@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
+from keepalive_events import acknowledge as acknowledge_keepalive_event
+from keepalive_events import pending as pending_keepalive_events
+from keepalive_events import publish as publish_keepalive_event
 
 
 LOG = logging.getLogger("ai-api.telegram")
@@ -42,7 +45,10 @@ class TelegramKeepAliveBot:
         self._base_url = f"https://api.telegram.org/bot{self.token}"
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
-        self._monitored_states: dict[str, str] | None = None
+        self._last_event_seq = 0
+        self._manual_stop_sent_at: dict[str, float] = {}
+        self._sent_event_keys: dict[tuple[str, str, str], float] = {}
+        self._event_dedup_seconds = 30.0
 
     @classmethod
     def from_file(
@@ -98,7 +104,9 @@ class TelegramKeepAliveBot:
         self._base_url = f"https://api.telegram.org/bot{self.token}"
         self._monitor_stop = threading.Event()
         self._monitor_thread = None
-        self._monitored_states = None
+        self._last_event_seq = 0
+        self._manual_stop_sent_at = {}
+        self._sent_event_keys = {}
         if self.token and self.chat_id:
             self.start()
 
@@ -124,40 +132,50 @@ class TelegramKeepAliveBot:
         """Send one message synchronously to the configured chat."""
         self._send(text)
 
-    def start_keepalive_monitor(self, status_provider: Callable[[], dict[str, Any]], *, interval: float = 2.0) -> None:
-        """Notify on keepalive acquisition and warm-session loss transitions."""
+    def notify_manual_stop(self, provider: str) -> None:
+        """Queue a human-initiated close event independently of the proxy."""
+        publish_keepalive_event(str(provider or "Provider"), "manual_stop", "")
+
+    def start_keepalive_monitor(
+        self,
+        status_provider: Callable[[], dict[str, Any]],
+        *,
+        interval: float = 2.0,
+        event_provider: Callable[[], list[dict[str, Any]]] = pending_keepalive_events,
+    ) -> None:
+        """Deliver queued key events; proxy status is only supplementary."""
         if self._monitor_thread and self._monitor_thread.is_alive():
             return
         self._monitor_stop.clear()
-        self._monitored_states = None
-
         def monitor() -> None:
             delay = max(float(interval), 0.5)
             while not self._monitor_stop.is_set() and not self._stop.is_set():
                 try:
-                    payload = status_provider()
-                    providers = payload.get("providers") if isinstance(payload, dict) else {}
-                    if not isinstance(providers, dict):
-                        providers = {}
-                    current = {
-                        str(name): str((entry or {}).get("state") or "")
-                        for name, entry in providers.items()
-                        if isinstance(entry, dict)
-                    }
-                    previous = self._monitored_states
-                    if previous is None:
-                        self._monitored_states = current
-                    else:
-                        names = set(previous) | set(current)
-                        for name in sorted(names):
-                            old_state = previous.get(name, "")
-                            new_state = current.get(name, "")
-                            if old_state != "warm" and new_state == "warm":
-                                self._send(f"{name} 抢通成功，已进入保活。")
-                            elif old_state == "warm" and new_state != "warm":
-                                state_text = new_state or "已停止"
-                                self._send(f"{name} 从保活中断开，当前状态：{state_text}。")
-                        self._monitored_states = current
+                    for event in event_provider() or []:
+                        if not isinstance(event, dict):
+                            continue
+                        event_id = str(event.get("id") or "")
+                        if not event_id:
+                            continue
+                        name = str(event.get("provider") or "Provider")
+                        kind = str(event.get("kind") or "")
+                        detail = str(event.get("detail") or "")
+                        text = self._event_text(name, kind, detail)
+                        if not text:
+                            acknowledge_keepalive_event(event_id)
+                            continue
+                        event_key = (name, kind, text)
+                        now = time.monotonic()
+                        previous = self._sent_event_keys.get(event_key)
+                        if previous is not None and now - previous < self._event_dedup_seconds:
+                            acknowledge_keepalive_event(event_id)
+                            continue
+                        self._send(text)
+                        self._sent_event_keys[event_key] = now
+                        acknowledge_keepalive_event(event_id)
+                    # Keep status polling for health visibility only. Event
+                    # delivery never depends on the keepalive proxy being up.
+                    status_provider()
                 except Exception:
                     if not self._monitor_stop.is_set() and not self._stop.is_set():
                         LOG.warning("Telegram 保活状态通知检查失败", exc_info=True)
@@ -170,12 +188,28 @@ class TelegramKeepAliveBot:
         )
         self._monitor_thread.start()
 
+    @staticmethod
+    def _event_text(name: str, kind: str, detail: str) -> str:
+        if kind == "start":
+            return f"{name} 开始抢通。"
+        if kind == "acquired":
+            return f"{name} 首次抢通成功，已进入保活。"
+        if kind == "lost":
+            return f"{name} 保活断开：{detail or '上游返回异常'}。"
+        if kind == "reacquired":
+            return f"{name} 重新抢通成功，已恢复保活。"
+        if kind == "manual_stop":
+            return f"{name} 已手动关闭。"
+        return ""
+
     def _handle_action(self, action: str) -> None:
         if action == "keepalive_on":
             result = self.set_keepalive(True)
             self._send(self._result_text("已打开抢通保活", result))
         elif action == "keepalive_off":
             result = self.set_keepalive(False)
+            if result.get("ok") is True:
+                self.notify_manual_stop(str(result.get("provider") or "Provider"))
             self._send(self._result_text("已关闭抢通保活", result))
 
     def _handle(self, message: dict[str, Any]) -> None:

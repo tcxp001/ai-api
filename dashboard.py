@@ -40,6 +40,7 @@ from dashboard_security import (
     write_private_file,
 )
 from secret_utils import provider_secrets, redact_text, redact_url
+from keepalive_events import pending as pending_keepalive_events
 try:
     from telegram_bot import TelegramKeepAliveBot
 except ImportError:  # pragma: no cover - partial deployment
@@ -49,6 +50,8 @@ from proxy import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_KEEPALIVE_CONCURRENCY,
     DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_KEEPALIVE_INTERVAL_MIN,
+    DEFAULT_KEEPALIVE_INTERVAL_MAX,
     DEFAULT_KEEPALIVE_MAX_OUTPUT_TOKENS,
     DEFAULT_KEEPALIVE_REASONING_EFFORT,
     DEFAULT_KEEPALIVE_RETRY_INTERVAL,
@@ -383,6 +386,8 @@ KEEPALIVE_FIELDS = (
     "keepalive_backend",
     "keepalive_codex_path",
     "keepalive_interval",
+    "keepalive_interval_min",
+    "keepalive_interval_max",
     "keepalive_retry_interval",
     "keepalive_retry_jitter",
     "keepalive_timeout",
@@ -414,15 +419,26 @@ def normalize_keepalive_number(value: Any, field_name: str, low: float, high: fl
 def normalize_keepalive(provider: dict[str, Any], label: str) -> None:
     """Normalize the keepalive fields in place. Bounds mirror proxy.py."""
     provider["keepalive"] = api_checks.coerce_bool(provider.get("keepalive"), False)
-    backend = str(provider.get("keepalive_backend") or "http").strip().lower()
+    backend = str(provider.get("keepalive_backend") or "codex_cli").strip().lower()
     if backend not in {"http", "codex_cli"}:
         raise ValueError(f"{label} keepalive_backend must be http or codex_cli")
     provider["keepalive_backend"] = backend
     provider["keepalive_codex_path"] = str(provider.get("keepalive_codex_path") or "codex").strip()
     try:
-        provider["keepalive_interval"] = normalize_keepalive_number(
-            provider.get("keepalive_interval"), "keepalive_interval", 5, 3600, DEFAULT_KEEPALIVE_INTERVAL
+        legacy_interval = provider.get("keepalive_interval")
+        interval_min = normalize_keepalive_number(
+            provider.get("keepalive_interval_min", legacy_interval),
+            "keepalive_interval_min", 5, 3600, DEFAULT_KEEPALIVE_INTERVAL_MIN
         )
+        interval_max = normalize_keepalive_number(
+            provider.get("keepalive_interval_max", legacy_interval),
+            "keepalive_interval_max", 5, 3600, DEFAULT_KEEPALIVE_INTERVAL_MAX
+        )
+        if interval_min > interval_max:
+            raise ValueError("keepalive_interval_min must not exceed keepalive_interval_max")
+        provider["keepalive_interval_min"] = interval_min
+        provider["keepalive_interval_max"] = interval_max
+        provider["keepalive_interval"] = interval_min
         provider["keepalive_retry_interval"] = normalize_keepalive_number(
             provider.get("keepalive_retry_interval"),
             "keepalive_retry_interval",
@@ -650,12 +666,15 @@ def compact_provider(provider: dict[str, Any]) -> dict[str, Any]:
     # 默认值继续省略，未配置过 Keepalive 的 provider 不会产生额外噪音。
     if not item.get("keepalive"):
         item.pop("keepalive", None)
-    if item.get("keepalive_backend") == "http":
+    if item.get("keepalive_backend") == "codex_cli":
         item.pop("keepalive_backend", None)
     if item.get("keepalive_codex_path") == "codex":
         item.pop("keepalive_codex_path", None)
-    if item.get("keepalive_interval") == DEFAULT_KEEPALIVE_INTERVAL:
-        item.pop("keepalive_interval", None)
+    if item.get("keepalive_interval_min") == DEFAULT_KEEPALIVE_INTERVAL_MIN:
+        item.pop("keepalive_interval_min", None)
+    if item.get("keepalive_interval_max") == DEFAULT_KEEPALIVE_INTERVAL_MAX:
+        item.pop("keepalive_interval_max", None)
+    item.pop("keepalive_interval", None)
     if item.get("keepalive_retry_interval") == DEFAULT_KEEPALIVE_RETRY_INTERVAL:
         item.pop("keepalive_retry_interval", None)
     if item.get("keepalive_retry_jitter") == DEFAULT_KEEPALIVE_RETRY_JITTER:
@@ -828,6 +847,8 @@ def set_provider_keepalive(provider_name: str, enabled: bool) -> dict[str, Any]:
     target["keepalive"] = bool(enabled)
     backup, warnings = save_provider_list(after, "auto")
     saved = load_provider_list()
+    # Only reconcile the dedicated keepalive channel. The normal AIProxy
+    # service is excluded from keepalive traffic and must not be restarted.
     restart = restart_after_config_write(before, saved)
     return {
         "ok": bool(restart.get("ok")),
@@ -985,12 +1006,18 @@ def apply_telegram_settings(server: Any, token: str, chat_id: str) -> None:
     if bot is not None:
         bot.set_controller(lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
         bot.reconfigure(token, chat_id)
-        bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
+        bot.start_keepalive_monitor(
+            lambda: keepalive_status_from_proxy(),
+            event_provider=pending_keepalive_events,
+        )
         return
     if TelegramKeepAliveBot is not None:
         bot = TelegramKeepAliveBot(token, chat_id, lambda enabled: set_provider_keepalive(telegram_target_provider(), enabled))
         bot.start()
-        bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
+        bot.start_keepalive_monitor(
+            lambda: keepalive_status_from_proxy(),
+            event_provider=pending_keepalive_events,
+        )
         server.telegram_bot = bot
 
 
@@ -1005,6 +1032,17 @@ def send_telegram_configured_message(server: Any) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def notify_manual_keepalive_stop(server: Any, provider_name: str) -> None:
+    bot = getattr(server, "telegram_bot", None)
+    if bot is None:
+        return
+    try:
+        bot.notify_manual_stop(provider_name)
+    except Exception:
+        # A notification failure must not fail the configuration operation.
+        pass
+
+
 def provider_keepalive_settings(provider: dict[str, Any]) -> dict[str, Any]:
     item = dict(provider)
     normalize_keepalive(item, provider_validation_label(1, str(item.get("name") or "")))
@@ -1012,7 +1050,8 @@ def provider_keepalive_settings(provider: dict[str, Any]) -> dict[str, Any]:
         "enabled": item["keepalive"],
         "concurrency": item["keepalive_concurrency"],
         "retryInterval": item["keepalive_retry_interval"],
-        "interval": item["keepalive_interval"],
+        "intervalMin": item["keepalive_interval_min"],
+        "intervalMax": item["keepalive_interval_max"],
     }
 
 
@@ -1023,7 +1062,8 @@ def save_provider_keepalive(
     update_enabled: bool = False,
     concurrency: Any = None,
     retry_interval: Any = None,
-    interval: Any = None,
+    interval_min: Any = None,
+    interval_max: Any = None,
     update_parameters: bool = False,
 ) -> tuple[Path | None, list[str], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Persist only one provider's Keepalive fields.
@@ -1068,13 +1108,23 @@ def save_provider_keepalive(
             3600,
             DEFAULT_KEEPALIVE_RETRY_INTERVAL,
         )
-        provider["keepalive_interval"] = normalize_keepalive_number(
-            interval,
-            "keepalive_interval",
+        provider["keepalive_interval_min"] = normalize_keepalive_number(
+            interval_min,
+            "keepalive_interval_min",
             5,
             3600,
-            DEFAULT_KEEPALIVE_INTERVAL,
+            DEFAULT_KEEPALIVE_INTERVAL_MIN,
         )
+        provider["keepalive_interval_max"] = normalize_keepalive_number(
+            interval_max,
+            "keepalive_interval_max",
+            5,
+            3600,
+            DEFAULT_KEEPALIVE_INTERVAL_MAX,
+        )
+        if provider["keepalive_interval_min"] > provider["keepalive_interval_max"]:
+            raise ValueError("keepalive_interval_min must not exceed keepalive_interval_max")
+        provider["keepalive_interval"] = provider["keepalive_interval_min"]
 
     backup, warnings = save_provider_list(providers, "auto")
     after_providers = load_provider_list()
@@ -3760,6 +3810,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "appSync": app_sync,
                     "restart": restart,
                 })
+                if update_enabled and keepalive["enabled"] is False:
+                    notify_manual_keepalive_stop(self.server, provider_name)
                 return
             if path == "/config/pin":
                 provider_name = str(payload.get("name") or "").strip()
@@ -3780,17 +3832,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/config/keepalive":
                 provider_name = str(payload.get("name") or "").strip()
                 update_enabled = "enabled" in payload
-                parameter_keys = ("concurrency", "retryInterval", "interval")
+                parameter_keys = ("concurrency", "retryInterval", "intervalMin", "intervalMax")
                 update_parameters = any(key in payload for key in parameter_keys)
                 if update_parameters and not all(key in payload for key in parameter_keys):
-                    raise ValueError("concurrency, retryInterval and interval are required together")
+                    raise ValueError("concurrency, retryInterval, intervalMin and intervalMax are required together")
                 backup, warnings, before_providers, after_providers, keepalive = save_provider_keepalive(
                     provider_name,
                     enabled=payload.get("enabled"),
                     update_enabled=update_enabled,
                     concurrency=payload.get("concurrency"),
                     retry_interval=payload.get("retryInterval"),
-                    interval=payload.get("interval"),
+                    interval_min=payload.get("intervalMin"),
+                    interval_max=payload.get("intervalMax"),
                     update_parameters=update_parameters,
                 )
                 before_provider = next(
@@ -3805,7 +3858,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 enabled_changed = before_keepalive["enabled"] != keepalive["enabled"]
                 parameters_changed = any(
                     before_keepalive[key] != keepalive[key]
-                    for key in ("concurrency", "retryInterval", "interval")
+                    for key in ("concurrency", "retryInterval", "intervalMin", "intervalMax")
                 )
 
                 claude_functions: dict[str, Any] | None = None
@@ -3825,13 +3878,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         app_sync = {"error": api_checks.redact_sensitive(f"{type(exc).__name__}: {exc}", 2000)}
                         warnings.append(f"Codex 同步失败：{app_sync['error']}")
 
-                if enabled_changed or (keepalive["enabled"] and parameters_changed):
+                if enabled_changed:
+                    # Start/stop only aiproxy-keepalive.service. The regular
+                    # aiproxy.service remains untouched.
                     restart = restart_after_config_write(before_providers, after_providers)
                 elif parameters_changed:
                     restart = {
                         "ok": True,
                         "changedServices": [],
-                        "skipped": "keepalive is disabled; parameters saved without restart",
+                        "skipped": "keepalive scheduling parameters hot-applied; no restart",
                     }
                 else:
                     restart = {
@@ -3872,6 +3927,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/config/keepalive/remove":
                 result = remove_keepalive_provider(payload.get("provider"))
+                if result.get("ok") is True and result.get("enabled", False) is False:
+                    notify_manual_keepalive_stop(self.server, str(result.get("provider") or ""))
                 self.send_json(200, result)
                 return
             if path == "/config/keepalive/toggle":
@@ -3879,6 +3936,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     payload.get("provider"),
                     payload.get("enabled"),
                 )
+                if result.get("ok") is True and result.get("enabled") is False:
+                    notify_manual_keepalive_stop(self.server, str(result.get("provider") or ""))
                 self.send_json(200, result)
                 return
             if path == "/checkins":
@@ -4073,7 +4132,10 @@ def main() -> int:
         )
         if telegram_bot is not None:
             telegram_bot.start()
-            telegram_bot.start_keepalive_monitor(lambda: keepalive_status_from_proxy())
+            telegram_bot.start_keepalive_monitor(
+                lambda: keepalive_status_from_proxy(),
+                event_provider=pending_keepalive_events,
+            )
     server.telegram_bot = telegram_bot
     listen_url = f"http://{args.host}:{args.port}/"
     access_url = f"http://{args.public_host}:{args.port}/"

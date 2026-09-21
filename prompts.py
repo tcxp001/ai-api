@@ -1,18 +1,17 @@
-"""轮换探活提示词，供 AIProxy 保温线程与 api.py 测活共用。
+"""线程安全的轮换提示词。
 
-提示词照搬 atry(`/mnt/test/atry/main.go:100-117`)那 16 条中文短句：都要求“短回”，
-所以每次探活的请求和回复都很小。
-
-atry 用纯 `rand` 取词，可能连续两次取到同一句。这里改成洗牌发牌：一副牌按序发完再重洗，
-保证每句都用过一次才会重复，并且跨牌堆边界也不出现相邻重复。
+旧短句仅保留给既有普通探测调用；抢通/保活使用独立的 200 道逻辑题库，
+两条路径不会互相降级或混用。
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import random
 import threading
 
-KEEPALIVE_PROMPTS: tuple[str, ...] = (
+LEGACY_PROBE_PROMPTS: tuple[str, ...] = (
     "在吗？短回",
     "还在线吗？短答",
     "能收到吗？回一句",
@@ -30,6 +29,26 @@ KEEPALIVE_PROMPTS: tuple[str, ...] = (
     "现在正常吗？短答",
     "能用吗？短回",
 )
+# 兼容普通探测代码及旧调用方；抢通/保活不再使用该常量。
+KEEPALIVE_PROMPTS = LEGACY_PROBE_PROMPTS
+KEEPALIVE_QUESTIONS_PATH = Path(__file__).with_name("keepalive_questions.json")
+
+
+def load_keepalive_questions(path: Path = KEEPALIVE_QUESTIONS_PATH) -> tuple[str, ...]:
+    """读取保活题库，只返回题目；参考答案永不进入请求内容。"""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = payload.get("items") if isinstance(payload, dict) else None
+        questions = tuple(
+            str(item.get("question") or "").strip()
+            for item in (items or [])
+            if isinstance(item, dict) and str(item.get("question") or "").strip()
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"cannot load keepalive question bank: {type(exc).__name__}") from exc
+    if len(questions) != 200 or len(set(questions)) != 200:
+        raise RuntimeError("keepalive question bank must contain 200 unique questions")
+    return questions
 
 
 class PromptDeck:
@@ -59,9 +78,21 @@ class PromptDeck:
             return prompt
 
 
-_default_deck = PromptDeck()
+_default_deck = PromptDeck(LEGACY_PROBE_PROMPTS)
+_keepalive_deck: PromptDeck | None = None
+_keepalive_deck_lock = threading.Lock()
 
 
 def next_prompt() -> str:
-    """从进程级共享牌堆取下一句探活提示词。"""
+    """普通探测的旧短句入口（保留兼容，不供抢通/保活使用）。"""
     return _default_deck.next()
+
+
+def next_keepalive_prompt() -> str:
+    """从 200 道题的进程级共享牌堆取下一道保活题。"""
+    global _keepalive_deck
+    if _keepalive_deck is None:
+        with _keepalive_deck_lock:
+            if _keepalive_deck is None:
+                _keepalive_deck = PromptDeck(load_keepalive_questions())
+    return _keepalive_deck.next()
