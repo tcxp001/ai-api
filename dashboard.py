@@ -3506,8 +3506,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.server.dashboard_sessions.add(token)
         self._session_cookie = f"ai_api_session={token}; Path=/; HttpOnly; SameSite=Strict"
 
+    def _init_known_secrets(self) -> None:
+        try:
+            self._known_secrets = [secret for p in load_provider_list() for secret in provider_secrets(p)]
+        except Exception:
+            self._known_secrets = []
+
     def authorize(self, *, mutation: bool = False) -> bool:
         if self._session_authenticated():
+            self._init_known_secrets()
             return True
         auth = getattr(self.server, "password_auth", None)
         try:
@@ -3533,10 +3540,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_json(403, {"error": "拒绝跨站或非 JSON 管理请求"})
             return False
-        try:
-            self._known_secrets = [secret for p in load_provider_list() for secret in provider_secrets(p)]
-        except Exception:
-            self._known_secrets = []
+        self._init_known_secrets()
         return True
 
     def error_detail(self, exc: Exception) -> str:
