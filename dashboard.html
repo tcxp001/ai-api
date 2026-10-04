@@ -649,14 +649,42 @@
       return state.providers.some(p => p && p.keepalive === true);
     }
 
-    const statsShanghaiToday = () => {
+    const statsShanghaiToday = (now = new Date()) => {
       const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
         timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).formatToParts(new Date()).map(item => [item.type, item.value]));
+      }).formatToParts(now).map(item => [item.type, item.value]));
       return `${parts.year}-${parts.month}-${parts.day}`;
     };
+    let statsCalendarDate = '';
+    let statsDateTimer = null;
+
+    function syncStatsDate() {
+      const now = new Date();
+      const today = statsShanghaiToday(now);
+      const changed = statsCalendarDate !== '' && statsCalendarDate !== today;
+      if (!statsCalendarDate || changed) $('statsDate').value = today;
+      statsCalendarDate = today;
+      clearTimeout(statsDateTimer);
+      // Shanghai uses UTC+08:00; schedule the next local midnight, not a daily interval.
+      const nextMidnight = Date.parse(`${today}T00:00:00+08:00`) + 86400000;
+      statsDateTimer = setTimeout(syncStatsDate, Math.max(1, nextMidnight - now.getTime()));
+      if (changed && state.tab === 'stats') {
+        loadStats().catch(err => { $('message').textContent = `读取失败：${err.message}`; });
+      }
+    }
+
+    function startStatsDateRollover() {
+      syncStatsDate();
+      // Background tabs and sleeping devices may delay timers until the page resumes.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) syncStatsDate();
+      });
+      window.addEventListener('focus', syncStatsDate);
+      window.addEventListener('pageshow', syncStatsDate);
+    }
+
     const statsSelectedDate = () => $('statsDate')?.value || statsShanghaiToday();
-    const statsPath = path => `${path}?${new URLSearchParams({ date: statsSelectedDate() })}`;
+    const statsPath = (path, date = statsSelectedDate()) => `${path}?${new URLSearchParams({ date })}`;
     const statsNumber = value => Number(value || 0).toLocaleString();
     const statsSeconds = value => value == null ? '—' : (Number(value) / 1000).toFixed(1);
     const statsDateTime = value => {
@@ -665,7 +693,9 @@
     };
 
     async function loadStatsSummary() {
-      const summary = await api(statsPath('/api/stats/summary'));
+      const date = statsSelectedDate();
+      const summary = await api(statsPath('/api/stats/summary', date));
+      if (date !== statsSelectedDate()) return;
       if (!Number(summary.requests || 0)) {
         for (const id of ['requests', 'successRate', 'latency', 'tokens', 'cacheRead', 'cacheReadRate']) $(id).textContent = '/';
         return;
@@ -679,23 +709,29 @@
     }
 
     async function loadStatsProviders() {
-      const data = await api(statsPath('/api/stats/providers'));
+      const date = statsSelectedDate();
+      const data = await api(statsPath('/api/stats/providers', date));
+      if (date !== statsSelectedDate()) return;
       $('groupRows').innerHTML = (data.items || []).map(item =>
         `<tr><td><strong>${esc(item.name || '—')}</strong></td><td>${statsNumber(item.requests)}</td><td>${item.successRate || 0}%</td><td>${statsSeconds(item.averageHeadersMs)}</td><td>${statsSeconds(item.averageFirstTokenMs)}</td><td>${statsSeconds(item.averageDurationMs)}</td><td>${statsNumber(item.inputTokens)}</td><td>${statsNumber(item.outputTokens)}</td><td>${statsNumber(item.cacheReadTokens)}</td><td>${Number(item.cacheReadRate || 0).toFixed(2)}%</td></tr>`
         ).join('') || '<tr><td colspan="10" class="subtle">暂无统计数据。</td></tr>';
     }
 
     async function loadStatsConfig() {
-      const data = await api(statsPath('/api/stats/config'));
+      const date = statsSelectedDate();
+      const data = await api(statsPath('/api/stats/config', date));
+      if (date !== statsSelectedDate()) return;
       $('providerFilter').innerHTML = '<option value="">全部上游</option>' +
         (data.providers || []).map(item => `<option value="${esc(item.value || item.name)}">${esc(item.name)}</option>`).join('');
     }
 
     async function loadStatsRequests() {
-      const query = new URLSearchParams({ limit: $('limit').value, date: statsSelectedDate() });
+      const date = statsSelectedDate();
+      const query = new URLSearchParams({ limit: $('limit').value, date });
       if ($('providerFilter').value) query.set('provider', $('providerFilter').value);
       if ($('modelFilter').value.trim()) query.set('model', $('modelFilter').value.trim());
       const data = await api(`/api/stats/requests?${query}`);
+      if (date !== statsSelectedDate()) return;
       $('requestRows').innerHTML = (data.items || []).map(item =>
         `<tr><td>${esc(statsDateTime(item.createdAt))}</td><td>${esc(item.provider)}</td><td>${esc(item.model || '—')}</td><td class="${item.ok ? 'ok' : 'bad'}">${item.ok ? '成功' : `失败 ${item.statusCode || ''}`}</td><td>${statsSeconds(item.headersMs)}</td><td>${statsSeconds(item.firstTokenMs)}</td><td>${statsSeconds(item.durationMs)}</td><td>${statsNumber(item.inputTokens)}</td><td>${statsNumber(item.outputTokens)}</td><td>${statsNumber(item.cacheReadTokens)}</td><td title="${esc(item.error)}">${esc(item.error || '—')}</td></tr>`
       ).join('') || '<tr><td colspan="11" class="subtle">暂无请求数据。</td></tr>';
@@ -2480,7 +2516,7 @@
     });
 
     setActiveTab(state.tab);
-    if ($('statsDate')) $('statsDate').value = statsShanghaiToday();
+    startStatsDateRollover();
     dashboardAuthReady.then(() => loadAll()).catch(err => {
       $('serverState').textContent = err.message;
     });
