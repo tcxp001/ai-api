@@ -39,6 +39,13 @@ from dashboard_security import (
     set_password,
     write_private_file,
 )
+from model_capabilities import (
+    CODEX_MODEL_CAPABILITY_FLAGS,
+    CODEX_REASONING_LEVEL_DESCRIPTIONS,
+    normalize_model_capabilities,
+    resolve_capability_reasoning_effort,
+)
+from proxy_reasoning import normalize_chat_reasoning
 from secret_utils import provider_secrets, redact_text, redact_url
 from keepalive_events import pending as pending_keepalive_events
 try:
@@ -596,6 +603,8 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(remove_headers, list):
         raise ValueError(f"{label} remove_headers must be an array")
     provider["remove_headers"] = remove_headers
+    if "chat_reasoning" in provider:
+        provider["chat_reasoning"] = normalize_chat_reasoning(provider["chat_reasoning"], f"{label}.chat_reasoning")
     models = provider.get("models") or provider.get("model")
     if isinstance(models, str):
         provider["models"] = {models: {}}
@@ -603,7 +612,20 @@ def validate_provider(entry: Any, index: int) -> dict[str, Any]:
     elif isinstance(models, list):
         provider["models"] = {str(item): {} for item in models if str(item).strip()}
     elif isinstance(models, dict):
-        provider["models"] = models
+        provider["models"] = dict(models)
+        for model, meta in models.items():
+            if isinstance(meta, dict) and "capabilities" in meta:
+                provider["models"][model] = {
+                    **meta,
+                    "capabilities": normalize_model_capabilities(
+                        meta["capabilities"], f"{label} model {model!r}"
+                    ),
+                }
+            if isinstance(meta, dict) and "chat_reasoning" in meta:
+                provider["models"][model] = {
+                    **provider["models"][model],
+                    "chat_reasoning": normalize_chat_reasoning(meta["chat_reasoning"], f"{label} model {model!r}.chat_reasoning"),
+                }
     else:
         provider["models"] = {}
     return provider
@@ -1584,11 +1606,17 @@ def model_context_window(meta: dict[str, Any]) -> int:
 
 def codex_model_catalog_entry(provider: dict[str, Any], model: str, priority: int) -> dict[str, Any]:
     meta = model_meta_for(provider, model)
+    capabilities = normalize_model_capabilities(
+        meta["capabilities"], f"provider {provider.get('name')!r} model {model!r}"
+    ) if "capabilities" in meta else {}
     context = model_context_window(meta)
     effort = str(meta.get("reasoning_effort") or provider.get("reasoning_effort") or "medium").strip() or "medium"
-    if effort == "none":
+    levels = capabilities.get("supported_reasoning_levels")
+    if levels is not None:
+        effort = resolve_capability_reasoning_effort(provider, {**meta, "capabilities": capabilities})
+    elif effort == "none":
         effort = "medium"
-    return {
+    entry = {
         "slug": model,
         "display_name": model,
         "description": f"{model} via ai-api",
@@ -1627,6 +1655,18 @@ def codex_model_catalog_entry(provider: dict[str, Any], model: str, priority: in
         "supports_search_tool": False,
         "use_responses_lite": False,
     }
+    for field in (*CODEX_MODEL_CAPABILITY_FLAGS, "input_modalities"):
+        if field in capabilities:
+            entry[field] = capabilities[field]
+    if levels is not None:
+        entry["supported_reasoning_levels"] = [
+            {"effort": level, "description": CODEX_REASONING_LEVEL_DESCRIPTIONS[level]}
+            for level in levels
+        ]
+    if provider_api_mode(provider) == "chat_completions":
+        # Responses-only image detail must never be advertised to Chat gateways.
+        entry["supports_image_detail_original"] = False
+    return entry
 
 
 def write_codex_model_catalog(provider: dict[str, Any]) -> dict[str, str] | None:
@@ -1826,6 +1866,11 @@ def sync_codex_config(
         model_meta = model_meta_for(provider, model)
         context = model_context_window(model_meta)
         effort = model_meta.get("reasoning_effort") or provider.get("reasoning_effort") or ""
+        capabilities = model_meta.get("capabilities")
+        if isinstance(capabilities, dict) and "supported_reasoning_levels" in capabilities:
+            # Reuse the catalog default only for explicit restrictions; legacy
+            # profiles retain their raw effort value (or omit it when unset).
+            effort = codex_model_catalog_entry(provider, model, 0)["default_reasoning_level"]
         catalog_result = write_codex_model_catalog(provider)
         if catalog_result:
             written_catalogs.append(catalog_result)

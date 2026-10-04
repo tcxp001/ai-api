@@ -46,6 +46,19 @@ import yaml
 from secret_utils import provider_secrets, redact_text, redact_url
 from codex_keepalive import CodexConfigurationError, CodexSession
 from keepalive_events import publish as publish_keepalive_event
+from proxy_content_encoding import RequestContentError, decode_request_body
+from model_capabilities import normalize_model_capabilities, resolve_capability_reasoning_effort
+from proxy_reasoning import apply_chat_reasoning, normalize_chat_reasoning
+from proxy_compaction import (
+    CompactionError, compact_response, is_compaction_request,
+    prepare_compaction_request, replay_compaction_items, validate_compaction_source,
+)
+from proxy_claude import BridgeError, messages_to_upstream, upstream_to_messages
+from proxy_claude_stream import message_to_events, stream_to_messages
+from proxy_state import (
+    ANTHROPIC_THINKING_FAMILY, ProtocolStateError, anthropic_state_scope, decode_anthropic_thinking,
+    reasoning_item_from_anthropic,
+)
 
 try:
     from prompts import next_keepalive_prompt
@@ -613,6 +626,10 @@ def normalize_models(raw: Any) -> dict[str, dict[str, Any]]:
                 effort = effort.get("effort")
             if isinstance(effort, str) and effort.strip():
                 normalized["reasoning_effort"] = effort.strip()
+            if "capabilities" in meta:
+                normalized["capabilities"] = normalize_model_capabilities(meta["capabilities"], f"model {name!r}")
+            if "chat_reasoning" in meta:
+                normalized["chat_reasoning"] = normalize_chat_reasoning(meta["chat_reasoning"], f"model {name!r}.chat_reasoning")
             pricing = normalize_model_pricing(meta)
             if pricing:
                 normalized["pricing"] = pricing
@@ -690,6 +707,7 @@ def load_config_from_data(cfg: Any, source: str | Path = "<memory>") -> dict[str
             "read_timeout": _coerce_positive_float(entry.get("read_timeout")) or DEFAULT_READ_TIMEOUT,
             "models": models,
             "reasoning_effort": provider_reasoning.strip() if isinstance(provider_reasoning, str) and provider_reasoning.strip() else "",
+            "chat_reasoning": normalize_chat_reasoning(entry.get("chat_reasoning"), f"provider {name!r}.chat_reasoning"),
             "fallback_responses_to_chat": _coerce_bool(entry.get("fallback_responses_to_chat"), True),
             "cost_multiplier": cost_multiplier if cost_multiplier is not None else 1.0,
             **keepalive_options_from_entry(entry),
@@ -1104,7 +1122,36 @@ def configured_reasoning_effort(provider: dict[str, Any], body_json: dict[str, A
         effort = str(model_meta.get("reasoning_effort") or "").strip()
     if not effort:
         effort = str(provider.get("reasoning_effort") or "").strip()
+    levels = model_meta.get("capabilities", {}).get("supported_reasoning_levels") if isinstance(model_meta, dict) else None
+    if levels:
+        effort = resolve_capability_reasoning_effort(provider, model_meta)
     return effort
+
+
+def configured_chat_reasoning(provider: dict[str, Any], body_json: dict[str, Any]) -> dict[str, Any]:
+    meta = provider.get("models", {}).get(str(body_json.get("model") or ""), {})
+    return meta.get("chat_reasoning", provider.get("chat_reasoning", {}))
+
+
+def validate_response_state_destination(body_json: dict[str, Any], *, anthropic: bool, native: bool = False) -> None:
+    """Our Anthropic signature carrier is not an OpenAI encrypted reasoning item."""
+    items = body_json.get("input")
+    if not isinstance(items, list):
+        items = [items]
+    if not anthropic:
+        for item in items:
+            value = item.get("encrypted_content") if isinstance(item, dict) else None
+            if isinstance(value, str) and value.startswith(ANTHROPIC_THINKING_FAMILY):
+                raise ProtocolStateError(
+                    "Saved Anthropic thinking cannot be replayed to a different protocol; "
+                    "use its Messages provider or resend readable history."
+                )
+            if (not native and isinstance(item, dict) and item.get("type") == "reasoning"
+                    and value is not None):
+                raise ProtocolStateError(
+                    "Opaque reasoning cannot be represented by the Chat bridge; "
+                    "use its native Responses provider or resend readable history."
+                )
 
 
 def maybe_apply_reasoning(provider: dict[str, Any], proxied_path: str, body: bytes | None) -> tuple[bytes | None, dict[str, Any] | None]:
@@ -1118,7 +1165,7 @@ def maybe_apply_reasoning(provider: dict[str, Any], proxied_path: str, body: byt
         return body, None
 
     route_path = proxied_path.split("?", 1)[0].rstrip("/") or "/"
-    if route_path == "/responses":
+    if route_path in {"/responses", "/responses/compact"}:
         effort = configured_reasoning_effort(provider, body_json)
         if effort:
             if effort.lower() == "none":
@@ -1546,7 +1593,8 @@ def collect_tool_search_output_tools(value: Any, context: dict[str, Any]) -> Non
     if not isinstance(value, dict):
         return
     tools = value.get("tools")
-    if isinstance(tools, list):
+    carrier_type = value.get("type")
+    if isinstance(carrier_type, str) and carrier_type in {"tool_search_output", "additional_tools"} and isinstance(tools, list):
         for tool in tools:
             _tool_context_add_response_tool(context, tool)
     for child in value.values():
@@ -1592,6 +1640,9 @@ def responses_content_to_chat(content: Any) -> Any:
         if part_type == "input_image":
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
+                image_url = dict(image_url)
+                if image_url.get("detail") == "original":
+                    image_url["detail"] = "auto"
                 return {"type": "image_url", "image_url": image_url}, None, False
             if image_url:
                 return {"type": "image_url", "image_url": {"url": str(image_url)}}, None, False
@@ -1749,6 +1800,8 @@ def tool_media_content_part(part: dict[str, Any], *, anthropic: bool) -> dict[st
         image = {key: image[key] for key in ("url", "detail") if key in image}
         if "detail" not in image and part.get("detail") is not None:
             image["detail"] = part["detail"]
+        if image.get("detail") == "original":
+            image["detail"] = "auto"
         return {"type": "image_url", "image_url": image}
 
     if not anthropic and (
@@ -1922,6 +1975,9 @@ def append_responses_input_as_chat_messages(input_value: Any, messages: list[dic
             return
 
         item_type = str(item.get("type") or "")
+        if item_type == "additional_tools":
+            # Tool declarations are not turn boundaries or empty system messages.
+            return
         if item_type == "function_call":
             append_pending_reasoning(extract_reasoning_field_text(item), unique=True)
             pending_tool_calls.append(responses_function_call_to_chat_tool_call(item, tool_context))
@@ -2055,7 +2111,11 @@ EXTRA_CHAT_PASSTHROUGH_FIELDS = (
 )
 
 
-def responses_payload_to_chat(body_json: dict[str, Any], tool_context: dict[str, Any] | None = None) -> dict[str, Any]:
+def responses_payload_to_chat(
+    body_json: dict[str, Any], tool_context: dict[str, Any] | None = None, *,
+    reasoning_config: dict[str, Any] | None = None, configured_effort: str = "",
+) -> dict[str, Any]:
+    validate_response_state_destination(body_json, anthropic=False)
     if tool_context is None:
         tool_context = build_codex_tool_context_from_request(body_json)
 
@@ -2079,11 +2139,8 @@ def responses_payload_to_chat(body_json: dict[str, Any], tool_context: dict[str,
             chat[key] = body_json.get(key)
 
     reasoning = body_json.get("reasoning") if isinstance(body_json.get("reasoning"), dict) else None
-    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
-    if isinstance(effort, str) and effort.strip() and supports_reasoning_effort(model_name):
-        normalized_effort = effort.strip()
-        if normalized_effort.lower() not in {"none", "off", "disabled"}:
-            chat["reasoning_effort"] = normalized_effort
+    effort = configured_effort or (reasoning.get("effort") if isinstance(reasoning, dict) else None)
+    apply_chat_reasoning(chat, effort, reasoning_config, default_supports_effort=supports_reasoning_effort(model_name))
 
     messages: list[dict[str, Any]] = []
     instructions = instruction_text(body_json.get("instructions")) if body_json.get("instructions") is not None else ""
@@ -2302,9 +2359,7 @@ def responses_tools_to_anthropic_tools(tools: Any, tool_context: dict[str, Any] 
         seen.add(name)
         out.append(tool)
 
-    if not isinstance(tools, list):
-        return out
-    for tool in tools:
+    for tool in tools if isinstance(tools, list) else []:
         if isinstance(tool, str):
             add(responses_custom_tool_to_anthropic_tool({"type": "custom", "name": tool}))
             continue
@@ -2330,6 +2385,12 @@ def responses_tools_to_anthropic_tools(tools: Any, tool_context: dict[str, Any] 
             add(responses_tool_search_to_anthropic_tool())
         elif tool_type in {"web_search", "web_search_preview", "web_search_20250305", "google_search"}:
             add({"type": "web_search_20250305", "name": "web_search"})
+    # The registry also holds tools declared by additional_tools and
+    # tool_search_output. Top-level definitions above retain precedence.
+    for tool in (tool_context or {}).get("chat_tools", []):
+        name = responses_tool_name(tool)
+        if name:
+            add(responses_function_tool_to_anthropic_tool(tool, name))
     return out
 
 
@@ -2389,6 +2450,8 @@ def anthropic_thinking_from_responses_reasoning(reasoning: Any, max_tokens: int,
 
 
 def responses_payload_to_anthropic_messages(body_json: dict[str, Any], tool_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    if tool_context is None:
+        tool_context = build_codex_tool_context_from_request(body_json)
     payload: dict[str, Any] = {"model": body_json.get("model")}
     if body_json.get("max_output_tokens") is not None:
         payload["max_tokens"] = body_json.get("max_output_tokens")
@@ -2420,6 +2483,8 @@ def responses_payload_to_anthropic_messages(body_json: dict[str, Any], tool_cont
             return
 
         item_type = str(item.get("type") or "")
+        if item_type == "additional_tools":
+            return
         role = responses_role_to_chat_role(str(item.get("role") or "user"))
         if role == "system":
             text = responses_content_to_system_text(item.get("content", ""))
@@ -2465,6 +2530,16 @@ def responses_payload_to_anthropic_messages(body_json: dict[str, Any], tool_cont
             }])
             return
         if item_type == "reasoning":
+            block = decode_anthropic_thinking(
+                item.get("encrypted_content"), tool_context.get("anthropic_state_scope", "")
+            )
+            if block is not None:
+                append_anthropic_message(messages, "assistant", [block])
+            elif item.get("encrypted_content") is not None:
+                raise ProtocolStateError(
+                    "Opaque reasoning cannot be represented by the Messages bridge; "
+                    "use its native Responses provider or resend readable history."
+                )
             return
 
         if item_type in {"input_text", "input_image", "input_file", "input_audio"}:
@@ -2687,6 +2762,23 @@ def empty_stream_to_openai_error(upstream_route_path: str = "") -> dict[str, Any
     }
 
 
+def conversion_stream_lines(resp: requests.Response):
+    """Turn upstream read failures into one safe event, without replaying output.
+
+    Only the upstream iterator is inside the exception boundary. A downstream
+    disconnect must still propagate to the caller and close the upstream.
+    """
+    try:
+        yield from resp.iter_lines(decode_unicode=False)
+    except (requests.RequestException, OSError, EOFError):
+        error = {"error": {
+            "type": "upstream_error",
+            "code": "upstream_stream_error",
+            "message": "Upstream stream read failed before completion.",
+        }}
+        yield b"data: " + json.dumps(error).encode("utf-8")
+
+
 def upstream_error_to_openai_error(resp: requests.Response, upstream_route_path: str = "", secrets=()) -> dict[str, Any]:
     status = int(getattr(resp, "status_code", 0) or 0)
     try:
@@ -2766,8 +2858,35 @@ def chat_usage_to_responses_usage(usage: Any) -> Any:
     return result
 
 
+def anthropic_usage_to_responses_usage(usage: Any) -> Any:
+    if not isinstance(usage, dict):
+        return usage
+    # Some Messages-compatible routes actually stream Chat usage.
+    if "prompt_tokens" in usage and "input_tokens" not in usage:
+        return chat_usage_to_responses_usage(usage)
+    fresh = int(usage.get("input_tokens") or 0)
+    read = int(usage.get("cache_read_input_tokens") or 0)
+    written = int(usage.get("cache_creation_input_tokens") or 0)
+    output = int(usage.get("output_tokens") or 0)
+    details = usage.get("output_tokens_details") or {}
+    reasoning = int(details.get("thinking_tokens") or details.get("reasoning_tokens") or 0)
+    result = {
+        "input_tokens": fresh + read + written,
+        "output_tokens": output,
+        "total_tokens": fresh + read + written + output,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+    }
+    if read or written:
+        result["input_tokens_details"] = {"cached_tokens": read}
+        if written:
+            result["input_tokens_details"]["cache_write_tokens"] = written
+    if written:
+        result["cache_creation_input_tokens"] = written
+    return result
+
+
 def anthropic_stop_reason_to_responses_status(stop_reason: Any) -> str:
-    if stop_reason == "max_tokens":
+    if stop_reason in {"max_tokens", "model_context_window_exceeded", "refusal"}:
         return "incomplete"
     return "completed"
 
@@ -2780,7 +2899,7 @@ def messages_payload_to_responses(payload: dict[str, Any], model: str = "", tool
     response_model = model or str(payload.get("model") or "")
     created_at = int(payload.get("created_at") or payload.get("created") or time.time())
     status = anthropic_stop_reason_to_responses_status(payload.get("stop_reason"))
-    usage = chat_usage_to_responses_usage(payload.get("usage"))
+    usage = anthropic_usage_to_responses_usage(payload.get("usage"))
 
     output: list[dict[str, Any]] = []
     output_text_parts: list[str] = []
@@ -2808,16 +2927,13 @@ def messages_payload_to_responses(payload: dict[str, Any], model: str = "", tool
             pending_message_parts.append({"type": "output_text", "text": text, "annotations": []})
             output_text_parts.append(text)
             continue
-        if block_type == "thinking":
+        if block_type in {"thinking", "redacted_thinking"}:
             flush_message()
-            thinking = str(block.get("thinking") or block.get("text") or "")
-            if thinking:
-                output.append({
-                    "id": f"rs_{len(output)}",
-                    "type": "reasoning",
-                    "status": "completed",
-                    "summary": [{"type": "summary_text", "text": thinking}],
-                })
+            item = reasoning_item_from_anthropic(
+                block, f"rs_{len(output)}", (tool_context or {}).get("anthropic_state_scope", "")
+            )
+            if item.get("summary") or item.get("encrypted_content"):
+                output.append(item)
             continue
         if block_type == "tool_use":
             flush_message()
@@ -2851,7 +2967,9 @@ def messages_payload_to_responses(payload: dict[str, Any], model: str = "", tool
         "usage": usage,
     }
     if status == "incomplete":
-        response["incomplete_details"] = {"reason": "max_output_tokens"}
+        response["incomplete_details"] = {
+            "reason": "content_filter" if payload.get("stop_reason") == "refusal" else "max_output_tokens"
+        }
     return response
 
 
@@ -5662,6 +5780,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
+    def _send_claude_error(self, status: int, error: dict[str, Any]) -> None:
+        error_type = {
+            400: "invalid_request_error", 401: "authentication_error",
+            403: "permission_error", 404: "not_found_error", 413: "request_too_large",
+            429: "rate_limit_error", 529: "overloaded_error",
+        }.get(status, "api_error")
+        self._send_json(status, {"type": "error", "error": {
+            **error, "type": error_type,
+        }})
+
     def _write_sse_event(self, event: str, payload: dict[str, Any]) -> None:
         payload = redact_stream_error(payload, event, getattr(self, "_request_secrets", ()))
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
@@ -5842,6 +5970,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "status": "completed",
             "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
         }
+        if item.get("encrypted_content"):
+            final_item["encrypted_content"] = item["encrypted_content"]
         self._write_sse_event("response.reasoning_summary_text.done", {
             "type": "response.reasoning_summary_text.done",
             "item_id": item_id,
@@ -5920,6 +6050,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     output_text_parts.append(text)
             elif item.get("type") == "reasoning":
                 final_output.append(self._emit_response_reasoning_item_stream(output_index, item))
+            elif item.get("type") == "compaction":
+                # Compaction items have no tool-call status or argument lifecycle.
+                for event in ("response.output_item.added", "response.output_item.done"):
+                    self._write_sse_event(event, {
+                        "type": event, "output_index": output_index, "item": item,
+                    })
+                final_output.append(dict(item))
             else:
                 final_output.append(self._emit_response_tool_item_stream(output_index, item))
 
@@ -5931,7 +6068,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         completed["model"] = response_model
         completed["output"] = final_output
         completed["output_text"] = str(completed.get("output_text") or "".join(output_text_parts))
-        self._write_sse_event("response.completed", {"type": "response.completed", "response": completed})
+        terminal = "response." + (completed["status"] if completed["status"] in {"failed", "incomplete"} else "completed")
+        self._write_sse_event(terminal, {"type": terminal, "response": completed})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
@@ -5960,6 +6098,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         inline_mode = "detecting"  # detecting | reasoning | text
         inline_buffer = ""
         saw_response_event = False
+        saw_done_marker = False
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
@@ -6253,7 +6392,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     break
                 next_tool_index += 1
 
-        for raw_line in resp.iter_lines(decode_unicode=False):
+        for raw_line in conversion_stream_lines(resp):
             if not raw_line:
                 continue
             line = raw_line.decode("utf-8", errors="replace")
@@ -6261,6 +6400,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not data:
                 continue
             if data == "[DONE]":
+                saw_done_marker = True
                 break
             try:
                 chunk = json.loads(data)
@@ -6312,6 +6452,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not saw_response_event:
             self._write_responses_failed_stream(empty_stream_to_openai_error("/chat/completions"), model=response_model)
             return
+
+        stream_truncated = finish_reason is None and not saw_done_marker
+        if stream_truncated:
+            has_output = (
+                any(part.strip() for part in text_parts + reasoning_parts)
+                or bool(inline_buffer.strip())
+                or any(str(state.get("chat_name") or "").strip() or state.get("call_id")
+                       or any(str(part).strip() for part in state.get("arguments_parts", []))
+                       for state in tool_states.values())
+            )
+            if not has_output:
+                self._write_responses_failed_stream({
+                    "type": "upstream_error", "code": "upstream_stream_truncated",
+                    "message": "Upstream stream ended before producing output or a stop reason.",
+                }, model=response_model)
+                return
+            # Match the Responses incomplete contract used for partial Chat turns.
+            # Never report a silent EOF as a successfully completed agent turn.
+            finish_reason = "length"
 
         ensure_started(None)
         flush_inline_at_boundary()
@@ -6366,7 +6525,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             item_id = str(state.get("item_id") or response_tool_call_item_id_from_chat_name(call_id, chat_name, tool_context))
             final_item = response_tool_call_item_from_chat_name(
                 item_id,
-                "completed",
+                "incomplete" if stream_truncated else "completed",
                 call_id,
                 chat_name,
                 arguments,
@@ -6374,7 +6533,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 reasoning=state.get("reasoning_content"),
             )
             state["done"] = True
-            if final_item.get("type") == "function_call":
+            if final_item.get("type") == "function_call" and not stream_truncated:
                 self._write_sse_event("response.function_call_arguments.done", {
                     "type": "response.function_call_arguments.done",
                     "item_id": item_id,
@@ -6405,7 +6564,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
         if status == "incomplete":
             completed["incomplete_details"] = {"reason": "max_output_tokens"}
-        self._write_sse_event("response.completed", {"type": "response.completed", "response": completed})
+        terminal = "response.incomplete" if status == "incomplete" else "response.completed"
+        self._write_sse_event(terminal, {"type": terminal, "response": completed})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
@@ -6426,6 +6586,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         usage: dict[str, Any] = {}
         stop_reason = ""
         saw_response_event = False
+        saw_done_marker = False
 
         self._send_response_stream_headers(resp.status_code)
         if self.command == "HEAD":
@@ -6442,6 +6603,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "prompt_tokens",
                 "completion_tokens",
                 "total_tokens",
+                "output_tokens_details",
             ):
                 if value.get(key) is not None:
                     usage[key] = value.get(key)
@@ -6507,11 +6669,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             emit_text_delta(state, initial_text)
             return state
 
-        def start_reasoning_block(key: Any, initial_text: str = "") -> dict[str, Any]:
+        def start_reasoning_block(key: Any, initial_text: str = "", source_block: dict[str, Any] | None = None) -> dict[str, Any]:
             ensure_started(None)
             output_index = allocate_output_index()
             item_id = f"rs_{output_index}"
             state = {"kind": "reasoning", "output_index": output_index, "item_id": item_id, "summary_parts": [], "done": False}
+            state["source_block"] = dict(source_block or {"type": "thinking", "thinking": ""})
             block_states[key] = state
             self._write_sse_event("response.output_item.added", {
                 "type": "response.output_item.added",
@@ -6561,13 +6724,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             block_type = str(block.get("type") or "")
             if block_type == "text":
                 return start_message_block(key, str(block.get("text") or ""))
-            if block_type == "thinking":
-                return start_reasoning_block(key, str(block.get("thinking") or ""))
+            if block_type in {"thinking", "redacted_thinking"}:
+                return start_reasoning_block(key, str(block.get("thinking") or ""), block)
             if block_type == "tool_use":
                 return start_tool_block(key, block)
             return None
 
-        def finalize_state(state: dict[str, Any]) -> None:
+        def finalize_state(state: dict[str, Any], truncated: bool = False) -> None:
             if state.get("done"):
                 return
             state["done"] = True
@@ -6577,7 +6740,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if kind == "message":
                 text = "".join(state.get("text_parts") or [])
                 part = {"type": "output_text", "text": text, "annotations": []}
-                item = {"id": item_id, "type": "message", "status": "completed", "role": "assistant", "content": [part]}
+                item = {"id": item_id, "type": "message", "status": "incomplete" if truncated else "completed", "role": "assistant", "content": [part]}
                 self._write_sse_event("response.output_text.done", {
                     "type": "response.output_text.done",
                     "item_id": item_id,
@@ -6602,12 +6765,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             if kind == "reasoning":
                 summary_text = "".join(state.get("summary_parts") or [])
-                item = {
-                    "id": item_id,
-                    "type": "reasoning",
-                    "status": "completed",
-                    "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
-                }
+                source_block = dict(state["source_block"])
+                if source_block.get("type") == "thinking":
+                    source_block["thinking"] = summary_text
+                item = reasoning_item_from_anthropic(
+                    source_block, item_id, (tool_context or {}).get("anthropic_state_scope", "")
+                )
+                if truncated:
+                    item["status"] = "incomplete"
+                    item.pop("encrypted_content", None)
                 self._write_sse_event("response.reasoning_summary_text.done", {
                     "type": "response.reasoning_summary_text.done",
                     "item_id": item_id,
@@ -6626,8 +6792,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 arguments = canonicalize_tool_arguments("".join(state.get("arguments_parts") or []))
                 call_id = str(state.get("call_id") or f"call_{output_index}")
                 name = str(state.get("name") or "")
-                final_item = response_tool_call_item_from_chat_name(item_id, "completed", call_id, name, arguments, tool_context)
-                if final_item.get("type") == "function_call":
+                final_item = response_tool_call_item_from_chat_name(item_id, "incomplete" if truncated else "completed", call_id, name, arguments, tool_context)
+                if final_item.get("type") == "function_call" and not truncated:
                     self._write_sse_event("response.function_call_arguments.done", {
                         "type": "response.function_call_arguments.done",
                         "item_id": item_id,
@@ -6641,16 +6807,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 })
                 final_output_pairs.append((output_index, final_item))
 
-        def finalize_all_open() -> None:
+        def finalize_all_open(truncated: bool = False) -> None:
             for state in sorted(block_states.values(), key=lambda item: int(item.get("output_index", 0))):
-                finalize_state(state)
+                finalize_state(state, truncated)
 
-        def send_completed() -> None:
+        def send_completed(truncated: bool = False) -> None:
             nonlocal completed_sent
             if completed_sent:
                 return
             ensure_started(None)
-            finalize_all_open()
+            finalize_all_open(truncated)
             final_output = [item for _output_index, item in sorted(final_output_pairs, key=lambda pair: pair[0])]
             final_text = "".join(output_text_parts)
             status = anthropic_stop_reason_to_responses_status(stop_reason)
@@ -6662,11 +6828,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "model": response_model,
                 "output_text": final_text,
                 "output": final_output,
-                "usage": chat_usage_to_responses_usage(usage),
+                "usage": anthropic_usage_to_responses_usage(usage),
             }
             if status == "incomplete":
-                completed["incomplete_details"] = {"reason": "max_output_tokens"}
-            self._write_sse_event("response.completed", {"type": "response.completed", "response": completed})
+                completed["incomplete_details"] = {
+                    "reason": "content_filter" if stop_reason == "refusal" else "max_output_tokens"
+                }
+            terminal = "response.incomplete" if status == "incomplete" else "response.completed"
+            self._write_sse_event(terminal, {"type": terminal, "response": completed})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             completed_sent = True
@@ -6680,7 +6849,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 return str(index)
 
-        for raw_line in resp.iter_lines(decode_unicode=False):
+        for raw_line in conversion_stream_lines(resp):
             if not raw_line:
                 continue
             line = raw_line.decode("utf-8", errors="replace")
@@ -6688,6 +6857,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not data:
                 continue
             if data == "[DONE]":
+                saw_done_marker = True
                 break
             try:
                 chunk = json.loads(data)
@@ -6715,6 +6885,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 for choice in choices:
                     if not isinstance(choice, dict):
                         continue
+                    if choice.get("finish_reason"):
+                        stop_reason = "max_tokens" if choice["finish_reason"] == "length" else "end_turn"
                     delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
                     content = delta.get("content")
                     if content:
@@ -6748,6 +6920,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     emit_text_delta(state, str(delta.get("text") or ""))
                 elif delta_type == "thinking_delta":
                     emit_reasoning_delta(state, str(delta.get("thinking") or ""))
+                elif delta_type == "signature_delta" and state.get("kind") == "reasoning":
+                    block = state["source_block"]
+                    block["signature"] = str(block.get("signature") or "") + str(delta.get("signature") or "")
                 elif delta_type == "input_json_delta":
                     piece = str(delta.get("partial_json") or "")
                     if piece:
@@ -6780,7 +6955,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not saw_response_event:
                 self._write_responses_failed_stream(empty_stream_to_openai_error("/messages"), model=response_model)
                 return
-            send_completed()
+            stream_truncated = not stop_reason and not saw_done_marker
+            if stream_truncated:
+                has_output = any(
+                    any(str(part).strip() for part in state.get("text_parts", [])
+                        + state.get("summary_parts", []) + state.get("arguments_parts", []))
+                    or state.get("name")
+                    or (state.get("done") and state.get("source_block", {}).get("type") == "redacted_thinking"
+                        and state["source_block"].get("data"))
+                    for state in block_states.values()
+                )
+                if not has_output:
+                    self._write_responses_failed_stream({
+                        "type": "upstream_error", "code": "upstream_stream_truncated",
+                        "message": "Upstream stream ended before producing output or a stop reason.",
+                    }, model=response_model)
+                    return
+                stop_reason = "max_tokens"
+            send_completed(stream_truncated)
 
     def _send_text(self, status: int, text: str) -> None:
         if status >= 400:
@@ -6856,13 +7048,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return target_name, provider, route_path
 
     def _read_body(self) -> bytes | None:
+        if hasattr(self, "_request_body_error"):
+            raise self._request_body_error
         if hasattr(self, "_cached_request_body"):
             return self._cached_request_body
         length = int(self.headers.get("Content-Length") or "0")
-        if length <= 0:
-            self._cached_request_body = None
-        else:
-            self._cached_request_body = self.rfile.read(length)
+        body = self.rfile.read(length) if length > 0 else b""
+        encoding_values = (
+            self.headers.get_all("Content-Encoding", [])
+            if hasattr(self.headers, "get_all")
+            else [self.headers.get("Content-Encoding", "")]
+        )
+        encoding = ",".join(encoding_values)
+        try:
+            decoded = decode_request_body(body, encoding)
+            self._cached_request_body = decoded if length > 0 else None
+        except RequestContentError as exc:
+            # Telemetry may read before the handler; never consume or retry
+            # the same malformed compressed body a second time.
+            self._request_body_error = exc
+            raise
+        if any(item.strip().lower() not in {"", "identity"} for item in encoding.split(",")):
+            for key in ("Content-Encoding", "Content-Length", "Transfer-Encoding",
+                        "Content-MD5", "Digest"):
+                if key in self.headers:
+                    del self.headers[key]
         return self._cached_request_body
 
     def _handle_keepalive_status(self) -> None:
@@ -7057,6 +7267,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._request_secrets = provider_secrets(provider)
 
         route_path = proxied_path.split("?", 1)[0].rstrip("/") or "/"
+        if self.command == "GET" and route_path == "/responses" and any(
+            value.strip().lower() == "websocket"
+            for value in str(self.headers.get("Upgrade") or "").split(",")
+        ):
+            self._send_json(426, {"error": {
+                "type": "invalid_request_error", "code": "websocket_not_supported",
+                "message": "WebSocket transport is not supported; use POST /responses with HTTP/SSE.",
+            }})
+            return
         if self.command in {"GET", "HEAD"} and route_path == "/models":
             self._send_json(200, build_models_payload(provider_name, provider))
             return
@@ -7072,7 +7291,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         base_url = str(provider.get("base_url") or "").rstrip("/")
         url = base_url + (upstream_path or "")
-        body = self._read_body()
+        try:
+            body = self._read_body()
+        except RequestContentError as exc:
+            error = {"type": "invalid_request_error", "code": exc.code, "message": exc.message}
+            payload = {"type": "error", "error": error} if route_path == "/messages" else {"error": error}
+            self._send_json(exc.status_code, payload)
+            return
 
         headers: dict[str, str] = {}
         for key, value in self.headers.items():
@@ -7127,6 +7352,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         api_key = str(provider.get("api_key") or "").strip()
         auth_mode = str(provider.get("auth_mode") or "bearer").strip().lower()
+        if api_key:
+            # A configured upstream credential replaces client credentials;
+            # sending both auth schemes can make Messages gateways reject it.
+            for existing in list(headers):
+                if existing.lower() in {"authorization", "x-api-key"}:
+                    headers.pop(existing, None)
         if auth_mode == "anthropic":
             for existing in list(headers.keys()):
                 if existing.lower() == "authorization":
@@ -7138,58 +7369,189 @@ class ProxyHandler(BaseHTTPRequestHandler):
         elif api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        native_messages_passthrough = (
-            self.command == "POST"
-            and route_path == "/messages"
-            and upstream_route_path == "/messages"
-        )
-        if native_messages_passthrough:
-            # 透传不解析请求体，但配置的思考深度仍要生效：只补 output_config.effort /
-            # thinking，其余字段原样转发。body_json 保持 None，避免走下面的整体规范化。
-            body = apply_reasoning_to_native_messages(provider, body)
-            body_json = None
-        else:
-            body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
-        convert_response_from = ""
-        conversion_tool_context: dict[str, Any] | None = None
         provider_api_mode = str(provider.get("api_mode") or "").strip().lower()
-        if (
-            self.command == "POST"
-            and route_path == "/responses"
-            and provider_api_mode in {"chat_completions", "messages"}
-            and isinstance(body_json, dict)
-        ):
-            query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
-            upstream_path = ("/messages" if provider_api_mode == "messages" else "/chat/completions") + query
-            upstream_route_path = "/messages" if provider_api_mode == "messages" else "/chat/completions"
-            url = base_url + upstream_path
-            if auth_mode == "anthropic" and provider_api_mode == "messages":
-                conversion_tool_context = build_codex_tool_context_from_request(body_json)
-                body_json = responses_payload_to_anthropic_messages(body_json, conversion_tool_context)
-                convert_response_from = "messages"
-            else:
-                conversion_tool_context = build_codex_tool_context_from_request(body_json)
-                body_json = responses_payload_to_chat(body_json, conversion_tool_context)
-                convert_response_from = "chat"
-            body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
-        elif self.command == "POST" and upstream_route_path == "/messages" and auth_mode == "anthropic" and isinstance(body_json, dict):
-            body_json = normalize_anthropic_messages_payload(body_json)
-            configured_effort = configured_reasoning_effort(provider, body_json)
-            if configured_effort:
-                if configured_effort.strip().lower() == "none":
-                    disable_anthropic_thinking(body_json)
-                else:
-                    apply_anthropic_effort(body_json, configured_effort)
-            body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
-        if body_json is not None:
-            headers["Content-Type"] = "application/json"
+        session = None
 
-        session = self.server.session_pool.borrow(provider_name, provider)
+        def freeze_state_headers() -> dict[str, str]:
+            """Bind replay to the identity Session will actually send.
+
+            Freeze jar cookies for this logical request, including a fresh-session
+            transport retry, so preparing/sending cannot change its account.
+            """
+            nonlocal session, headers
+            if session is None:
+                session = self.server.session_pool.borrow(provider_name, provider)
+            prepared = session.prepare_request(requests.Request(
+                method=self.command, url=url, headers=headers,
+            ))
+            headers = dict(prepared.headers)
+            headers = {key: value for key, value in headers.items() if key.lower() != "content-length"}
+            if not any(key.lower() == "cookie" for key in headers):
+                headers["Cookie"] = ""
+            return headers
+
+        claude_bridge_mode = ""
+        preparation_complete = False
+        try:
+            if self.command == "POST" and route_path == "/messages":
+                if provider_api_mode == "chat_completions" or upstream_route_path == "/chat/completions":
+                    claude_bridge_mode = "chat"
+                elif provider_api_mode in {"codex_responses", "responses"} or upstream_route_path == "/responses":
+                    claude_bridge_mode = "responses"
+            native_messages_passthrough = (
+                self.command == "POST"
+                and route_path == "/messages"
+                and (upstream_route_path == "/messages" or provider_api_mode == "messages")
+                and not claude_bridge_mode
+            )
+            if native_messages_passthrough:
+                # A bridge-owned Responses signature is not a native Anthropic
+                # signature. Validate without normalizing ordinary native bytes.
+                if body:
+                    try:
+                        native_input = json.loads(body)
+                    except (ValueError, UnicodeError):
+                        native_input = {}
+                    native_history = native_input.get("messages") if isinstance(native_input, dict) else None
+                    for message in native_history if isinstance(native_history, list) else []:
+                        content = message.get("content") if isinstance(message, dict) else None
+                        for block in content if isinstance(content, list) else []:
+                            values = [block.get("signature"), block.get("data")] if isinstance(block, dict) else []
+                            if any(isinstance(value, str) and value.startswith("ai-api-responses-reasoning-") for value in values):
+                                self._send_claude_error(400, {
+                                    "code": "incompatible_conversation_state",
+                                    "message": "Saved Responses reasoning cannot be replayed to native Messages.",
+                                })
+                                return
+                # 透传不解析请求体，但配置的思考深度仍要生效：只补 output_config.effort /
+                # thinking，其余字段原样转发。body_json 保持 None，避免走下面的整体规范化。
+                body = apply_reasoning_to_native_messages(provider, body)
+                body_json = None
+            elif claude_bridge_mode:
+                # Validate via the bridge before any ensure_ascii=False re-encoding:
+                # lone surrogate escapes must be a 400, not a disconnected client.
+                try:
+                    body_json = json.loads(body) if body else None
+                except (ValueError, UnicodeError):
+                    body_json = None
+            else:
+                body, body_json = maybe_apply_reasoning(provider, proxied_path, body)
+            convert_response_from = ""
+            conversion_tool_context: dict[str, Any] | None = None
+            downstream_stream = bool(isinstance(body_json, dict) and body_json.get("stream"))
+            claude_state_scope = ""
+            if claude_bridge_mode:
+                if not isinstance(body_json, dict):
+                    self._send_claude_error(400, {"message": "Messages request must be a JSON object."})
+                    return
+                query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
+                upstream_route_path = "/chat/completions" if claude_bridge_mode == "chat" else "/responses"
+                upstream_path = (custom_endpoint or upstream_route_path) + query
+                url = base_url + upstream_path
+                for key in list(headers):
+                    if key.lower() in {"anthropic-version", "anthropic-beta", "content-md5", "digest"}:
+                        headers.pop(key, None)
+                claude_state_scope = anthropic_state_scope(
+                    provider, str(body_json.get("model") or ""), freeze_state_headers(),
+                )
+                try:
+                    body_json = messages_to_upstream(
+                        body_json, claude_bridge_mode, state_scope=claude_state_scope,
+                        reasoning_config=configured_chat_reasoning(provider, body_json),
+                        configured_effort=configured_reasoning_effort(provider, body_json),
+                    )
+                except BridgeError as exc:
+                    self._send_json(exc.status_code, exc.error)
+                    return
+                body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            compaction_turn = False
+            responses_request = self.command == "POST" and route_path in {"/responses", "/responses/compact"}
+            if responses_request and isinstance(body_json, dict):
+                bridge = provider_api_mode in {"chat_completions", "messages"}
+                try:
+                    validate_response_state_destination(body_json, anthropic=provider_api_mode == "messages", native=not bridge)
+                    compaction_turn = bridge and is_compaction_request(body_json, route_path)
+                    body_json = (
+                        prepare_compaction_request(body_json) if compaction_turn
+                        else replay_compaction_items(body_json, native=not bridge)
+                    )
+                except ProtocolStateError as exc:
+                    self._send_json(400, {"error": {
+                        "type": "invalid_request_error", "code": exc.code, "message": str(exc),
+                    }})
+                    return
+                body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            if (
+                responses_request
+                and provider_api_mode in {"chat_completions", "messages"}
+                and isinstance(body_json, dict)
+            ):
+                query = "?" + proxied_path.split("?", 1)[1] if "?" in proxied_path else ""
+                upstream_path = ("/messages" if provider_api_mode == "messages" else "/chat/completions") + query
+                upstream_route_path = "/messages" if provider_api_mode == "messages" else "/chat/completions"
+                url = base_url + upstream_path
+                if provider_api_mode == "messages":
+                    conversion_tool_context = new_codex_tool_context() if compaction_turn else build_codex_tool_context_from_request(body_json)
+                    conversion_tool_context["anthropic_state_scope"] = anthropic_state_scope(
+                        provider, str(body_json.get("model") or ""), freeze_state_headers()
+                    )
+                    try:
+                        body_json = responses_payload_to_anthropic_messages(body_json, conversion_tool_context)
+                    except ProtocolStateError as exc:
+                        self._send_json(400, {"error": {
+                            "type": "invalid_request_error", "code": exc.code, "message": str(exc),
+                        }})
+                        return
+                    convert_response_from = "messages"
+                else:
+                    conversion_tool_context = new_codex_tool_context() if compaction_turn else build_codex_tool_context_from_request(body_json)
+                    body_json = responses_payload_to_chat(
+                        body_json, conversion_tool_context,
+                        reasoning_config=configured_chat_reasoning(provider, body_json),
+                        configured_effort=configured_reasoning_effort(provider, body_json),
+                    )
+                    convert_response_from = "chat"
+                body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            elif self.command == "POST" and upstream_route_path == "/messages" and auth_mode == "anthropic" and isinstance(body_json, dict):
+                body_json = normalize_anthropic_messages_payload(body_json)
+                configured_effort = configured_reasoning_effort(provider, body_json)
+                if configured_effort:
+                    if configured_effort.strip().lower() == "none":
+                        disable_anthropic_thinking(body_json)
+                    else:
+                        apply_anthropic_effort(body_json, configured_effort)
+                body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            if body_json is not None:
+                headers["Content-Type"] = "application/json"
+            if (upstream_route_path == "/messages" or native_messages_passthrough) and not any(
+                key.lower() == "anthropic-version" for key in headers
+            ):
+                headers["anthropic-version"] = str(provider.get("anthropic_version") or DEFAULT_ANTHROPIC_VERSION)
+
+            if session is None:
+                session = self.server.session_pool.borrow(provider_name, provider)
+            preparation_complete = True
+        except (requests.RequestException, UnicodeError):
+            error = {
+                "type": "api_error", "code": "upstream_request_preparation_error",
+                "message": "Could not prepare a valid upstream request.",
+            }
+            if route_path == "/messages":
+                self._send_claude_error(502, error)
+            else:
+                self._send_json(502, {"error": error})
+            return
+        finally:
+            # Before handoff to send_upstream, this phase owns any lazily
+            # borrowed Session. Return it even if preparation or a local error
+            # response fails (including a disconnected downstream client).
+            if not preparation_complete and session is not None:
+                self.server.session_pool.release(provider_name, provider, session)
 
         started = time.time()
 
         def send_upstream(active_session: requests.Session) -> tuple[requests.Response, str]:
-            nonlocal conversion_tool_context
+            nonlocal conversion_tool_context, compaction_turn
             active_convert_response_from = convert_response_from
             timeout = (
                 float(provider.get("connect_timeout") or DEFAULT_CONNECT_TIMEOUT),
@@ -7205,14 +7567,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
             )
             if (
                 self.command == "POST"
-                and upstream_route_path == "/responses"
+                and upstream_route_path in {"/responses", "/responses/compact"}
+                and responses_request
                 and provider.get("fallback_responses_to_chat")
                 and active_resp.status_code in RESPONSES_TO_CHAT_FALLBACK_STATUSES
                 and isinstance(body_json, dict)
             ):
                 active_resp.close()
-                conversion_tool_context = build_codex_tool_context_from_request(body_json)
-                fallback_body_json = responses_payload_to_chat(body_json, conversion_tool_context)
+                validate_response_state_destination(body_json, anthropic=False)
+                compaction_turn = is_compaction_request(body_json, route_path)
+                fallback_input = prepare_compaction_request(body_json) if compaction_turn else replay_compaction_items(body_json)
+                conversion_tool_context = new_codex_tool_context() if compaction_turn else build_codex_tool_context_from_request(fallback_input)
+                fallback_body_json = responses_payload_to_chat(
+                    fallback_input, conversion_tool_context,
+                    reasoning_config=configured_chat_reasoning(provider, body_json),
+                    configured_effort=configured_reasoning_effort(provider, body_json),
+                )
                 fallback_body = json.dumps(fallback_body_json, ensure_ascii=False).encode("utf-8")
                 fallback_url = base_url + "/chat/completions"
                 active_resp = active_session.request(
@@ -7243,24 +7613,85 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
                 session = self.server.session_pool.fresh(provider)
                 resp, convert_response_from = send_upstream(session)
+        except ProtocolStateError as exc:
+            self._send_json(400, {"error": {
+                "type": "invalid_request_error", "code": exc.code, "message": str(exc),
+            }})
+            self.server.session_pool.release(provider_name, provider, session)
+            return
         except Exception as exc:
             self.server.log_error_always(self, "%s %s -> %s proxy_error=%s", provider_name, self.command, url, repr(exc))
-            self._send_text(502, f"proxy error: {type(exc).__name__}: {exc}\n")
+            if claude_bridge_mode:
+                self._send_claude_error(502, {
+                    "code": "upstream_connection_error", "message": "Could not connect to the upstream service.",
+                })
+            else:
+                self._send_text(502, f"proxy error: {type(exc).__name__}: {exc}\n")
             self.server.session_pool.discard(session)
             return
 
         elapsed = time.time() - started
         self.server.log_if_verbose(self, "%s %s %s -> HTTP %s %.2fs", provider_name, self.command, proxied_path, resp.status_code, elapsed)
 
+        if claude_bridge_mode:
+            stream_started = False
+            try:
+                if resp.status_code >= 400:
+                    error = upstream_error_to_openai_error(resp, upstream_route_path, self._request_secrets)
+                    self._send_claude_error(resp.status_code, error)
+                    return
+                response_model = str((body_json or {}).get("model") or "")
+                upstream_sse = "text/event-stream" in str(resp.headers.get("Content-Type") or "").lower()
+                if downstream_stream and upstream_sse:
+                    event_iter = stream_to_messages(
+                        conversion_stream_lines(resp), claude_bridge_mode,
+                        model=response_model, state_scope=claude_state_scope,
+                    )
+                else:
+                    if upstream_sse:
+                        raise BridgeError("Upstream returned SSE for a non-streaming Messages request.",
+                                          status_code=502, code="invalid_upstream_response")
+                    converted = upstream_to_messages(
+                        resp.json(), claude_bridge_mode, model=response_model, state_scope=claude_state_scope,
+                    )
+                    if not downstream_stream:
+                        self._send_json(resp.status_code, converted)
+                        return
+                    event_iter = message_to_events(converted)
+                self._send_response_stream_headers(resp.status_code)
+                stream_started = True
+                for event, payload in event_iter:
+                    self._write_sse_event(event, payload)
+                return
+            except (BridgeError, ValueError, requests.RequestException) as exc:
+                payload = exc.error if isinstance(exc, BridgeError) else {
+                    "type": "error", "error": {
+                        "type": "api_error", "code": "invalid_upstream_response",
+                        "message": "Upstream did not return a valid complete response.",
+                    },
+                }
+                if stream_started:
+                    self._write_sse_event("error", payload)
+                else:
+                    self._send_json(exc.status_code if isinstance(exc, BridgeError) else 502, payload)
+                return
+            finally:
+                resp.close()
+                if should_discard_upstream_response(resp):
+                    self.server.session_pool.discard(session)
+                else:
+                    self.server.session_pool.release(provider_name, provider, session)
+
         if convert_response_from and resp.status_code >= 400:
             try:
                 response_model = str((body_json or {}).get("model") or "")
                 error_source = "/messages" if convert_response_from == "messages" else "/chat/completions"
-                error = upstream_error_to_openai_error(resp, error_source, self._request_secrets)
-                if isinstance(body_json, dict) and body_json.get("stream"):
-                    self._send_responses_error_stream(resp.status_code, error, model=response_model)
+                error = CompactionError().error if compaction_turn else upstream_error_to_openai_error(resp, error_source, self._request_secrets)
+                error_status = 502 if compaction_turn else resp.status_code
+                if downstream_stream:
+                    self._send_responses_error_stream(error_status, error, model=response_model)
                 else:
-                    self._send_json(resp.status_code, {"error": error})
+                    self._send_json(error_status, {"error": error})
                 return
             finally:
                 resp.close()
@@ -7272,7 +7703,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if convert_response_from and resp.status_code < 400:
             try:
                 response_model = str((body_json or {}).get("model") or "")
-                if isinstance(body_json, dict) and body_json.get("stream"):
+                if compaction_turn:
+                    if "text/event-stream" in str(resp.headers.get("Content-Type") or "").lower():
+                        # Atomicity takes priority over accepting an upstream that
+                        # disregards stream:false. Never expose a partial summary.
+                        raise CompactionError()
+                    payload = resp.json()
+                    validate_compaction_source(payload, convert_response_from)
+                    try:
+                        converted = (
+                            messages_payload_to_responses(payload, model=response_model, tool_context=conversion_tool_context)
+                            if convert_response_from == "messages"
+                            else chat_payload_to_responses(payload, model=response_model, tool_context=conversion_tool_context)
+                        )
+                    except (TypeError, AttributeError, OverflowError):
+                        raise CompactionError() from None
+                    converted = compact_response(converted, compact_endpoint=route_path == "/responses/compact")
+                    if downstream_stream:
+                        self._send_responses_payload_as_stream(resp.status_code, converted, model=response_model)
+                    else:
+                        self._send_json(resp.status_code, converted)
+                elif downstream_stream:
                     if "text/event-stream" in str(resp.headers.get("Content-Type") or "").lower():
                         if convert_response_from == "chat":
                             self._send_chat_stream_as_responses(resp, model=response_model, tool_context=conversion_tool_context)
@@ -7296,10 +7747,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self._send_json(resp.status_code, converted)
                 return
             except UpstreamToolCallError as exc:
-                if isinstance(body_json, dict) and body_json.get("stream"):
+                if downstream_stream:
                     self._send_responses_error_stream(502, exc.error, model=response_model)
                 else:
                     self._send_json(502, {"error": exc.error})
+                return
+            except (CompactionError, ValueError, requests.RequestException) as exc:
+                error = CompactionError().error if compaction_turn else {
+                    "type": "api_error", "code": "upstream_invalid_response",
+                    "message": "Upstream did not return a valid complete response.",
+                }
+                if downstream_stream:
+                    self._send_responses_error_stream(502, error, model=response_model)
+                else:
+                    self._send_json(502, {"error": error})
                 return
             finally:
                 resp.close()

@@ -58,11 +58,26 @@ providers:
     # /{provider}/v1/responses，proxy.py 会自动做 Responses ↔ Chat 转换，
     # 包括 function_call/function_call_output ↔ tool_calls/tool 消息以及流式工具参数事件。
     api_mode: chat_completions
+    # Claude Code 也可访问本地 /{provider}/v1/messages，自动转为上游 Chat。
+    # auth_mode 与 api_mode 独立；Chat 通常使用 bearer，Messages 可显式用 bearer。
+    # 可选，默认保持旧模型门控。仅在上游确认支持时配置：
+    # chat_reasoning:
+    #   thinking_param: enable_thinking  # none / thinking / enable_thinking
+    #   effort_param: reasoning_effort  # none / reasoning_effort / reasoning.effort
+    #   effort_map: {ultra: max, xhigh: high}
     stream_max_retries: 5
     models:
       gpt-5.5:
         context_length: 400000
         reasoning_effort: high
+        # 模型级 chat_reasoning 整组覆盖 provider 级配置。
+        # 能力只声明、不自动推断；Chat 下 original 始终为 false。
+        # capabilities:
+        #   supports_parallel_tool_calls: true
+        #   input_modalities: [text, image]
+        #   supports_image_detail_original: false
+        #   supports_search_tool: false
+        #   supported_reasoning_levels: [low, medium, high]
     headers:
       User-Agent: ''
     enabled: true

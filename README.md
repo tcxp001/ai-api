@@ -2,13 +2,17 @@
 
 本地公益服 Provider 管理与 AIProxy 工具。
 
-用途：维护多个上游 API Provider，并通过本地固定入口给 Codex 使用。
+用途：维护多个上游 API Provider，并通过本地固定入口给 Codex、Claude Code 使用。
 
 ## 文件
 
 - `dashboard.py`：Web 管理台后端
 - `dashboard.html`：Web 管理台前端
 - `proxy.py`：AIProxy 转发与协议转换、抢通 + 保温
+- `proxy_content_encoding.py`、`proxy_reasoning.py`、`proxy_state.py`、`proxy_compaction.py`：
+  请求解压、显式推理参数映射、协议状态与原子摘要
+- `proxy_claude.py`、`proxy_claude_stream.py`：Claude Messages 的 JSON 与 SSE 转换
+- `model_capabilities.py`：管理台和代理共用的模型能力校验
 - `codex_keepalive.py`：可选的真实交互式 Codex 会话保活（部署时与 proxy.py 一起复制）
 - `api.py`：测活逻辑
 - `prompts.py`：探活提示词轮换（proxy.py 与 api.py 共用）
@@ -53,6 +57,106 @@ cp config.example.yaml config/config.yaml
 - `messages`：上游为 Anthropic `/messages`；当 Codex 调用本地 `/responses` 时，代理会转换为 Anthropic Messages，并保留工具调用/工具结果、工具定义、`tool_choice`、图片内容与流式 tool_use 事件。
 
 因此可给 Codex 配置多个本地入口，例如 `http://127.0.0.1:18006/DS/v1`、`http://127.0.0.1:18006/bohe/v1`，每个 provider 独立选择自己的 `api_mode`，不需要像单全局 provider 那样切换。
+
+### Codex / Claude Code 协议兼容
+
+`api_mode` 指定**上游协议**，不由 `auth_mode` 推断。认证可独立选择
+`bearer` 或 `anthropic`（`x-api-key`）；配置了 `api_key` 时替换客户端凭据。
+Messages 上游即使用 Bearer 认证，也仍发送 Messages 请求体和 `anthropic-version`。
+
+| 本地请求 | `chat_completions` 上游 | `messages` 上游 | `codex_responses` / `responses` 上游 |
+| --- | --- | --- | --- |
+| Codex `POST /responses` | 转为 Chat，回复转回 Responses | 转为 Messages，回复转回 Responses | 原生转发 |
+| Claude Code `POST /messages` | 转为 Chat，回复转回 Messages | 原生转发 | 转为 Responses，回复转回 Messages |
+
+路径均位于 `/{provider}/v1` 之后。转换支持普通函数工具的多轮调用/结果、文本、
+图片、可表达的 thinking、缓存 usage 和 JSON/SSE；Claude 的上游 JSON 回复可包装为
+完整的 Messages SSE。原生 Messages 在没有配置推理覆盖时保留请求体原始字节。
+
+- Codex Chat 桥将图片 `detail: original` 降为 `auto`；只注册明确的
+  `additional_tools` / `tool_search_output` 工具声明，保留命名空间，不把普通工具数据当定义。
+- 可见推理不是可伪造的签名。Anthropic 签名和 Responses reasoning 用不同的版本化状态
+  包往返，绑定上游地址、实际认证身份及模型；跨账号、模型或不可表示的协议切换返回
+  `incompatible_conversation_state`。此时应回到原上游，或开始不带该状态的新会话。
+  状态包使用 base64 编码，**不加密、不认证内容**，不能当作密钥存储机制。
+  身份校验使用最终有效请求头（包括 Session 自动携带的 Cookie）；账号 Cookie 改变时
+  旧状态也会失效，不会猜测新旧 Cookie 是否属于同一账号。
+  Claude→Responses 使用标准 `include: ["reasoning.encrypted_content"]` 请求可回放推理，
+  不修改上游 `store` 策略；实际能否返回该字段仍取决于上游实现。
+- Claude 桥接保留显式 `custom_endpoint` 及查询参数；`api_mode: messages` 的自定义
+  原生端点同样执行状态检查、版本头补齐，并保留未修改请求的原始字节。
+- 转换流中断/错误不会被当作正常成功结束。没有终止信号的 Codex 部分输出标为 incomplete；
+  未关闭工具不会发送“参数已完成”事件。不会因已开始输出后的失败而重放整次请求。
+- Claude 的上游 HTTP 错误采用 Anthropic error envelope，SSE 中途错误发 `error`，
+  不伪造成功 `message_stop`；原生 Responses→Chat 的旧状态码 fallback 不适用于 Claude 请求。
+- 本次不模拟服务端托管搜索等特殊工具，不实现 OAuth 或 WebSocket。
+  Responses 无 `stop_sequences` 等价字段，Claude→Responses 时省略该字段；
+  无法表示的 opaque thinking、工具类型或损坏的工具参数明确报错，不用占位内容替代。
+  Chat 的 `reasoning_content` 需要上游支持。
+- `GET /responses` 的 WebSocket Upgrade 返回 **426** 和 `websocket_not_supported`，
+  供支持回退的客户端改用 HTTP `POST /responses` + SSE；服务端不建立 WS、不代替客户端重发。
+
+### 模型能力与显式推理映射（可选）
+
+只在确认上游真实支持时声明能力，不按模型名自动开启。模型 `capabilities` 可设置
+`supports_parallel_tool_calls`、`input_modalities`（`text` / `image`）、
+`supports_image_detail_original`、`supports_search_tool` 和 `supported_reasoning_levels`。
+后三项中的搜索标志只是目录声明，不会凭空增加代理的托管搜索转换能力。
+Chat 模式始终不宣称支持图片 `original`。
+
+```yaml
+models:
+  vendor-model:
+    reasoning_effort: high
+    capabilities:
+      supports_parallel_tool_calls: true
+      input_modalities: [text, image]
+      supports_image_detail_original: false
+      supports_search_tool: false
+      supported_reasoning_levels: [low, medium, high]
+    chat_reasoning:
+      thinking_param: enable_thinking
+      effort_param: none
+```
+
+`chat_reasoning` 可放在 provider 或模型下；**模型级整组配置优先**，不合并两组。
+未配置时保留旧模型门控和推理字段行为：
+
+- `thinking_param`：`none`（不写）、`thinking`（`{"type":"enabled"/"disabled"}`）、
+  `enable_thinking`（布尔）。
+- `effort_param`：`none`、`reasoning_effort`、`reasoning.effort`。
+  省略时使用旧模型门控；不认识的 vendor model 不自动写 effort。
+- `effort_map`：显式字符串映射，例如 `{ultra: max, xhigh: high}`，不自动猜档位。
+- 配置 `reasoning_effort: none` 时，显式 thinking 开关会关闭；disabled effort 默认不发，
+  除非在 `effort_map` 中明确映射。既有 provider/model effort 覆盖优先级保持不变。
+- 显式限制 reasoning levels 时，目录、生成的 Codex profile 与代理使用同一默认值：
+  配置值优先；未配置取 `medium`；不在列表则取第一项。未声明能力保持旧默认值。
+
+### 压缩请求与长会话摘要
+
+请求体支持 `identity`、gzip、deflate（zlib/raw）和 zstd；叠加编码按反向顺序解码，
+成功后移除过期实体头，按解码后的 JSON 做协议转换。需要 `requirements.txt` 中的
+`zstandard`；缺少该依赖时仅 zstd 请求返回 503，不影响其他编码。
+不支持的编码返回 415，损坏/截断的压缩体返回 400，不转发到上游。
+
+在 Chat/Messages 桥上，Codex 的 `compaction_trigger` 和 `/responses/compact`
+使用完整历史生成摘要：去掉本轮工具声明，强制上游非流式；**收到完整、成功、非空的
+最终摘要之后**才发布单个 compaction item。错误、工具调用、截断或上游不遵守
+`stream:false` 时返回 502 `compaction_failed`，不能用失败摘要替换历史。
+不新增摘要 token 上限，保留请求预算及既有 Messages 默认预算。
+
+自有摘要是可读文字的版本化 base64 包（不是加密），下一轮还原为带上下文前缀的
+普通消息，可在支持的协议间回放。外部不透明 compaction 状态只能交还原生 Responses
+上游，转换桥返回 400 而不是静默删历史。原生上游自己的压缩接口默认继续原生转发；
+只有原有显式 fallback 配置及 404/405/501 状态满足时才尝试 Chat 桥。
+
+### 发布注意
+
+更新时上述新 Python 模块必须与 `proxy.py`、`dashboard.py` 一起提供，并安装对应依赖，
+不能只复制单个 `proxy.py`。开发验证可使用隔离目录和本地假上游，不必访问真实 provider。
+源文件同步不等于运行进程已加载新版本。当前服务器没有在途请求无损排空/切换机制：
+有活跃 Codex/Claude 会话时不要直接重启；发布应另行安排空闲窗口，本次兼容性代码
+不提供或自动执行热同步、重启。
 
 ## 启动管理台
 
